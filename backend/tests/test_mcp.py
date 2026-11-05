@@ -13,6 +13,7 @@ from multisearch.contracts import (
     ImageSearchResult,
     Modality,
     Mode,
+    ProviderRun,
     SearchBudget,
     SearchRequest,
     SearchResponse,
@@ -56,6 +57,22 @@ def _server(jobs=None, extra_keys=None):
 
     async def search(request: SearchRequest, identity: MachineIdentity, request_id: str):
         identity.require_search(request.modalities)
+        if request.query == "fixture-provider-failure":
+            raise ApiError(
+                502,
+                "PROVIDER_UNAVAILABLE",
+                "当前没有可用的检索来源",
+                retryable=True,
+                provider_runs=[
+                    ProviderRun(
+                        provider_id="searxng",
+                        source_type=Source.WEB,
+                        modality=Modality.TEXT,
+                        status="rate_limited",
+                        elapsed_ms=7,
+                    )
+                ],
+            )
         common = {
             "result_id": "fixture-result",
             "title": "结果示例",
@@ -136,6 +153,12 @@ async def test_official_client_streamable_http_contract(server, mode):
         assert attribution["original_url"] == "https://example.org/image.png"
         assert attribution["thumbnail_url"] == "https://example.org/thumb.png"
         assert attribution["rights_status"] == "unknown"
+
+        unavailable = await client.call_tool("multi_search", {"query": "fixture-provider-failure"})
+        assert unavailable.is_error
+        assert unavailable.structured_content["code"] == "PROVIDER_UNAVAILABLE"
+        assert unavailable.structured_content["provider_runs"][0]["status"] == "rate_limited"
+        assert "fixture-provider-failure" not in unavailable.model_dump_json()
 
 
 async def test_streamable_http_scope_and_validation(server):

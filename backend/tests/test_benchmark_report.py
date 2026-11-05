@@ -1,7 +1,9 @@
 import json
 import subprocess
 import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "ops" / "benchmark_search.py"
 
@@ -47,3 +49,81 @@ def test_offline_review_is_bound_to_original_report(tmp_path):
     rejected = tmp_path / "rejected.json"
     assert run("--review", template, "--output", rejected).returncode != 0
     assert not rejected.exists()
+
+
+def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):
+    received = []
+    run = {
+        "provider_id": "searxng",
+        "status": "rate_limited",
+        "elapsed_ms": 4,
+        "attempts": 1,
+        "count": 0,
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(502)
+            self.send_header("X-Trace-ID", "a" * 32)
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "code": "PROVIDER_UNAVAILABLE",
+                        "provider_runs": [run],
+                    }
+                ).encode()
+            )
+
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        json.dumps(
+            {
+                "id": "a001",
+                "category": "academic",
+                "query": "fixture",
+                "modality": "text",
+                "source_type": "academic",
+                "region": "US",
+                "language": "en",
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "report.json"
+    monkeypatch.setenv("MULTISEARCH_BENCHMARK_KEYS", "fixture")
+    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--api-url",
+                    f"http://127.0.0.1:{server.server_port}",
+                    "--cases",
+                    str(cases),
+                    "--output",
+                    str(output),
+                    "--mode",
+                    "quick",
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+        finally:
+            server.shutdown()
+            thread.join()
+
+    assert received[0]["source_types"] == ["academic"]
+    assert "source_type" not in received[0]
+    report = json.loads(output.read_bytes())
+    assert report["samples"][0]["source_type"] == "academic"
+    assert report["samples"][0]["trace_id"] == "a" * 32
+    assert report["samples"][0]["provider_outcomes"] == [run]
+    summary = report["summary"]["quick:text"]
+    assert summary["provider_rate_limited_ratio"] == 1
+    assert summary["upstream_failures_without_runs"] == 0

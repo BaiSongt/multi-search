@@ -100,6 +100,15 @@ python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.jso
 
 先生成模板并人工打开原始报告中的结果链接。仅当结果直接相关、可访问且正文或图片与查询匹配时标 `true`，判定无效标 `false`，留待复核标 `null`。每个数组严格按同次请求的返回顺序填写。模板和结果绑定原始报告的 SHA-256，全组结果标注完毕后才计算 Top-10 有效率。离线命令无需 Key，也不会重新检索。
 
+学术来源使用独立的 12 条标题、DOI 和 arXiv ID 样本。启用 Crossref 与 arXiv 后，使用具备 `search:text` 作用域的临时 Key。报告保留每条样本的原始文献链接，以及候选的 DOI、arXiv ID 和版本，便于复核同一论文。 [学术样本](../scripts/ops/academic_cases.jsonl)
+
+```sh
+python scripts/ops/benchmark_search.py --cases scripts/ops/academic_cases.jsonl \
+  --concurrency 1 --submit-interval 3.1 --output .secrets/ops/academic-baseline.json
+```
+
+本地索引的独立样本在临时 PostgreSQL 库中运行，覆盖中文和英文查询、筛选、有序结果上限、更新与两租户隔离。公网 Provider 和共享缓存作为故障哨兵，任何意外调用都会使验收失败。 [本地索引探针](../scripts/probe_local_index.py)
+
 不访问公网的基线使用 Mock Provider、真实 PostgreSQL/Redis 和四个临时租户，每轮并发 20。运行示例使用 Python 传递原始脚本字节，兼容 Windows 与 POSIX shell。
 
 ```sh
@@ -118,3 +127,12 @@ python -c "import pathlib, subprocess; subprocess.run(['docker','compose','exec'
 | L2 图片 | 40 / 40 | 1094 / 1234 ms | 99.25% |
 
 文字的 72 次失败均为 HTTP 502 `PROVIDER_UNAVAILABLE`。L2 图片的 40 次成功均标记为 `partial`，两组图片均未取得许可核验证据。HTTP 429 为零。结束时采样记录 API 103.8 MiB、SearXNG 110.4 MiB、Worker 131.6 MiB 内存，CPU 分别为 0.19%、2.11%、100.38%。该采样是瞬时值。Top-10 人工判读尚待完成。
+
+`0.3.0-alpha.2` 在同一台机器复测同一组 200 个请求。两种模式的图片均成功，标准模式的 SearXNG 在全部 40 次图片请求中提供部分结果。75 次文字 502 均带来源诊断。文字请求成功数随上游状态变化，仍需在目标出口复验。
+
+| 模式与模态 | HTTP 200 / 样本 | P50 / P95 | 图片来源页完整率 |
+| --- | ---: | ---: | ---: |
+| L1 文字 | 23 / 60 | 1078 / 2421 ms | — |
+| L2 文字 | 22 / 60 | 985 / 1203 ms | — |
+| L1 图片 | 40 / 40 | 1063 / 1172 ms | 99.50% |
+| L2 图片 | 40 / 40 | 1063 / 1187 ms | 99.25% |
