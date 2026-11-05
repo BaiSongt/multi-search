@@ -168,3 +168,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - Worker 复用 DNS 固定、robots、主机授权和响应体限制。测试覆盖资源拒绝、重定向拒绝、256 KiB 单资源与 512 KiB 合计上限，以及页面和资源间最严格的摘录限制。资源内容变化会更新资源包指纹和证据 ID，即使正文相同。独立 PostgreSQL 复验 REST／MCP 幂等、证据归档、跨租户拒绝和单次计量通过。 [抓取接口](api-contracts.md#证据与任务)
 - 动态配置的八个实际运行镜像均生成 SBOM，并通过严重及高危漏洞扫描门禁。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
 - 同一版本的真实 RFC Editor HTML 探针因 Worker DNS 返回非公网地址而收到 `FETCH_TARGET_BLOCKED`。正向公网正文、跨源资源和人工 Top-10 仍待验收。
+
+### `0.3.0-alpha.10` 复验
+
+- 393 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 工作区回归通过。默认静态配置的七个服务健康，动态能力保持按部署启用。独立动态配置的八个服务健康，API 报告动态抓取可用。
+- 断网 Chromium 157 的 17 个受控用例通过，覆盖跨源普通脚本、模块及 JSON、来源 CSP、CORS、CORP 和 COEP，以及预检和凭据请求阻断。跨源无 CORS 脚本采用保守策略，`CORP: same-site` 要求同源。 [动态部署](deployment.md#可选动态-html-渲染)
+- 隔离 Compose 通过 Worker、Unix socket 和 Chromium 将受控跨源响应生成可定位正文。测试验证了独立的资源主机授权、DNS 与 robots 拒绝、资源指纹及同源行为，并以真实 PostgreSQL 复验 REST／MCP 幂等、证据归档、跨租户隔离和单次计量。 [动态探针](operations.md#公网正文验收)
+- 八个实际运行镜像均生成 SBOM。Trivy 0.76.1 未报告高危或严重漏洞，渲染器 SBOM 含 386 个组件。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
+- 公网 RFC Editor HTML 探针收到 `FETCH_TARGET_BLOCKED`，本次 Worker DNS 仍返回非公网地址。正向公网正文和人工 Top-10 仍待验收。 [公网探针](operations.md#公网正文验收)

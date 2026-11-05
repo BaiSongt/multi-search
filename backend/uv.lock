@@ -444,7 +444,7 @@ wheels = [
 
 [[package]]
 name = "multisearch"
-version = "0.3.0a9"
+version = "0.3.0a10"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
