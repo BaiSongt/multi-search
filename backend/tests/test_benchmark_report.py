@@ -1,11 +1,13 @@
 import json
 import subprocess
 import sys
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Thread
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "ops" / "benchmark_search.py"
+REVIEW_PAGE = SCRIPT.with_name("benchmark_review.py")
 
 
 def test_offline_review_is_bound_to_original_report(tmp_path):
@@ -49,6 +51,111 @@ def test_offline_review_is_bound_to_original_report(tmp_path):
     rejected = tmp_path / "rejected.json"
     assert run("--review", template, "--output", rejected).returncode != 0
     assert not rejected.exists()
+
+
+def test_review_workspace_and_detailed_labels_keep_pending_and_empty_distinct(tmp_path):
+    original, review, output, page = (
+        tmp_path / name
+        for name in (
+            "original.json",
+            "labels.json",
+            "reviewed.json",
+            "workspace.html",
+        )
+    )
+    title = "</script><img src=https://not-a-subresource.example/image.png>"
+    base = {
+        "case_id": "q001",
+        "mode": "quick",
+        "modality": "text",
+        "query": "sample query",
+        "category": "general",
+        "http_status": 200,
+        "code": None,
+        "partial": False,
+        "wall_ms": 10,
+        "provider_runs": 0,
+        "provider_rate_limited_runs": 0,
+    }
+    rows = [
+        {
+            **base,
+            "results": [{"kind": "text", "title": title}, {"kind": "text", "title": "pending"}],
+        },
+        {**base, "mode": "standard", "results": []},
+        {
+            **base,
+            "case_id": "q002",
+            "http_status": 502,
+            "code": "PROVIDER_UNAVAILABLE",
+            "results": [],
+        },
+    ]
+    source = json.dumps({"samples": rows}).encode()
+    original.write_bytes(source)
+    digest = sha256(source).hexdigest()
+    generated = subprocess.run(
+        [sys.executable, str(REVIEW_PAGE), "--report", str(original), "--output", str(page)],
+        capture_output=True,
+        timeout=10,
+    )
+    assert generated.returncode == 0, generated.stderr
+    markup = page.read_text(encoding="utf-8")
+    embedded = markup.split('<script id="report-data" type="application/json">', 1)[1].split(
+        "</script>", 1
+    )[0]
+    document = json.loads(embedded)
+    assert document["report_sha256"] == digest
+    assert document["samples"][0]["results"][0]["title"] == title
+    assert title not in markup
+    assert "default-src 'none'" in markup
+    assert 'element.rel = "noopener noreferrer"' in markup
+
+    judgments = {
+        "report_sha256": digest,
+        "labels": {"q001:quick": [False, None]},
+        "criteria": {"q001:quick": [[None, False, None], [True, None, True]]},
+        "query_decisions": {"q001": True, "q002": None},
+    }
+
+    def score(destination):
+        review.write_text(json.dumps(judgments), encoding="utf-8")
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--report",
+                str(original),
+                "--review",
+                str(review),
+                "--output",
+                str(destination),
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+
+    assert score(output).returncode == 0
+    reviewed = json.loads(output.read_bytes())
+    assert reviewed["review_sha256"] == sha256(review.read_bytes()).hexdigest()
+    assert reviewed["query_review"] == {
+        "approved": 1,
+        "rejected": 0,
+        "pending": 1,
+        "decisions": judgments["query_decisions"],
+    }
+    quick = reviewed["summary"]["quick:text"]
+    assert quick["requests"] == 2 and quick["top10_returned"] == 2 and quick["top10_reviewed"] == 1
+    assert quick["review_coverage"] == 0.5 and quick["top10_valid_ratio"] is None
+    empty = reviewed["summary"]["standard:text"]
+    assert empty["top10_returned"] == 0
+    assert empty["review_coverage"] is None and empty["top10_valid_ratio"] is None
+
+    judgments["labels"]["q001:quick"][1] = True
+    assert score(tmp_path / "inconsistent.json").returncode == 2
+    judgments["labels"]["q001:quick"][1] = None
+    del judgments["query_decisions"]["q002"]
+    assert score(tmp_path / "incomplete-query-decision-keys.json").returncode == 2
 
 
 def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):

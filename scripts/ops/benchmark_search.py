@@ -108,6 +108,7 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
                 "original_url": image.get("original_url"),
                 "source_page_url": image.get("source_page_url"),
                 "rights_status": image.get("rights_status"),
+                "rights_evidence_url": image.get("rights_evidence_url"),
             }
         )
     runs = data.get("provider_runs") or []
@@ -210,10 +211,34 @@ def summaries(rows: list[dict], review: dict) -> dict:
                 if images
                 else None
             ),
+            "top10_returned": n,
+            "top10_reviewed": reviewed,
+            "top10_valid": valid,
             "review_coverage": reviewed / n if n else None,
             "top10_valid_ratio": valid / n if n and reviewed == n else None,
         }
     return result
+
+
+def validate_criteria(criteria: object, expected: dict, submitted: dict) -> None:
+    if not isinstance(criteria, dict) or criteria.keys() != expected.keys():
+        raise ValueError("逐项评审的样本与原始报告不匹配")
+    derived = {}
+    for key, entries in criteria.items():
+        if not isinstance(entries, list) or len(entries) != len(expected[key]):
+            raise ValueError(f"逐项评审的候选数量与原始报告不匹配：{key}")
+        results = []
+        for checks in entries:
+            if (
+                not isinstance(checks, list)
+                or len(checks) != 3
+                or any(check is not None and type(check) is not bool for check in checks)
+            ):
+                raise ValueError(f"逐项评审须包含相关性、可访问性和内容匹配三项：{key}")
+            results.append(False if False in checks else True if None not in checks else None)
+        derived[key] = results
+    if derived != submitted:
+        raise ValueError("候选判定与逐项评审不一致")
 
 
 def review_report(path: Path, review: Path | None) -> dict:
@@ -230,13 +255,36 @@ def review_report(path: Path, review: Path | None) -> dict:
     }
     if review is None:
         return {"report_sha256": digest, "labels": labels}
-    judgments = json.loads(review.read_text(encoding="utf-8-sig"))
+    review_bytes = review.read_bytes()
+    judgments = json.loads(review_bytes.decode("utf-8-sig"))
     if not isinstance(judgments, dict) or judgments.get("report_sha256") != digest:
         raise ValueError("评审与当前基准报告的 SHA-256 不匹配")
     submitted = judgments.get("labels")
     if not isinstance(submitted, dict) or submitted.keys() - labels.keys():
         raise ValueError("评审包含不存在的样本键")
-    return {**report, "reviewed_report_sha256": digest, "summary": summaries(rows, submitted)}
+    if "criteria" in judgments:
+        validate_criteria(judgments["criteria"], labels, submitted)
+    report.pop("query_review", None)
+    if "query_decisions" in judgments:
+        decisions = judgments["query_decisions"]
+        if (
+            not isinstance(decisions, dict)
+            or decisions.keys() != {row["case_id"] for row in rows}
+            or any(value is not None and type(value) is not bool for value in decisions.values())
+        ):
+            raise ValueError("查询审定的样本或判定与原始报告不匹配")
+        report["query_review"] = {
+            "approved": sum(value is True for value in decisions.values()),
+            "rejected": sum(value is False for value in decisions.values()),
+            "pending": sum(value is None for value in decisions.values()),
+            "decisions": decisions,
+        }
+    return {
+        **report,
+        "reviewed_report_sha256": digest,
+        "review_sha256": sha256(review_bytes).hexdigest(),
+        "summary": summaries(rows, submitted),
+    }
 
 
 def write_output(path: Path, payload: dict) -> None:

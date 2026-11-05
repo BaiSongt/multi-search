@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="x-dns-prefetch-control" content="off">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'sha256-{{SCRIPT_HASH}}'; style-src 'unsafe-inline'">
+  <title>MultiSearch 公网基准人工评审</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
+    body { margin: 2rem auto; max-width: 68rem; padding: 0 1rem; }
+    h1, h2, h3 { line-height: 1.3; }
+    header { border-bottom: 1px solid GrayText; margin-bottom: 1rem; }
+    label, button, select, input { font: inherit; }
+    button, select, input[type=file] { max-width: 100%; padding: .4rem; }
+    code { overflow-wrap: anywhere; }
+    nav, .controls, .criteria, .links { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem 1rem; }
+    nav label { flex: 1 1 23rem; }
+    nav select { display: block; width: 100%; }
+    .candidate { border: 1px solid GrayText; border-radius: .45rem; padding: .75rem 1rem; margin: .8rem 0; }
+    .candidate h3 { margin: 0 0 .6rem; overflow-wrap: anywhere; }
+    .criteria { margin-top: .65rem; }
+    .criteria label { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+    a { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MultiSearch 公网基准人工评审</h1>
+    <p>请独立检查候选是否直接相关、当前可访问、页面正文或原图是否与查询匹配。任一项为「否」即无效，三项均为「是」才有效。</p>
+    <p>查询审定单独记录。请判断查询是否明确、可复查，并符合其样本类别。页面不自动打开外部链接，也不自动判断结果。</p>
+    <p>原始报告 SHA-256 <code id="digest"></code></p>
+    <p id="progress" role="status"></p>
+    <div class="controls">
+      <button id="save" type="button">导出当前评审 JSON</button>
+      <label>导入本页导出的评审 JSON <input id="load" type="file" accept=".json,application/json"></label>
+    </div>
+    <p id="notice" role="status"></p>
+  </header>
+  <nav aria-label="检索样本导航">
+    <button id="previous" type="button">上一条</button>
+    <label>按请求选择检索样本 <select id="samples"></select></label>
+    <button id="next" type="button">下一条</button>
+  </nav>
+  <main id="sample"></main>
+  <script id="report-data" type="application/json">{{REPORT_DATA}}</script>
+  <script>
+    "use strict";
+
+    const report = JSON.parse(document.querySelector("#report-data").textContent);
+    const find = selector => document.querySelector(selector);
+    const select = find("#samples");
+    const checks = ["直接相关", "可访问", "内容匹配"];
+    const choices = [["", "待复核"], ["yes", "是"], ["no", "否"]];
+    const byKey = new Map(report.samples.map(sample => [sample.key, sample]));
+    const queryKeys = Object.keys(report.queries);
+    const reviewable = report.samples.filter(sample => sample.results.length);
+    const totalResults = reviewable.reduce((count, sample) => count + sample.results.length, 0);
+    let queryDecisions = new Map(queryKeys.map(key => [key, null]));
+    let criteria = new Map(reviewable.map(sample => [sample.key, sample.results.map(() => checks.map(() => null))]));
+
+    function make(tag, text) {
+      const element = document.createElement(tag);
+      if (text !== undefined) element.textContent = text;
+      return element;
+    }
+
+    function choice(label, value, change) {
+      const element = make("label", label);
+      const input = make("select");
+      for (const [key, text] of choices) input.add(new Option(text, key));
+      input.value = value === null ? "" : value ? "yes" : "no";
+      input.addEventListener("change", () => {
+        change(input.value === "" ? null : input.value === "yes");
+        updateProgress();
+      });
+      element.append(input);
+      return element;
+    }
+
+    function link(label, value) {
+      try {
+        const url = new URL(value);
+        if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
+          const element = make("a", `${label} (${url.hostname})`);
+          element.href = url.href;
+          element.target = "_blank";
+          element.rel = "noopener noreferrer";
+          element.referrerPolicy = "no-referrer";
+          return element;
+        }
+      } catch {
+        // 无可用的公开网页链接。
+      }
+      return make("span", `${label}缺失或无效`);
+    }
+
+    function verdict(values) {
+      if (values.includes(false)) return false;
+      return values.every(value => value === true) ? true : null;
+    }
+
+    function updateProgress() {
+      const judged = [...criteria.values()].flat().filter(values => verdict(values) !== null).length;
+      const reviewedQueries = [...queryDecisions.values()].filter(value => value !== null).length;
+      const progress = totalResults ? `候选已判定 ${judged}/${totalResults}` : "报告无返回候选，无法计算 Top-10 有效率";
+      find("#progress").textContent = `查询已审定 ${reviewedQueries}/${queryKeys.length} · ${progress}`;
+    }
+
+    function show() {
+      const sample = byKey.get(select.value);
+      const query = report.queries[sample.case_id];
+      const status = sample.http_status ? `HTTP ${sample.http_status}` : "传输失败";
+      const heading = make("h2", query.query);
+      const metadata = make("p", [sample.case_id, sample.mode, query.category, query.modality,
+        query.language, query.region, query.source_type, status, sample.code].filter(Boolean).join(" · "));
+      const target = find("#sample");
+      target.replaceChildren(heading, metadata, choice("查询适合作为本类别样本", queryDecisions.get(sample.case_id),
+        value => queryDecisions.set(sample.case_id, value)));
+      find("#previous").disabled = select.selectedIndex <= 0;
+      find("#next").disabled = select.selectedIndex >= report.samples.length - 1;
+
+      if (!sample.results.length) {
+        target.append(make("p", "本请求计入请求统计，贡献 0 条 Top-10 候选。"));
+        return;
+      }
+      sample.results.forEach((result, index) => {
+        const candidate = make("section");
+        candidate.className = "candidate";
+        candidate.append(make("h3", `${index + 1}. ${result.title || "标题缺失"}`));
+        const links = make("div");
+        links.className = "links";
+        if (query.modality === "image") {
+          links.append(link("来源页", result.source_page_url), link("原图", result.original_url),
+            make("span", `授权状态 ${result.rights_status || "unknown"}`));
+          if (result.rights_evidence_url) links.append(link("授权依据", result.rights_evidence_url));
+        } else {
+          links.append(link("候选页面", result.url));
+        }
+        candidate.append(links);
+        if (result.published_at || result.retrieved_at) {
+          candidate.append(make("p", `发布日期 ${result.published_at || "未知"} · 检索时间 ${result.retrieved_at || "未知"}`));
+        }
+        const row = make("div");
+        row.className = "criteria";
+        const values = criteria.get(sample.key)[index];
+        checks.forEach((name, check) => {
+          row.append(choice(name, values[check], value => { values[check] = value; }));
+        });
+        candidate.append(row);
+        target.append(candidate);
+      });
+    }
+
+    function exportReview() {
+      const data = {
+        report_sha256: report.report_sha256,
+        labels: Object.fromEntries([...criteria].map(([key, values]) => [key, values.map(verdict)])),
+        criteria: Object.fromEntries(criteria),
+        query_decisions: Object.fromEntries(queryDecisions),
+      };
+      const file = new Blob([JSON.stringify(data, null, 2) + "\n"], { type: "application/json" });
+      const url = URL.createObjectURL(file);
+      const anchor = make("a");
+      anchor.href = url;
+      anchor.download = `multisearch-review-${report.report_sha256.slice(0, 12)}.json`;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    function exactKeys(object, keys) {
+      return object && typeof object === "object" && !Array.isArray(object)
+        && Object.keys(object).length === keys.length && keys.every(key => Object.hasOwn(object, key));
+    }
+
+    function validChoice(value) {
+      return value === null || typeof value === "boolean";
+    }
+
+    async function importReview(event) {
+      const [file] = event.target.files;
+      if (!file) return;
+      try {
+        const saved = JSON.parse(await file.text());
+        if (saved.report_sha256 !== report.report_sha256) throw new Error("评审与原始报告的 SHA-256 不匹配。");
+        const keys = reviewable.map(sample => sample.key);
+        if (!exactKeys(saved.criteria, keys) || !exactKeys(saved.labels, keys)
+          || !exactKeys(saved.query_decisions, queryKeys) || !Object.values(saved.query_decisions).every(validChoice)) {
+          throw new Error("评审字段与报告不匹配，请使用本页导出的 JSON。");
+        }
+        for (const sample of reviewable) {
+          const values = saved.criteria[sample.key];
+          const labels = saved.labels[sample.key];
+          if (!Array.isArray(values) || !Array.isArray(labels) || values.length !== sample.results.length
+            || labels.length !== values.length || values.some((entry, index) => !Array.isArray(entry)
+              || entry.length !== checks.length || !entry.every(validChoice) || verdict(entry) !== labels[index])) {
+            throw new Error(`评审 ${sample.key} 的候选顺序或标注无效。`);
+          }
+        }
+        criteria = new Map(Object.entries(saved.criteria));
+        queryDecisions = new Map(Object.entries(saved.query_decisions));
+        show();
+        updateProgress();
+        find("#notice").textContent = "已导入评审。";
+      } catch (error) {
+        find("#notice").textContent = error instanceof SyntaxError ? "无法读取评审 JSON。" : error.message;
+      } finally {
+        event.target.value = "";
+      }
+    }
+
+    for (const sample of report.samples) {
+      const query = report.queries[sample.case_id];
+      select.add(new Option(`${sample.key} · ${query.modality} · ${sample.results.length} 条 · ${query.query}`, sample.key));
+    }
+    select.addEventListener("change", show);
+    find("#previous").addEventListener("click", () => { select.selectedIndex--; show(); });
+    find("#next").addEventListener("click", () => { select.selectedIndex++; show(); });
+    find("#save").addEventListener("click", exportReview);
+    find("#load").addEventListener("change", importReview);
+    find("#digest").textContent = report.report_sha256;
+    updateProgress();
+    show();
+  </script>
+</body>
+</html>
