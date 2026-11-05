@@ -4,9 +4,11 @@
 
 ## 简体中文
 
-MultiSearch 是可独立部署的通用检索平台。当前预发布版本为 `0.3.0-alpha.15`。
+MultiSearch 是可独立部署的通用检索平台。当前预发布版本为 `0.3.0-alpha.16`。
 
 REST 和 MCP 支持网页文字、新闻和图片检索。平台通过 DDGS 与 SearXNG 提供模式选择、预算、回退、融合去重和来源追踪。开发者可管理 API Key、查看用量并在 Playground 检索。管理员可查看请求与审计、配置 Provider 和租户配额。
+
+部署方可启用 Wikipedia，为英文和中文公网文字检索补充百科条目。 [候补配置](docs/deployment.md#可选-wikipedia-候补)
 
 API Key 可限制来源 IP。用户可在账户设置查看并撤销本人当前租户的其他会话。 [地址校验部署](docs/deployment.md#api-key-的-ip-白名单)
 
@@ -41,9 +43,11 @@ docker compose up --build --wait
 
 ## English
 
-MultiSearch is a self-hosted general-purpose search platform. The current prerelease is `0.3.0-alpha.15`。
+MultiSearch is a self-hosted general-purpose search platform. The current prerelease is `0.3.0-alpha.16`.
 
 REST and MCP support web text, news, and image search. DDGS and SearXNG supply candidates with mode selection, budgets, fallback, deduplication, and source tracking. Developers can manage API keys, see usage, and search in the Playground. Administrators can inspect requests and audit events, configure providers, and manage tenant quotas.
+
+Operators can enable Wikipedia as a fallback for English and Chinese public web text search. [Fallback configuration](docs/deployment.md#可选-wikipedia-候补)
 
 API keys can restrict client IP addresses. Account settings let users view and revoke their other sessions in the current tenant. [Client address configuration](docs/deployment.md#api-key-的-ip-白名单)
 

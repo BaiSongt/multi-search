@@ -230,3 +230,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 用相同八条文字查询和 3.1 秒请求间隔各测 L1、L2。`0.3.0-alpha.10` 基线返回候选 4／16，`0.3.0-alpha.15` 返回候选 8／16，均为开发文档样本。通用知识两版均为 0／8。实际来源尝试由 9 次变为 16 次，因熔断跳过的来源从 23 次变为 16 次。候选版的 8 次 502 中，6 次带冷却重试提示。两轮从不同熔断状态启动，公网结果属于小样本观测。 [基准方法](operations.md#性能与质量基线)
 - 四租户的 20 并发 Mock Provider 基准完成 40 次冷请求、40 次缓存命中和 80 条完成记录。冷请求 P50 为 138.544 ms，P95 为 193.481 ms，P99 为 201.392 ms。
 - 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。RFC Editor 公网正文探针收到 `FETCH_TARGET_BLOCKED`，Worker DNS 返回了非公网地址。完整公网覆盖、正向公网正文和人工 Top-10 有效率待验收。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
+
+### `0.3.0-alpha.16` 复验
+
+- 499 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 工作区回归通过。Chromium 验证 Wikipedia 的地区、日期和单上游并发声明。隔离 Compose 的八个服务健康，同源与跨源动态抓取、证据归档和 REST／MCP 单次计量复验通过。API 和 Worker 的检索模块与工作区源码摘要一致。
+- 选用四条原基准通用知识主题，省略独立地区字段，两轮各按 6.2 秒间隔执行 L1、L2。关闭 Wikipedia 时 1／8 次有候选，开启后 8／8 次有候选，38 条候选的 `provider_ids` 均含 `wikipedia`。两轮使用同一候选版本，分次执行并重建 API 进程。上游条件可能变化，这次对照仅覆盖所选样本。 [基准方法](operations.md#性能与质量基线)
+- 最终镜像添加 `maxlag=5` 后，以一条英文和一条中文查询再次验证 L1、L2，4／4 次均返回由 Wikipedia 提供的候选，共 18 条。响应保留标题与条目链接。条目能否回答故宫开放时间等实时问题仍需核对官方来源。 [候补部署](deployment.md#可选-wikipedia-候补)
+- 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
+- RFC Editor 公网正文探针收到 `FETCH_TARGET_BLOCKED`。Worker 对 RFC Editor、英中 Wikipedia 等七个公开站点均解析到 `198.18.0.0/15`，触发非公网地址拒绝。完整公网覆盖、正向公网正文和人工 Top-10 有效率待验收。 [公网探针](operations.md#公网正文验收)
