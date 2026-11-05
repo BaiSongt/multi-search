@@ -11,6 +11,7 @@ from hashlib import sha256
 from time import monotonic
 from typing import TYPE_CHECKING, Literal
 from unicodedata import category, normalize
+from urllib.parse import urlsplit
 
 from lxml import etree, html
 
@@ -79,12 +80,17 @@ _HIDDEN = {
 }
 _BOT_NAMES = {"robots", "multisearchbot"}
 _DOI = re.compile(r"10\.\d{4,9}/[!-~]+", re.IGNORECASE)
+_COEP = re.compile(
+    r'(unsafe-none|require-corp|credentialless)(?:[ \t]*;[ \t]*report-to="[\x20\x21\x23-\x5b\x5d-\x7e]{1,256}")?'
+)
 _BLOCKED_FETCH_CODES = {
     "FETCH_TARGET_BLOCKED",
     "FETCH_ROBOTS_DENIED",
     "FETCH_ROBOTS_UNAVAILABLE",
     "FETCH_RENDER_POLICY_UNSUPPORTED",
     "FETCH_RESOURCE_REDIRECT",
+    "FETCH_RESOURCE_CORS_DENIED",
+    "FETCH_RESOURCE_POLICY_UNSUPPORTED",
     "FETCH_SITE_RESTRICTED",
 }
 
@@ -258,6 +264,7 @@ class EvidenceBuilder:
         record_attempt: Callable[[str | None, FetchStatus], None] | None = None,
         renderer: DynamicRenderer | None = None,
         dynamic_hosts: frozenset[str] = frozenset(),
+        dynamic_resource_hosts: frozenset[str] = frozenset(),
         dynamic_resources: Mapping[str, tuple[ResourceSpec, ...]] | None = None,
     ):
         self.fetcher = fetcher
@@ -266,6 +273,7 @@ class EvidenceBuilder:
         self.record_attempt = record_attempt
         self.renderer = renderer
         self.dynamic_hosts = dynamic_hosts
+        self.dynamic_resource_hosts = dynamic_resource_hosts
         self.dynamic_resources = dict(dynamic_resources or {})
 
     async def extract(
@@ -475,8 +483,19 @@ class EvidenceBuilder:
             raise FetchError(
                 415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染需要有效的 UTF-8 HTML"
             ) from None
+        specs = self.dynamic_resources.get(page.url, ())
+        page_host = urlsplit(page.url).netloc
+        cross_origin = any(urlsplit(spec.url).netloc != page_host for spec in specs)
+        source_coep = None
+        if cross_origin and (policies := page.cross_origin_embedder_policy):
+            parsed = _COEP.fullmatch(policies[0].strip()) if len(policies) == 1 else None
+            if parsed is None:
+                raise FetchError(
+                    403, "FETCH_RENDER_POLICY_UNSUPPORTED", "无法安全保留来源页面的跨源嵌入策略"
+                )
+            source_coep = parsed[1]
         resources = await self._prefetch_resources(
-            page.url, deadline, domain_allowlist, domain_denylist
+            page.url, specs, deadline, domain_allowlist, domain_denylist
         )
         bundle_sha = None
         resource_limit = None
@@ -487,19 +506,9 @@ class EvidenceBuilder:
                 resources,
                 timeout_s=deadline - monotonic(),
                 source_csp=source_csp or None,
+                source_coep=source_coep,
             )
-            inputs = [
-                (
-                    asset.url,
-                    asset.kind,
-                    asset.content_type,
-                    sha256(asset.body.encode("utf-8")).hexdigest(),
-                )
-                for asset in sorted(resources, key=lambda asset: asset.url)
-            ]
-            bundle_sha = sha256(
-                json.dumps(inputs, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
+            bundle_sha = _bundle_digest(resources, cross_origin, source_coep)
             resource_limit = min(
                 (asset.max_snippet for asset in resources if asset.max_snippet is not None),
                 default=None,
@@ -516,13 +525,14 @@ class EvidenceBuilder:
     async def _prefetch_resources(
         self,
         page_url: str,
+        specs: tuple[ResourceSpec, ...],
         deadline: float,
         domain_allowlist: Sequence[str],
         domain_denylist: Sequence[str],
     ) -> list[FetchedResource]:
         remaining_bytes = MAX_RESOURCE_BUNDLE_BYTES
         resources = []
-        for spec in self.dynamic_resources.get(page_url, ()):
+        for spec in specs:
             if remaining_bytes <= 0:
                 raise FetchError(413, "FETCH_BODY_TOO_LARGE", "动态资源总响应超过上限")
             asset = await self.fetcher.fetch_resource(
@@ -530,6 +540,7 @@ class EvidenceBuilder:
                 page_url=page_url,
                 timeout_s=deadline - monotonic(),
                 authorized_hosts=self.dynamic_hosts,
+                authorized_resource_hosts=self.dynamic_resource_hosts,
                 domain_allowlist=domain_allowlist,
                 domain_denylist=domain_denylist,
                 max_body_bytes=min(MAX_RESOURCE_BYTES, remaining_bytes),
@@ -537,3 +548,17 @@ class EvidenceBuilder:
             remaining_bytes -= len(asset.body.encode("utf-8"))
             resources.append(asset)
         return resources
+
+
+def _bundle_digest(
+    resources: list[FetchedResource], cross_origin: bool, source_coep: str | None
+) -> str:
+    items = []
+    for asset in sorted(resources, key=lambda item: item.url):
+        body_sha = sha256(asset.body.encode("utf-8")).hexdigest()
+        item: tuple[str | None, ...] = (asset.url, asset.kind, asset.content_type, body_sha)
+        if cross_origin:
+            item += (asset.allow_origin, asset.resource_policy)
+        items.append(item)
+    inputs = {"resources": items, "source_coep": source_coep} if cross_origin else items
+    return sha256(json.dumps(inputs, separators=(",", ":")).encode("utf-8")).hexdigest()

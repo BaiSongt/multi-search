@@ -205,7 +205,14 @@ async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_finger
     result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
     assert result.evidence_text == "Genera"
     assert result.extraction_version == "renderer.2+normalizer.1"
-    assert len(result.render_bundle_sha256) == 64
+    legacy_inputs = [
+        (asset.url, asset.kind, asset.content_type, sha256(asset.body.encode()).hexdigest())
+        for asset in [json_asset, script_asset]
+    ]
+    assert (
+        result.render_bundle_sha256
+        == sha256(json.dumps(legacy_inputs, separators=(",", ":")).encode()).hexdigest()
+    )
     assert renderer.render_bundle.await_args.args[0] == CANONICAL
     assert renderer.render_bundle.await_args.args[2] == [script_asset, json_asset]
     renderer.render.assert_not_awaited()
@@ -218,6 +225,56 @@ async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_finger
     assert changed.content_sha256 == result.content_sha256
     assert changed.render_bundle_sha256 != result.render_bundle_sha256
     assert changed.evidence_id != result.evidence_id
+
+
+async def test_dynamic_cross_bundle_preserves_embedder_policy_and_fingerprints_cors():
+    spec = ResourceSpec("https://cdn.example.net/data", "json")
+    asset = FetchedResource(
+        spec.url,
+        "json",
+        "application/json",
+        "{}",
+        allow_origin="*",
+        resource_policy="cross-origin",
+    )
+    fetcher = FakeFetcher("<p>Shell</p>")
+    fetcher.page = replace(
+        fetcher.page, cross_origin_embedder_policy=('require-corp; report-to="origin report"',)
+    )
+    fetcher.fetch_resource = AsyncMock(return_value=asset)
+    renderer = Mock(
+        render_bundle=AsyncMock(
+            return_value=RenderedHTML("<html><body><p>Generated</p></body></html>", "renderer.3")
+        )
+    )
+    resource_hosts = frozenset({"cdn.example.net"})
+    builder = EvidenceBuilder(
+        fetcher,
+        renderer=renderer,
+        dynamic_hosts=frozenset({"source.example"}),
+        dynamic_resource_hosts=resource_hosts,
+        dynamic_resources={CANONICAL: (spec,)},
+    )
+    first = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert renderer.render_bundle.await_args.kwargs["source_coep"] == "require-corp"
+    assert fetcher.fetch_resource.await_args.kwargs["authorized_resource_hosts"] == resource_hosts
+    assert first.extraction_version == "renderer.3+normalizer.1"
+    fetcher.fetch_resource.return_value = replace(asset, allow_origin="https://source.example")
+    second = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert first.content_sha256 == second.content_sha256
+    assert first.render_bundle_sha256 != second.render_bundle_sha256
+    assert first.evidence_id != second.evidence_id
+
+    fetcher.page = replace(
+        fetcher.page, cross_origin_embedder_policy=("require-corp", "unsafe-none")
+    )
+    fetcher.fetch_resource.reset_mock()
+    renderer.render_bundle.reset_mock()
+    with pytest.raises(FetchError) as invalid:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert invalid.value.code == "FETCH_RENDER_POLICY_UNSUPPORTED"
+    fetcher.fetch_resource.assert_not_awaited()
+    renderer.render_bundle.assert_not_awaited()
 
 
 async def test_dynamic_bundle_is_not_rendered_if_a_required_resource_is_blocked():

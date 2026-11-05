@@ -36,6 +36,7 @@ def build_evidence(
         parser,
         renderer=renderer,
         dynamic_hosts=config.dynamic_fetch_domains,
+        dynamic_resource_hosts=config.dynamic_fetch_resource_domains,
         dynamic_resources=config.dynamic_fetch_resources,
         record_attempt=fetch_metrics.record,
     )

@@ -32,6 +32,17 @@ def test_resource_manifest_preserves_exact_page_and_resource_queries():
     assert parse_resource_manifest("") == {}
 
 
+def test_resource_manifest_cross_origin_requires_an_explicit_exact_host():
+    external = "https://cdn.example/app.js"
+    value = json.dumps({PAGE: [{"url": external, "kind": "script"}]})
+    for hosts in (frozenset(), frozenset({"example"}), frozenset({"other.cdn.example"})):
+        with pytest.raises(ValueError, match="MULTISEARCH_DYNAMIC_FETCH_RESOURCES"):
+            parse_resource_manifest(value, authorized_resource_hosts=hosts)
+    assert parse_resource_manifest(value, authorized_resource_hosts=frozenset({"cdn.example"})) == {
+        PAGE: (ResourceSpec(external, "script"),)
+    }
+
+
 @pytest.mark.parametrize(
     "url",
     [

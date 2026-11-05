@@ -53,6 +53,7 @@ _RESOURCE_MIME = re.compile(
     r'(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:"[a-z0-9-]+"|[a-z0-9-]+))?[ \t]*',
     re.IGNORECASE | re.ASCII,
 )
+_RESOURCE_POLICIES = frozenset({"same-origin", "same-site", "cross-origin"})
 MAX_RESOURCE_BYTES = 256 * 1024
 
 
@@ -70,6 +71,9 @@ class FetchedPage:
     charset: str | None = None
     max_snippet: int | None = None
     content_security_policy: tuple[str, ...] = ()
+    cross_origin_embedder_policy: tuple[str, ...] = ()
+    allow_origin: str | None = None
+    resource_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,8 @@ class FetchedResource:
     content_type: str
     body: str
     max_snippet: int | None = None
+    allow_origin: str | None = None
+    resource_policy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +118,9 @@ class _Response:
     body: bytes = b""
     max_snippet: int | None = None
     content_security_policy: tuple[str, ...] = ()
+    cross_origin_embedder_policy: tuple[str, ...] = ()
+    allow_origin: str | None = None
+    resource_policy: str | None = None
 
 
 @dataclass
@@ -294,6 +303,23 @@ def snippet_limit(directives: Sequence[str]) -> int | None:
     return limit
 
 
+def _cross_origin_policies(
+    headers: httpx.Headers, page_origin: str, content_type: str
+) -> tuple[str | None, str | None]:
+    origins = headers.get_list("access-control-allow-origin")
+    allow_origin = origins[0].strip(" \t") if len(origins) == 1 else None
+    if allow_origin not in {"*", page_origin}:
+        if content_type == "application/json":
+            raise FetchError(403, "FETCH_RESOURCE_CORS_DENIED", "来源未授权页面读取跨源 JSON")
+        # 普通脚本可在 no-cors 模式加载，模块和 CORS 脚本由浏览器检查。
+        allow_origin = None
+    policies = headers.get_list("cross-origin-resource-policy")
+    resource_policy = policies[0].strip(" \t") if len(policies) == 1 else None
+    if policies and resource_policy not in _RESOURCE_POLICIES:
+        raise FetchError(403, "FETCH_RESOURCE_POLICY_UNSUPPORTED", "跨源资源策略格式无效")
+    return allow_origin, resource_policy
+
+
 def _redirect(target: _Target, location: str | None) -> _Target:
     if not location:
         raise FetchError(502, "FETCH_REDIRECT_INVALID", "来源重定向缺少目标地址")
@@ -342,14 +368,22 @@ class SafeFetcher:
         page_url: str,
         timeout_s: float,
         authorized_hosts: frozenset[str],
+        authorized_resource_hosts: frozenset[str] = frozenset(),
         network_scope: Scope | str = Scope.PUBLIC,
         domain_allowlist: Sequence[str] = (),
         domain_denylist: Sequence[str] = (),
         max_body_bytes: int = MAX_RESOURCE_BYTES,
     ) -> FetchedResource:
         page, resource = render_target(page_url), render_target(spec.url)
-        if not authorized_hosts or resource.origin != page.origin or resource.url == page.url:
+        cross_origin = resource.origin != page.origin
+        if (
+            not authorized_hosts
+            or (cross_origin and not authorized_resource_hosts)
+            or resource.url == page.url
+        ):
             raise _blocked()
+        _check_dynamic_hosts(page, authorized_hosts)
+        _check_domains(page, domain_allowlist, domain_denylist)
         if max_body_bytes < 1:
             raise FetchError(413, "FETCH_BODY_TOO_LARGE", "渲染资源超出抓取上限")
         fetched = await self._fetch(
@@ -358,10 +392,11 @@ class SafeFetcher:
             network_scope=network_scope,
             domain_allowlist=domain_allowlist,
             domain_denylist=domain_denylist,
-            authorized_hosts=authorized_hosts,
+            authorized_hosts=authorized_resource_hosts if cross_origin else authorized_hosts,
             content_types=_RESOURCE_TYPES[spec.kind],
             max_body_bytes=min(self._max_body_bytes, MAX_RESOURCE_BYTES, max_body_bytes),
             resource_request=True,
+            request_origin=page.origin if cross_origin else None,
         )
         if fetched.charset not in {None, "utf-8", "utf8", "us-ascii", "ascii"}:
             raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "渲染资源必须使用 UTF-8")
@@ -371,7 +406,13 @@ class SafeFetcher:
         except UnicodeDecodeError:
             raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "渲染资源必须使用 UTF-8") from None
         return FetchedResource(
-            fetched.url, spec.kind, fetched.content_type, body, fetched.max_snippet
+            fetched.url,
+            spec.kind,
+            fetched.content_type,
+            body,
+            fetched.max_snippet,
+            fetched.allow_origin,
+            fetched.resource_policy,
         )
 
     async def _fetch(
@@ -386,6 +427,7 @@ class SafeFetcher:
         content_types: frozenset[str],
         max_body_bytes: int,
         resource_request: bool = False,
+        request_origin: str | None = None,
     ) -> FetchedPage:
         if network_scope != Scope.PUBLIC:
             raise _blocked()
@@ -418,7 +460,11 @@ class SafeFetcher:
                             await asyncio.sleep(wait)
                         rules.ready_at = monotonic() + rules.delay
                         response = await self._request(
-                            target, content_types, max_body_bytes, resource_request=resource_request
+                            target,
+                            content_types,
+                            max_body_bytes,
+                            resource_request=resource_request,
+                            request_origin=request_origin,
                         )
                     if response.status not in _REDIRECTS:
                         return self._page(origin_url, target, response)
@@ -484,6 +530,7 @@ class SafeFetcher:
         max_bytes: int,
         *,
         resource_request: bool = False,
+        request_origin: str | None = None,
     ) -> _Response:
         try:
             literal = ip_address(target.host)
@@ -497,6 +544,14 @@ class SafeFetcher:
         address = next(
             (value for value in addresses if isinstance(value, IPv4Address)), addresses[0]
         )
+        headers = {
+            "Host": target.authority,
+            "User-Agent": _USER_AGENT,
+            "Accept": ", ".join(sorted(content_types)),
+            "Accept-Encoding": "identity",
+        }
+        if request_origin is not None:
+            headers["Origin"] = request_origin
         async with (
             httpx.AsyncClient(
                 transport=_transport(), trust_env=False, follow_redirects=False
@@ -504,12 +559,7 @@ class SafeFetcher:
             client.stream(
                 "GET",
                 target.pin(address),
-                headers={
-                    "Host": target.authority,
-                    "User-Agent": _USER_AGENT,
-                    "Accept": ", ".join(sorted(content_types)),
-                    "Accept-Encoding": "identity",
-                },
+                headers=headers,
                 extensions={"sni_hostname": target.host},
                 timeout=None,
             ) as response,
@@ -536,6 +586,11 @@ class SafeFetcher:
             mime = Message()
             mime["Content-Type"] = mime_header
             maximum = snippet_limit(response.headers.get_list("x-robots-tag"))
+            allow_origin, resource_policy = (
+                _cross_origin_policies(response.headers, request_origin, kind)
+                if request_origin is not None
+                else (None, None)
+            )
             length = response.headers.get("content-length")
             if (
                 length is not None
@@ -558,6 +613,11 @@ class SafeFetcher:
                 body=bytes(body),
                 max_snippet=maximum,
                 content_security_policy=tuple(response.headers.get_list("content-security-policy")),
+                cross_origin_embedder_policy=tuple(
+                    response.headers.get_list("cross-origin-embedder-policy")
+                ),
+                allow_origin=allow_origin,
+                resource_policy=resource_policy,
             )
 
     @staticmethod
@@ -571,12 +631,15 @@ class SafeFetcher:
         if response.status != 200:
             raise FetchError(502, "FETCH_UNAVAILABLE", "来源未返回可提取的正文", retryable=True)
         return FetchedPage(
-            origin_url,
-            target.url,
-            response.content_type,
-            response.body,
-            datetime.now(UTC),
-            response.charset,
-            response.max_snippet,
-            response.content_security_policy,
+            origin_url=origin_url,
+            url=target.url,
+            content_type=response.content_type,
+            body=response.body,
+            retrieved_at=datetime.now(UTC),
+            charset=response.charset,
+            max_snippet=response.max_snippet,
+            content_security_policy=response.content_security_policy,
+            cross_origin_embedder_policy=response.cross_origin_embedder_policy,
+            allow_origin=response.allow_origin,
+            resource_policy=response.resource_policy,
         )

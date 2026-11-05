@@ -86,6 +86,54 @@ async def test_renderer_sends_bounded_bundle_and_omits_resource_policy_metadata(
     assert seen == ["/render-bundle"]
 
 
+async def test_renderer_transmits_only_normalized_cross_origin_policies():
+    page = "https://docs.example.org/guide"
+    asset = FetchedResource(
+        "https://cdn.example.net/data",
+        "json",
+        "application/json",
+        "{}",
+        allow_origin="https://docs.example.org",
+        resource_policy="cross-origin",
+    )
+    calls = []
+
+    def service(request):
+        payload = json.loads(request.content)
+        calls.append(payload)
+        return httpx.Response(
+            200, json={"html": "<p>Done</p>", "version": "chromium.157.renderer.3"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(service)) as client:
+        renderer = DynamicRenderer(client, TOKEN)
+        assert await renderer.render_bundle(
+            page, "<p>Shell</p>", [asset], timeout_s=1, source_coep="require-corp"
+        ) == RenderedHTML("<p>Done</p>", "chromium.157.renderer.3")
+        assert (
+            await renderer.render_bundle(
+                page,
+                "<p>Shell</p>",
+                [asset],
+                timeout_s=1,
+                source_coep="require-corp\r\nunsafe-none",
+            )
+            is None
+        )
+    (payload,) = calls
+    assert payload["source_coep"] == "require-corp"
+    assert payload["resources"] == [
+        {
+            "url": asset.url,
+            "kind": "json",
+            "content_type": "application/json",
+            "body": "{}",
+            "allow_origin": "https://docs.example.org",
+            "resource_policy": "cross-origin",
+        }
+    ]
+
+
 async def test_renderer_connect_uses_fixed_unix_socket_without_proxy_or_retries():
     transport = httpx.MockTransport(lambda _request: httpx.Response(200))
     with patch(
@@ -210,3 +258,26 @@ def test_dynamic_manifest_is_scoped_to_deployment_domains(monkeypatch):
     monkeypatch.setenv("MULTISEARCH_DYNAMIC_FETCH_DOMAINS", "other.example.org")
     with pytest.raises(ValueError, match="MULTISEARCH_DYNAMIC_FETCH_DOMAINS"):
         Settings.from_env()
+
+
+def test_cross_origin_manifest_requires_an_independent_exact_resource_domain(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://fixture/fixture")
+    monkeypatch.delenv("API_KEY_HASH_PEPPER_FILE", raising=False)
+    monkeypatch.setenv("API_KEY_HASH_PEPPER", TOKEN)
+    monkeypatch.setenv("MULTISEARCH_DYNAMIC_FETCH_DOMAINS", "docs.example.org,cdn.example.net")
+    monkeypatch.setenv("MULTISEARCH_ENABLE_DYNAMIC_FETCH", "false")
+    page = "https://docs.example.org/guide"
+    asset = "https://cdn.example.net/app.js"
+    monkeypatch.setenv(
+        "MULTISEARCH_DYNAMIC_FETCH_RESOURCES",
+        json.dumps({page: [{"url": asset, "kind": "script"}]}),
+    )
+    with pytest.raises(ValueError, match="MULTISEARCH_DYNAMIC_FETCH_RESOURCES"):
+        Settings.from_env()
+    monkeypatch.setenv("MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS", "*.example.net")
+    with pytest.raises(ValueError, match="MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS"):
+        Settings.from_env()
+    monkeypatch.setenv("MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS", "CDN.example.net")
+    settings = Settings.from_env()
+    assert settings.dynamic_fetch_resource_domains == frozenset({"cdn.example.net"})
+    assert settings.dynamic_fetch_resources[page][0].url == asset

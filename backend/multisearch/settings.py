@@ -19,8 +19,8 @@ def secret(name: str) -> str:
     return os.getenv(name, "")
 
 
-def _dynamic_fetch_domains() -> frozenset[str]:
-    value = os.getenv("MULTISEARCH_DYNAMIC_FETCH_DOMAINS", "").strip()
+def _dynamic_domains(name: str) -> frozenset[str]:
+    value = os.getenv(name, "").strip()
     if not value:
         return frozenset()
     hosts = [host.strip() for host in value.split(",")]
@@ -28,13 +28,13 @@ def _dynamic_fetch_domains() -> frozenset[str]:
         not host.isascii() or len(host) > 253 or _DYNAMIC_DOMAIN.fullmatch(host.lower()) is None
         for host in hosts
     ):
-        raise ValueError("MULTISEARCH_DYNAMIC_FETCH_DOMAINS 需要逗号分隔的精确公网域名")
+        raise ValueError(f"{name} 需要逗号分隔的精确公网域名")
     domains = frozenset(host.lower() for host in hosts)
     try:
         for host in domains:
             validate_fetch_url(f"https://{host}/")
     except FetchError:
-        raise ValueError("MULTISEARCH_DYNAMIC_FETCH_DOMAINS 需要逗号分隔的精确公网域名") from None
+        raise ValueError(f"{name} 需要逗号分隔的精确公网域名") from None
     return domains
 
 
@@ -65,6 +65,7 @@ class Settings:
     research_output_per_million_tokens: str = ""
     deployment_policy: DeploymentPolicy = field(default_factory=DeploymentPolicy)
     dynamic_fetch_domains: frozenset[str] = frozenset()
+    dynamic_fetch_resource_domains: frozenset[str] = frozenset()
     enable_dynamic_fetch: bool = False
     renderer_token: str = field(default="", repr=False)
     dynamic_fetch_resources: dict[str, tuple[ResourceSpec, ...]] = field(
@@ -101,13 +102,15 @@ class Settings:
         crawl4ai_token = secret("CRAWL4AI_API_TOKEN")
         if crawl4ai_url and (crawl4ai_url != "http://crawl4ai:11235" or len(crawl4ai_token) < 32):
             raise ValueError("Crawl4AI 需要固定内部地址及专用令牌")
-        dynamic_domains = _dynamic_fetch_domains()
+        dynamic_domains = _dynamic_domains("MULTISEARCH_DYNAMIC_FETCH_DOMAINS")
+        resource_domains = _dynamic_domains("MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS")
         dynamic_enabled = (
             bool(dynamic_domains)
             and os.getenv("MULTISEARCH_ENABLE_DYNAMIC_FETCH", "false").lower() == "true"
         )
         dynamic_resources = parse_resource_manifest(
-            os.getenv("MULTISEARCH_DYNAMIC_FETCH_RESOURCES", "")
+            os.getenv("MULTISEARCH_DYNAMIC_FETCH_RESOURCES", ""),
+            authorized_resource_hosts=resource_domains,
         )
         if any(urlsplit(page).hostname not in dynamic_domains for page in dynamic_resources):
             raise ValueError("动态资源清单的页面主机须在 MULTISEARCH_DYNAMIC_FETCH_DOMAINS 中")
@@ -142,6 +145,7 @@ class Settings:
             ),
             deployment_policy=load_deployment_policy(os.getenv("MULTISEARCH_POLICY_FILE", "")),
             dynamic_fetch_domains=dynamic_domains,
+            dynamic_fetch_resource_domains=resource_domains,
             enable_dynamic_fetch=dynamic_enabled,
             renderer_token=secret("MULTISEARCH_RENDERER_TOKEN") if dynamic_enabled else "",
             dynamic_fetch_resources=dynamic_resources,

@@ -103,14 +103,17 @@ python scripts/init-secrets.py
 docker compose -f compose.yml -f compose.dynamic.yml --profile dynamic up -d --build --wait
 ```
 
-默认动态模式向断网 Chromium 传递获准 HTML，执行内嵌脚本。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权公开的同源资源，查询字符串按原样匹配。
+默认动态模式向断网 Chromium 传递获准 HTML，执行内嵌脚本。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权资源 URL，查询字符串按原样匹配。同源资源沿用页面域名授权。跨源资源的精确主机名须额外加入 `MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS`，该配置只授予清单内的资源访问权限。
 
 ```dotenv
 MULTISEARCH_DYNAMIC_FETCH_DOMAINS=docs.example.org
-MULTISEARCH_DYNAMIC_FETCH_RESOURCES='{"https://docs.example.org/guide":[{"url":"https://docs.example.org/app.js","kind":"script"},{"url":"https://docs.example.org/api/guide","kind":"json"}]}'
+MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS=cdn.example.net,data.example.net
+MULTISEARCH_DYNAMIC_FETCH_RESOURCES='{"https://docs.example.org/guide":[{"url":"https://cdn.example.net/app.js","kind":"script"},{"url":"https://data.example.net/guide.json","kind":"json"}]}'
 ```
 
-Worker 对清单中的每个资源重新执行 DNS 固定、域名检查、robots 和访问限速。资源仅支持同源 HTTPS GET，每页最多 8 个，每个 256 KiB，合计 512 KiB，资源重定向返回错误。资源与页面共享抓取时限。Worker 通过 Unix socket 传递已验证的快照。Chromium 依据资源类型在原始页面地址回放这些响应，保持断网并执行来源 CSP。页面和资源的摘录限制共同约束返回证据。
+Worker 对清单中的每个资源执行 DNS 固定、域名检查、robots 和访问限速。请求的域名允许和拒绝规则同时适用于页面与资源。资源仅支持 HTTPS GET，每页最多 8 个，每个 256 KiB，合计 512 KiB，资源重定向返回错误。资源与页面共享抓取时限。页面和资源的摘录限制共同约束返回证据。
+
+Worker 预取跨源资源时以页面源作为 `Origin`。跨源 JSON 的源站须返回单一的 `Access-Control-Allow-Origin`，值为该页面源或 `*`。渲染器和 Chromium 在原始页面地址依据原始 CSP、CORS、CORP 和 COEP 限制快照回放。跨源回放仅支持无需预检及凭据的请求，COEP 保留策略值并移除报告端点。对跨源的普通脚本，回放将 `CORP: same-site` 按同源限制处理。页面启用 `COEP: require-corp` 时，无 CORS 的跨源脚本须声明 `CORP: cross-origin`。 [Fetch 规范](https://fetch.spec.whatwg.org/#http-cors-protocol) · [HTML COEP](https://html.spec.whatwg.org/multipage/browsers.html#cross-origin-embedder-policy)
 
 动态镜像面向 Linux x86-64，构建使用 Docker BuildKit。宿主 Linux 需允许非特权用户命名空间，渲染器在启动时确认 Chromium 的命名空间和 Seccomp-BPF 沙箱。渲染器健康检查失败时，动态能力保持不可用。静态 L3 与动态 `fetch` 分别通过各自入口使用。 [抓取接口](api-contracts.md#证据与任务) · [CSP 规范](https://www.w3.org/TR/CSP3/)
 

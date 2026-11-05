@@ -9,7 +9,7 @@ MAX_RESOURCE_BUNDLE_BYTES = 512 * 1024
 MAX_RESOURCES_PER_PAGE = 8
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_PAGES = 128
-_INVALID_MANIFEST = "MULTISEARCH_DYNAMIC_FETCH_RESOURCES 需要有效的同源 HTTPS 资源清单"
+_INVALID_MANIFEST = "MULTISEARCH_DYNAMIC_FETCH_RESOURCES 需要有效的已授权 HTTPS 资源清单"
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -19,7 +19,9 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return entries
 
 
-def parse_resource_manifest(value: str) -> dict[str, tuple[ResourceSpec, ...]]:
+def parse_resource_manifest(
+    value: str, *, authorized_resource_hosts: frozenset[str] = frozenset()
+) -> dict[str, tuple[ResourceSpec, ...]]:
     if not value.isascii() or len(value) > _MAX_MANIFEST_BYTES:
         raise ValueError(_INVALID_MANIFEST)
     if not value.strip():
@@ -47,7 +49,10 @@ def parse_resource_manifest(value: str) -> dict[str, tuple[ResourceSpec, ...]]:
                 ):
                     raise ValueError(_INVALID_MANIFEST)
                 resource = render_target(entry["url"])
-                if resource.origin != page.origin or resource.url in used:
+                if resource.url in used or (
+                    resource.origin != page.origin
+                    and resource.host not in authorized_resource_hosts
+                ):
                     raise ValueError(_INVALID_MANIFEST)
                 used.add(resource.url)
                 specs.append(ResourceSpec(resource.url, entry["kind"]))

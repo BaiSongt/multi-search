@@ -26,6 +26,7 @@ _MAX_RENDER_SECONDS = 8.0
 _READY_SECONDS = 0.5
 _VERSION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,63}")
 _CSP = re.compile(r"[\x20-\x7e]{1,4096}")
+_COEP = {"unsafe-none", "require-corp", "credentialless"}
 HEARTBEAT_KEY = "multisearch:worker:fetch_dynamic"
 
 
@@ -95,10 +96,13 @@ class DynamicRenderer:
         *,
         timeout_s: float,
         source_csp: str | None = None,
+        source_coep: str | None = None,
     ) -> RenderedHTML | None:
         if not 1 <= len(resources) <= MAX_RESOURCES_PER_PAGE:
             return None
         if source_csp is not None and _CSP.fullmatch(source_csp) is None:
+            return None
+        if source_coep is not None and source_coep not in _COEP:
             return None
         try:
             sizes = [len(resource.body.encode("utf-8")) for resource in resources]
@@ -118,10 +122,21 @@ class DynamicRenderer:
                         "kind": resource.kind,
                         "content_type": resource.content_type,
                         "body": resource.body,
+                        **(
+                            {
+                                "allow_origin": resource.allow_origin,
+                                "resource_policy": resource.resource_policy,
+                            }
+                            if resource.allow_origin is not None
+                            or resource.resource_policy is not None
+                            else {}
+                        ),
                     }
                     for resource in resources
                 ],
             }
+            if source_coep is not None:
+                payload["source_coep"] = source_coep
             data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         except UnicodeError:
             return None

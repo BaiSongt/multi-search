@@ -184,9 +184,152 @@ async def test_render_resources_use_the_pinned_credential_free_transport_and_pre
     assert all(
         item.url.host == PUBLIC_IP
         and item.extensions["sni_hostname"] == "one.example"
+        and "origin" not in item.headers
         and "cookie" not in item.headers
         and "authorization" not in item.headers
         for item in requests
+    )
+
+
+@pytest.mark.parametrize("origin", ["https://one.example", "*"])
+async def test_cross_origin_resource_sends_page_origin_only_and_retains_response_policies(
+    network, origin
+):
+    dns, requests, _, responses = network
+    responses[("cdn.example", "/data")] = httpx.Response(
+        200,
+        headers={
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Cross-Origin-Resource-Policy": "same-site",
+            "Set-Cookie": "ignored=1",
+            "X-Robots-Tag": "max-snippet: 16",
+        },
+        content=b'{"value":1}',
+    )
+    spec = ResourceSpec("https://cdn.example/data", "json")
+    result = await SafeFetcher().fetch_resource(
+        spec, **RESOURCE_OPTIONS, authorized_resource_hosts=frozenset({"cdn.example"})
+    )
+    assert result == FetchedResource(
+        spec.url, "json", "application/json", '{"value":1}', 16, origin, "same-site"
+    )
+    assert dns == [("cdn.example", 443)] * 2
+    assert [item.url.path for item in requests] == ["/robots.txt", "/data"]
+    assert "origin" not in requests[0].headers
+    assert requests[1].headers["origin"] == "https://one.example"
+    assert all(
+        request.url.host == PUBLIC_IP
+        and request.extensions["sni_hostname"] == "cdn.example"
+        and not (
+            {"authorization", "cookie", "referer", "proxy-authorization"} & request.headers.keys()
+        )
+        for request in requests
+    )
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [[], ["https://other.example"], ["null"], ["https://one.example/"], ["*, *"], ["*", "*"]],
+)
+async def test_cross_origin_json_requires_a_single_valid_origin_header(network, origins):
+    _, _, _, responses = network
+    body = Stream(0)
+    responses[("cdn.example", "/data")] = httpx.Response(
+        200,
+        headers=[
+            ("Content-Type", "application/json"),
+            *[("Access-Control-Allow-Origin", value) for value in origins],
+        ],
+        stream=body,
+    )
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(
+            ResourceSpec("https://cdn.example/data", "json"),
+            **RESOURCE_OPTIONS,
+            authorized_resource_hosts=frozenset({"cdn.example"}),
+        )
+    assert error.value.code == "FETCH_RESOURCE_CORS_DENIED" and body.closed
+
+
+@pytest.mark.parametrize(
+    "policies", [["Same-Origin"], ["unknown"], ["same-origin", "cross-origin"]]
+)
+async def test_cross_origin_script_rejects_ambiguous_or_invalid_resource_policy(network, policies):
+    _, _, _, responses = network
+    responses[("cdn.example", "/app.js")] = httpx.Response(
+        200,
+        headers=[
+            ("Content-Type", "text/javascript"),
+            *[("Cross-Origin-Resource-Policy", value) for value in policies],
+        ],
+        content=b"const value = 1;",
+    )
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(
+            ResourceSpec("https://cdn.example/app.js", "script"),
+            **RESOURCE_OPTIONS,
+            authorized_resource_hosts=frozenset({"cdn.example"}),
+        )
+    assert error.value.code == "FETCH_RESOURCE_POLICY_UNSUPPORTED"
+
+
+async def test_cross_origin_script_can_leave_cors_for_the_browser_to_check(network):
+    _, _, _, responses = network
+    responses[("cdn.example", "/app.js")] = httpx.Response(
+        200,
+        headers={"Content-Type": "text/javascript", "Cross-Origin-Resource-Policy": "same-origin"},
+        content=b"const value = 1;",
+    )
+    result = await SafeFetcher().fetch_resource(
+        ResourceSpec("https://cdn.example/app.js", "script"),
+        **RESOURCE_OPTIONS,
+        authorized_resource_hosts=frozenset({"cdn.example"}),
+    )
+    assert result.allow_origin is None and result.resource_policy == "same-origin"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"authorized_hosts": frozenset({"cdn.example"})},
+        {"authorized_resource_hosts": frozenset({"example"})},
+        {"domain_allowlist": ["one.example"]},
+        {"domain_allowlist": ["cdn.example"]},
+        {"domain_denylist": ["one.example"]},
+        {"domain_denylist": ["cdn.example"]},
+    ],
+)
+async def test_cross_origin_resource_requires_both_authorizations_before_dns(network, overrides):
+    dns, requests, *_ = network
+    options = {
+        **RESOURCE_OPTIONS,
+        "authorized_resource_hosts": frozenset({"cdn.example"}),
+        **overrides,
+    }
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(
+            ResourceSpec("https://cdn.example/app.js", "script"), **options
+        )
+    assert error.value.code == "FETCH_TARGET_BLOCKED" and dns == requests == []
+
+
+async def test_page_retains_original_embedder_policy_headers(network):
+    _, _, _, responses = network
+    responses[("one.example", "/docs")] = httpx.Response(
+        200,
+        headers=[
+            ("Content-Type", "text/html"),
+            ("Cross-Origin-Embedder-Policy", 'require-corp; report-to="reports"'),
+            ("Cross-Origin-Embedder-Policy", "credentialless"),
+        ],
+        content=b"<p>ok</p>",
+    )
+    page = await SafeFetcher().fetch("https://one.example/docs", timeout_s=1)
+    assert page.cross_origin_embedder_policy == (
+        'require-corp; report-to="reports"',
+        "credentialless",
     )
 
 
