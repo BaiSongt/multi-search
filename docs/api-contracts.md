@@ -9,6 +9,7 @@
 | `GET /api/v1/capabilities` | 公开 | 当前启用的模式、来源、模态与预算 |
 | `GET /api/v1/providers` | API Key | Provider 能力与运行状态 |
 | `POST /api/v1/search` | API Key | 统一文字与图片检索 |
+| `POST /api/v1/playground` | Console 会话与 CSRF | 使用同一搜索契约并按当前租户计量 |
 
 搜索凭据使用 `Authorization: Bearer <API_KEY>`。文字需要 `search:text`，图片需要 `search:image`，混合请求需要两者。按 [部署文档](deployment.md#签发测试凭据) 签发凭据后，在当前终端将明文存入 `MULTISEARCH_KEY`。以下 POSIX shell 示例将同一个 Web 查询同时用于文字和图片。
 
@@ -36,7 +37,9 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 `cache_policy=use` 默认读取可用缓存。`refresh` 重新搜索并更新可缓存响应，`bypass` 直接检索且跳过缓存写入。`local` 只支持 `use`，未命中时以部分结果返回 `LOCAL_CACHE_MISS`。缓存按租户隔离，按查询、有效路由参数和 Provider 组合区分。命中时 `cache_hit=true`，返回当前调用的请求标识。完整结果缓存期限为文字一小时、图片半小时、新闻十分钟，新闻优先于图片和普通文字。正常空结果缓存 30 秒，上游部分失败的响应跳过缓存。
 
-首轮默认每租户 60 次每分钟，单 API 进程全局并发 20、每租户并发 5。完整计量和多维配额属于 WP-07。请求级幂等标识也待后续支持，当前传入 `idempotency_key` 返回 `INVALID_REQUEST`。
+默认每租户 60 次每分钟，单 API 进程全局并发 20、每租户并发上限 5。租户与 Key 可配置分钟、日、月、模态、模式和并发上限。各周期使用 UTC。文字与图片额度分别按请求包含相应模态的次数计算，混合请求同时占用两类模态额度。入账在 PostgreSQL 同租户事务内完成，缓存命中和已接受但上游失败的请求各计一次。上游重试与回退只增加 Provider 调用记录。
+
+可用 `idempotency_key` 在同一租户与调用身份内去重，保存 24 小时。相同请求重放原响应且不再扣额。不同请求复用同一标识或首次请求尚在执行时返回 409。公开使用量明细保留请求 ID、计量与错误码，默认不记录查询原文或凭据。
 
 ### 结果与错误
 
@@ -48,9 +51,20 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 | --- | --- | --- |
 | 401 | `AUTH_REQUIRED` | 检查 Key 是否提供且有效 |
 | 403 | `FORBIDDEN` | 检查 Key 作用域 |
+| 409 | `IDEMPOTENCY_CONFLICT`、`REQUEST_IN_PROGRESS` | 使用新幂等标识或按提示等待 |
 | 413 | `INVALID_REQUEST` | 请求体超过 32 KiB |
 | 422 | `INVALID_REQUEST`、`SOURCE_UNAVAILABLE`、`SOURCE_MODALITY_UNAVAILABLE`、`EVIDENCE_UNAVAILABLE`、`MODE_UNAVAILABLE` | 检查参数与能力端点 |
-| 429 | `RATE_LIMITED` | 按重试提示等待 |
+| 429 | `RATE_LIMITED`、`QUOTA_EXCEEDED` | 按重试提示等待 |
 | 502 | `PROVIDER_UNAVAILABLE` | 上游不可用时按预算与重试提示处理 |
-| 503 | `AUTH_UNAVAILABLE`、`RATE_LIMITER_UNAVAILABLE` | 检查数据库或 Redis |
+| 503 | `AUTH_UNAVAILABLE`、`USAGE_UNAVAILABLE` | 检查数据库或 Redis |
 | 504 | `TIME_BUDGET_EXCEEDED` | 可缩小搜索范围或检查上游 |
+
+### 管理面
+
+管理接口使用浏览器会话，写操作还要求匹配配置的 `Origin` 以及 `X-CSRF-Token`。Console 通过同源 `/gateway` 路径转发。登录、会话刷新和登出分别使用 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout`。登录与刷新返回新的 CSRF 令牌，`GET /api/v1/me` 返回当前身份。
+
+- `GET/POST /api/v1/keys` 查看掩码列表或创建密钥。创建与轮换响应的 `secret` 只返回一次。调用 `POST /api/v1/keys/{id}/rotate` 或 `/revoke` 更新生命周期。
+- `GET /api/v1/usage` 返回最近 30 个 UTC 自然日的计量、趋势和当前租户配额。开发者仅能查看自己的用量，具备权限的角色可查看本租户用量。
+- `/api/v1/admin/` 提供总览、Provider、脱敏请求、租户和审计。平台管理员可创建租户、修改租户配额与 Provider 策略。运维、审计及租户管理员按各自权限读取。
+
+MCP 客户端使用相同的搜索鉴权与计量。 [MCP 接入](mcp.md)

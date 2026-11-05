@@ -1,0 +1,73 @@
+from asyncio import CancelledError, timeout_at
+from time import monotonic
+
+from sqlalchemy.exc import SQLAlchemyError
+
+from .contracts import SearchRequest, SearchResponse
+from .errors import ApiError
+from .identity import MachineIdentity
+from .metering import SearchPrincipal, UsageMeter
+from .search import SearchService
+
+
+class SearchApplication:
+    def __init__(self, service: SearchService, meter: UsageMeter):
+        self.service = service
+        self.meter = meter
+
+    async def machine_search(
+        self, body: SearchRequest, identity: MachineIdentity, request_id: str
+    ) -> SearchResponse:
+        identity.require_search(body.modalities)
+        return await self.search(
+            body,
+            SearchPrincipal(
+                identity.tenant_id, identity.owner_id, identity.key_id, "key", identity.limits
+            ),
+            request_id,
+        )
+
+    async def search(
+        self, body: SearchRequest, principal: SearchPrincipal, request_id: str
+    ) -> SearchResponse:
+        started = monotonic()
+        mode, budget = self.service.plan(body)
+        deadline = started + budget.max_latency_ms / 1000
+        try:
+            async with timeout_at(deadline):
+                admission = await self.meter.reserve(
+                    principal, body, mode, request_id, budget.max_latency_ms
+                )
+        except TimeoutError:
+            raise ApiError(504, "TIME_BUDGET_EXCEEDED", "检索时限已耗尽", retryable=True) from None
+        except (SQLAlchemyError, OSError):
+            raise ApiError(503, "USAGE_UNAVAILABLE", "计量服务暂不可用", retryable=True) from None
+        if admission.replay:
+            if "error" in admission.replay:
+                raise ApiError(**admission.replay["error"])
+            return SearchResponse.model_validate(admission.replay["response"])
+
+        try:
+            response = await self.service.search(
+                body, str(principal.tenant_id), request_id, metered=True, deadline=deadline
+            )
+        except CancelledError:
+            try:
+                await self.meter.cancel(admission)
+            except (SQLAlchemyError, OSError):
+                pass
+            raise
+        except ApiError as error:
+            await self.meter.finish(admission, error=error)
+            raise
+        except Exception:
+            await self.meter.finish(
+                admission, error=ApiError(500, "INTERNAL_ERROR", "内部服务错误")
+            )
+            raise
+        response = response.model_copy(update={"elapsed_ms": int((monotonic() - started) * 1000)})
+        try:
+            await self.meter.finish(admission, response=response)
+        except (SQLAlchemyError, OSError):
+            raise ApiError(503, "USAGE_UNAVAILABLE", "计量服务暂不可用", retryable=True) from None
+        return response

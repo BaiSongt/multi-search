@@ -12,6 +12,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from .contracts import (
+    ImageSearchResult,
     Modality,
     Mode,
     ProviderRun,
@@ -22,7 +23,9 @@ from .contracts import (
     Source,
 )
 from .errors import ApiError
-from .pipeline import fuse
+from .image_attribution import ImageAttributionResolver
+from .pipeline import fuse, select_results
+from .policy import ProviderPolicy
 from .providers import Provider, ProviderFailure, ProviderResult
 from .settings import Settings
 
@@ -80,10 +83,10 @@ class ProviderState:
     last_status: RunStatus | None = None
     last_elapsed_ms: int | None = None
 
-    def admit_attempt(self, now: float) -> bool:
+    def admit_attempt(self, now: float, limit: int) -> bool:
         while self.attempt_starts and now - self.attempt_starts[0] >= _PROVIDER_WINDOW_SECONDS:
             self.attempt_starts.popleft()
-        if len(self.attempt_starts) >= _PROVIDER_REQUESTS_PER_MINUTE:
+        if len(self.attempt_starts) >= limit:
             return False
         self.attempt_starts.append(now)
         return True
@@ -98,11 +101,20 @@ class Flight:
 def _budget(request: SearchRequest, mode: Mode) -> SearchBudget:
     latency, count = _MODE_LIMITS[mode]
     max_results = min(request.max_results or count, count)
+    strict_images = (
+        request.image_options and request.image_options.license_policy != "any_with_status"
+    )
+    metadata_limit = request.max_image_metadata_fetches
+    if metadata_limit is None:
+        metadata_limit = 3 if strict_images else 0
     return SearchBudget(
         max_latency_ms=min(request.max_latency_ms or latency, latency),
         max_results=max_results,
         max_image_results=min(request.max_image_results or max_results, max_results),
         search_rounds=0,
+        max_image_metadata_fetches=min(5, metadata_limit)
+        if Modality.IMAGE in request.modalities
+        else 0,
     )
 
 
@@ -119,10 +131,19 @@ def _time_error() -> ApiError:
 
 
 class SearchService:
-    def __init__(self, redis: Redis, providers: list[Provider], settings: Settings):
+    def __init__(
+        self,
+        redis: Redis,
+        providers: list[Provider],
+        settings: Settings,
+        attribution: ImageAttributionResolver | None = None,
+    ):
         self.redis = redis
         self.providers = {provider.provider_id: provider for provider in providers}
+        self.provider_policies = {provider.provider_id: ProviderPolicy() for provider in providers}
         self.settings = settings
+        self.attribution = attribution
+        self.attribution_slots = asyncio.Semaphore(5)
         self.states = {
             provider.provider_id: ProviderState({pair: Circuit() for pair in self._pairs(provider)})
             for provider in providers
@@ -144,7 +165,12 @@ class SearchService:
         }
 
     def _supported_pairs(self) -> set[Pair]:
-        return {pair for provider in self.providers.values() for pair in self._pairs(provider)}
+        return {
+            pair
+            for provider in self.providers.values()
+            if self.provider_policies[provider.provider_id].enabled
+            for pair in self._pairs(provider)
+        }
 
     def capabilities(self) -> dict:
         pairs = self._supported_pairs()
@@ -177,6 +203,7 @@ class SearchService:
                 "process_concurrency": self.settings.max_concurrent,
                 "provider_concurrency": _PROVIDER_CONCURRENT,
                 "provider_requests_per_minute": _PROVIDER_REQUESTS_PER_MINUTE,
+                "max_image_metadata_fetches": 5 if self.attribution else 0,
             },
         }
 
@@ -184,6 +211,7 @@ class SearchService:
         now = monotonic()
         providers = []
         for provider_id, state in self.states.items():
+            policy = self.provider_policies[provider_id]
             pair_health = [
                 {
                     "source_type": source,
@@ -204,7 +232,10 @@ class SearchService:
             providers.append(
                 {
                     "provider_id": provider_id,
-                    "status": health,
+                    "status": health if policy.enabled else "disabled",
+                    "enabled": policy.enabled,
+                    "priority": policy.priority,
+                    "requests_per_minute": policy.requests_per_minute,
                     "last_status": state.last_status,
                     "last_elapsed_ms": state.last_elapsed_ms,
                     "network_scope": Scope.PUBLIC,
@@ -264,8 +295,15 @@ class SearchService:
             mode=mode,
             max_results=budget.max_results,
             max_image_results=budget.max_image_results,
+            max_image_metadata_fetches=budget.max_image_metadata_fetches,
         )
-        payload = json.dumps([self.cache_signature, filters], sort_keys=True, ensure_ascii=False)
+        policies = sorted(
+            (key, policy.enabled, policy.priority, policy.requests_per_minute)
+            for key, policy in self.provider_policies.items()
+        )
+        payload = json.dumps(
+            [self.cache_signature, policies, filters], sort_keys=True, ensure_ascii=False
+        )
         digest = sha256(payload.encode()).hexdigest()
         return f"multisearch:search:v1:{tenant_id}:{digest}"
 
@@ -373,7 +411,10 @@ class SearchService:
                         circuit.probing and not is_probe
                     ):
                         return result, "circuit_open" if not attempts else status, attempts
-                    if not state.admit_attempt(now):
+                    policy = self.provider_policies[provider.provider_id]
+                    if not policy.enabled:
+                        return result, "circuit_open", attempts
+                    if not state.admit_attempt(now, policy.requests_per_minute):
                         return result, "rate_limited", attempts
                     attempts += 1
                     try:
@@ -469,11 +510,15 @@ class SearchService:
     ) -> list[tuple[ProviderResult, ProviderRun]]:
         preferred = ("ddgs", "searxng") if mode == Mode.QUICK else ("searxng", "ddgs")
         eligible = [
-            provider for provider in self.providers.values() if pair in self._pairs(provider)
+            provider
+            for provider in self.providers.values()
+            if self.provider_policies[provider.provider_id].enabled
+            and pair in self._pairs(provider)
         ]
         eligible.sort(
             key=lambda p: (
-                preferred.index(p.provider_id) if p.provider_id in preferred else len(preferred)
+                -self.provider_policies[p.provider_id].priority,
+                preferred.index(p.provider_id) if p.provider_id in preferred else len(preferred),
             )
         )
         if mode == Mode.STANDARD:
@@ -525,14 +570,29 @@ class SearchService:
             if (source, kind) not in supported
         ]
         partial = bool(warnings)
+        strict = request.image_options and request.image_options.license_policy != "any_with_status"
+        provider_request = request
+        if strict:
+            provider_request = request.model_copy(
+                update={
+                    "image_options": request.image_options.model_copy(
+                        update={"license_policy": "any_with_status"}
+                    )
+                }
+            )
+        provider_deadline = deadline
+        if self.attribution and budget.max_image_metadata_fetches:
+            provider_deadline -= min(2, max(0, deadline - monotonic()) * 0.25)
         reports = await asyncio.gather(
             *(
                 self._run_pair(
-                    request,
+                    provider_request,
                     pair,
                     mode,
-                    budget.max_image_results if pair[1] == Modality.IMAGE else budget.max_results,
-                    deadline,
+                    (max(budget.max_image_results, 10) if strict else budget.max_image_results)
+                    if pair[1] == Modality.IMAGE
+                    else budget.max_results,
+                    provider_deadline,
                 )
                 for pair in requested
                 if pair in supported
@@ -541,7 +601,7 @@ class SearchService:
         records = [record for pair_records in reports for record in pair_records]
         runs = [run for _, run in records]
         if not any(run.status in _SUCCESS for run in runs):
-            if monotonic() >= deadline or any(run.status == "timeout" for run in runs):
+            if monotonic() >= provider_deadline or any(run.status == "timeout" for run in runs):
                 raise _time_error()
             raise ApiError(502, "PROVIDER_UNAVAILABLE", "当前没有可用的检索来源", retryable=True)
         for result, run in records:
@@ -551,9 +611,41 @@ class SearchService:
                 warnings.append(
                     f"PROVIDER_{run.status.upper()}:{run.provider_id}:{run.source_type}:{run.modality}"
                 )
-        results = fuse(
-            (result.results for result, _ in records), budget.max_results, budget.max_image_results
+        candidate_count = sum(len(result.results) for result, _ in records)
+        candidates = fuse(
+            (result.results for result, _ in records), candidate_count, candidate_count
         )
+        metadata_fetches = 0
+        if self.attribution and budget.max_image_metadata_fetches:
+            targets = [
+                (index, result)
+                for index, result in enumerate(candidates)
+                if isinstance(result, ImageSearchResult) and self.attribution.supports(result)
+            ][: budget.max_image_metadata_fetches]
+            outcomes = await asyncio.gather(
+                *(self._resolve_image(result, deadline) for _, result in targets)
+            )
+            for (index, _), (resolved, attempted) in zip(targets, outcomes, strict=True):
+                candidates[index] = resolved
+                metadata_fetches += attempted
+            if not targets:
+                warnings.append("IMAGE_ATTRIBUTION_SOURCE_UNSUPPORTED")
+            if any(not resolved.image.source_page_verified for resolved, _ in outcomes):
+                warnings.append("IMAGE_ATTRIBUTION_INCOMPLETE")
+                partial = True
+        if strict:
+            permitted = {"verified_license"}
+            if request.image_options.license_policy == "declared_only":
+                permitted.add("declared_unverified")
+            candidates = [
+                result
+                for result in candidates
+                if not isinstance(result, ImageSearchResult)
+                or result.image.rights_status in permitted
+            ]
+            if not any(isinstance(result, ImageSearchResult) for result in candidates):
+                warnings.append("IMAGE_LICENSE_VERIFICATION_UNAVAILABLE")
+        results = select_results(candidates, budget.max_results, budget.max_image_results)
         if partial:
             warnings.append("PARTIAL_RESULT")
         response = SearchResponse(
@@ -567,11 +659,32 @@ class SearchService:
             results=results,
             warnings=list(dict.fromkeys(warnings)),
             provider_runs=runs,
-            budget=budget.model_copy(update={"search_rounds": 1}),
+            budget=budget.model_copy(
+                update={
+                    "search_rounds": 1,
+                    "image_metadata_fetches": metadata_fetches,
+                }
+            ),
         )
         if request.cache_policy != "bypass":
             await self._cache_store(cache_key, request, response, deadline)
         return response
+
+    async def _resolve_image(
+        self,
+        result: ImageSearchResult,
+        deadline: float,
+    ) -> tuple[ImageSearchResult, int]:
+        attempted = 0
+        try:
+            async with asyncio.timeout(deadline - monotonic()), self.attribution_slots:
+                remaining = deadline - monotonic()
+                if remaining > 0:
+                    attempted = 1
+                    return await self.attribution.resolve(result, remaining), attempted
+        except TimeoutError:
+            pass
+        return result, attempted
 
     async def _join(
         self,
@@ -601,12 +714,7 @@ class SearchService:
                     flight.task.cancel()
                     await asyncio.gather(flight.task, return_exceptions=True)
 
-    async def search(
-        self, request: SearchRequest, tenant_id: str, request_id: str
-    ) -> SearchResponse:
-        started = monotonic()
-        if request.idempotency_key is not None:
-            raise ApiError(422, "INVALID_REQUEST", "当前版本不支持 idempotency_key")
+    def plan(self, request: SearchRequest) -> tuple[Mode, SearchBudget]:
         if request.require_evidence or request.mode == Mode.EVIDENCE:
             raise ApiError(422, "EVIDENCE_UNAVAILABLE", "当前版本未启用证据提取")
         if request.mode == Mode.DEEP:
@@ -621,8 +729,24 @@ class SearchService:
         mode = _resolve_mode(request)
         if mode == Mode.LOCAL and request.cache_policy != "use":
             raise ApiError(422, "INVALID_REQUEST", "local 模式只支持 cache_policy=use")
-        budget = _budget(request, mode)
-        deadline = started + budget.max_latency_ms / 1000
+        return mode, _budget(request, mode)
+
+    async def search(
+        self,
+        request: SearchRequest,
+        tenant_id: str,
+        request_id: str,
+        *,
+        metered: bool = False,
+        deadline: float | None = None,
+    ) -> SearchResponse:
+        started = monotonic()
+        if request.idempotency_key is not None and not metered:
+            raise ApiError(422, "INVALID_REQUEST", "幂等请求需要启用用量计量")
+        mode, budget = self.plan(request)
+        deadline = deadline if deadline is not None else started + budget.max_latency_ms / 1000
+        if started >= deadline:
+            raise _time_error()
 
         if (
             self.active >= self.settings.max_concurrent
@@ -634,7 +758,8 @@ class SearchService:
         self.active += 1
         self.active_by_tenant[tenant_id] += 1
         try:
-            await self._rate_limit(tenant_id, deadline)
+            if not metered:
+                await self._rate_limit(tenant_id, deadline)
             if mode == Mode.LOCAL:
                 response = await self._local(request, tenant_id, budget, deadline)
             else:

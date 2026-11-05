@@ -1,6 +1,6 @@
 # 本地部署
 
-本指南对应 V2.0 规格的 WP-01 至 WP-04 首轮验收。需要支持 Linux 容器的 Docker Compose V2，以及用于生成密钥与执行冒烟脚本的 Python 3.12。在仓库根目录运行以下命令。
+需要支持 Linux 容器的 Docker Compose V2，以及用于生成密钥与执行冒烟脚本的 Python 3.12。在仓库根目录运行以下命令。
 
 ```sh
 python scripts/init-secrets.py
@@ -19,7 +19,7 @@ docker compose ps
 | PostgreSQL | 内部数据网络 `postgres:5432` | 命名卷 `postgres_data` |
 | Redis | 内部数据网络 `redis:6379` | 命名卷 `redis_data`，启用 AOF |
 
-可以从 `.env.example` 创建 `.env`，调整 `MULTISEARCH_API_PORT` 或 `MULTISEARCH_CONSOLE_PORT`。调整 API 端口时同步修改 `MULTISEARCH_PUBLIC_API_BASE_URL`，让 Console 的 OpenAPI 链接指向实际地址。`MULTISEARCH_ENABLE_DDGS=false` 可禁用 DDGS。`MULTISEARCH_ENABLE_IMAGE_SEARCH=false` 可关闭图片搜索。`MULTISEARCH_MAX_CONCURRENT_REQUESTS` 可将单 API 进程的检索并发上限设为 1 至 20。
+可以从 `.env.example` 创建 `.env`，调整 `MULTISEARCH_API_PORT` 或 `MULTISEARCH_CONSOLE_PORT`。调整端口时同步更新 `MULTISEARCH_PUBLIC_API_BASE_URL` 和 `MULTISEARCH_PUBLIC_CONSOLE_URL`，分别用于文档链接和会话来源校验。`MULTISEARCH_ENABLE_DDGS=false` 可禁用 DDGS。`MULTISEARCH_ENABLE_IMAGE_SEARCH=false` 可关闭图片搜索。`MULTISEARCH_MAX_CONCURRENT_REQUESTS` 可将单 API 进程的检索并发上限设为 1 至 20。
 
 首次启动等待数据库与缓存健康并应用 Alembic 迁移。应用运行以固定版本的镜像与锁定依赖为基础。`/health/live` 检查 API 进程，`/health/ready` 检查 PostgreSQL 和 Redis。公网搜索能力以实际 Provider 调用与 [验收结果](acceptance.md) 为准。
 
@@ -29,6 +29,17 @@ docker compose down
 ```
 
 `docker compose down` 停止服务并保留命名卷。开发部署只通过回环地址发布 API 和 Console。PostgreSQL、Redis 和 SearXNG 的端口保留在 Compose 网络内。
+
+## 创建登录账户
+
+部署操作员在本地终端创建首位平台管理员和开发者。命令在终端隐藏输入密码。完成后通过 `/auth` 登录，输入对应租户、邮件地址和密码。
+
+```sh
+docker compose exec multisearch-api python -m multisearch.keys user-add --tenant platform --email admin@example.invalid --role platform_admin
+docker compose exec multisearch-api python -m multisearch.keys user-add --tenant demo --email developer@example.invalid --role developer
+```
+
+HTTP 字面回环地址使用本地会话 Cookie。HTTPS Console 地址启用 Secure 标志。管理操作经同源 Console 代理转发，由 API 检查会话、角色、Origin 与 CSRF。
 
 ## 签发测试凭据
 

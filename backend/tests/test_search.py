@@ -16,6 +16,7 @@ from multisearch.contracts import (
     TextSearchResult,
 )
 from multisearch.errors import ApiError
+from multisearch.policy import ProviderPolicy
 from multisearch.providers import ProviderFailure, ProviderResult
 from multisearch.search import SearchService
 from multisearch.settings import Settings
@@ -170,6 +171,86 @@ async def test_standard_retains_both_modalities_under_total_result_limit():
         "mixed",
     )
     assert [result.kind for result in response.results] == ["text", "image"]
+
+
+async def test_strict_image_search_verifies_before_filtering_and_caches_by_budget():
+    class ImageProvider(FakeProvider):
+        pairs = frozenset({(Source.WEB, Modality.IMAGE)})
+
+        async def search(self, request, source, modality, limit, timeout_s):
+            assert request.image_options.license_policy == "any_with_status"
+            return ProviderResult(
+                [
+                    ImageSearchResult(
+                        result_id=name,
+                        title=name,
+                        url=f"https://example.org/{name}",
+                        canonical_url=f"https://example.org/{name}",
+                        source_type=source,
+                        provider_ids=[self.provider_id],
+                        retrieved_at=datetime.now(UTC),
+                        image=ImageAttribution(
+                            original_url=f"https://example.org/{name}.jpg",
+                            source_page_url=f"https://example.org/{name}",
+                        ),
+                    )
+                    for name in ("unsupported", "verify")
+                ]
+            )
+
+    class Verifier:
+        def supports(self, image):
+            return image.result_id == "verify"
+
+        async def resolve(self, image, timeout_s):
+            assert timeout_s > 0
+            return image.model_copy(
+                update={
+                    "image": image.image.model_copy(
+                        update={
+                            "rights_status": "verified_license",
+                            "source_page_verified": True,
+                        }
+                    )
+                }
+            )
+
+    search = service(ImageProvider("searxng"))
+    search.attribution = Verifier()
+    request = SearchRequest(
+        query="clock",
+        modalities=["image"],
+        max_results=1,
+        image_options={"license_policy": "verified_only"},
+        max_image_metadata_fetches=1,
+    )
+    response = await search.search(request, "tenant", "verify")
+    assert [item.result_id for item in response.results] == ["verify"]
+    assert response.budget.image_metadata_fetches == 1
+    cached = await search.search(request, "tenant", "cache")
+    assert cached.cache_hit and cached.budget.image_metadata_fetches == 0
+    unverified = await search.search(
+        request.model_copy(update={"max_image_metadata_fetches": 0}), "tenant", "no-lookup"
+    )
+    assert not unverified.cache_hit and unverified.results == []
+    assert "IMAGE_LICENSE_VERIFICATION_UNAVAILABLE" in unverified.warnings
+
+
+async def test_provider_policy_affects_priority_disabled_state_and_cache():
+    ddgs, searxng = FakeProvider("ddgs"), FakeProvider("searxng")
+    search = service(ddgs, searxng)
+    request = SearchRequest(query="clock", mode="quick")
+    original = await search.search(request, "tenant", "original")
+    assert original.provider_runs[0].provider_id == "ddgs"
+
+    search.provider_policies["searxng"] = ProviderPolicy(priority=5)
+    reordered = await search.search(request, "tenant", "reordered")
+    assert not reordered.cache_hit and reordered.provider_runs[0].provider_id == "searxng"
+
+    search.provider_policies["searxng"] = ProviderPolicy(enabled=False, priority=5)
+    disabled = await search.search(request, "tenant", "disabled")
+    assert not disabled.cache_hit and disabled.provider_runs[0].provider_id == "ddgs"
+    assert search.provider_status()[1]["status"] == "disabled"
 
 
 async def test_cache_is_tenant_scoped_and_local_never_calls_providers():

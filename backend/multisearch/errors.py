@@ -33,8 +33,8 @@ class SearchBodyLimit:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope["type"] != "http"
-            or scope["method"] != "POST"
-            or scope["path"].rstrip("/") != "/api/v1/search"
+            or scope["method"] not in {"POST", "PATCH", "PUT"}
+            or not scope["path"].startswith("/api/v1/")
         ):
             await self.app(scope, receive, send)
             return
@@ -48,7 +48,7 @@ class SearchBodyLimit:
                 error = ErrorBody(
                     request_id=scope["state"]["request_id"],
                     code="INVALID_REQUEST",
-                    message="搜索请求体超过 32 KiB",
+                    message="请求体超过 32 KiB",
                 )
                 await JSONResponse(error.model_dump(exclude_none=True), 413)(scope, receive, send)
                 return
