@@ -1,5 +1,11 @@
 # 运维验证
 
+## 服务状态与审计提示
+
+Console 的服务总览独立读取 `GET /health/dependencies`。该端点只公开固定服务名、状态和 UTC 检查时间，每个探针限时 1.5 秒，同一进程在两秒内复用采样。Redis 无法读取时，依赖心跳的 Worker 显示为未确认。未配置研究或动态抓取时，对应 Worker 显示为未配置。尚未观测到静态抓取心跳时显示为未确认。
+
+审计与安全页面列出当前角色可见范围内最近 7 天的敏感操作，包含管理员权限变更、签发无 IP 白名单的生产密钥及停用租户。提示基于已记录的管理操作，使用审计事件 ID 进行复核。 [接口契约](api-contracts.md#管理面)
+
 ## 受保护的指标
 
 `GET /metrics` 使用独立的指标凭据。部署时通过 `MULTISEARCH_METRICS_TOKEN_FILE` 指向容器内的密钥文件，或者通过 `MULTISEARCH_METRICS_TOKEN` 注入 32–256 个可见 ASCII 字符。采集端在请求中发送 `Authorization: Bearer <metrics-token>`。

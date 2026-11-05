@@ -162,6 +162,15 @@ export type Overview = {
   };
 };
 
+export type ServiceStatus = "healthy" | "unavailable" | "unknown" | "not_configured";
+export type DependencyHealth = {
+  checked_at: string;
+  checks: Partial<Record<
+    "api" | "postgresql" | "redis" | "fetch_worker" | "research_worker" |
+    "dynamic_fetch_worker" | "searxng" | "crawl4ai", ServiceStatus
+  >>;
+};
+
 type ProviderLocaleFilter = "unsupported" | "upstream_best_effort" | "upstream_requires_language" | "upstream_requires_region";
 type ProviderDateFilter = "metadata_postfilter" | "upstream_and_metadata_postfilter";
 export type ProviderFilters = {
@@ -219,6 +228,16 @@ export type TenantQuotaUsage = {
   keys: Page<{ key_mask: string; usage: QuotaUsageCounts; quota: Record<string, number> }>;
 };
 export type Audit = { id: string; tenant_id: string; actor_type: string; actor_id: string | null; action: string; target_id: string | null; details: unknown; occurred_at: string };
+export type AuditRiskReport = {
+  window_days: number;
+  truncated: boolean;
+  alerts: {
+    event_id: string;
+    tenant_id: string;
+    occurred_at: string;
+    code: "privileged_access_change" | "prod_key_without_ip_allowlist" | "tenant_disabled";
+  }[];
+};
 export type Page<T> = { items: T[]; next_cursor: string | null };
 
 export type Member = { user_id: string; email: string; role: Role; enabled: boolean; account_enabled: boolean; has_password: boolean };
@@ -340,10 +359,10 @@ export type ResearchResult = {
     number: number;
     step: string;
     mode: "standard" | "evidence";
-    status: "completed" | "partial" | "failed" | "interrupted";
-    elapsed_ms: number;
-    result_count: number;
-    source_count: number;
+    status: "running" | "completed" | "partial" | "failed" | "interrupted";
+    elapsed_ms: number | null;
+    result_count: number | null;
+    source_count: number | null;
     evidence_coverage_ratio: number | null;
     evidence_refs: string[];
     error_code: string | null;

@@ -17,7 +17,7 @@ const STEPS: Record<string, string> = {
   original: "原始问题", subquestion: "子问题", primary_sources: "一手来源", limitations: "局限与反例",
   methodology: "方法与评估", independent_sources: "其他来源",
 };
-const ROUND_STATUS = { completed: "完成", partial: "部分完成", failed: "失败", interrupted: "中断" };
+const ROUND_STATUS = { running: "运行中", completed: "完成", partial: "部分完成", failed: "失败", interrupted: "中断" };
 
 function isActive(status: JobStatus) {
   return status === "queued" || status === "running" || status === "cancelling";
@@ -105,17 +105,22 @@ function ResearchReport({ report, showEvidence }: { report: ResearchResult; show
       <details>
         <summary>检索轮次 · {report.rounds.length} / {report.planned_rounds}</summary>
         <p className="muted">模型 Token 与费用计入最终综合阶段，检索轮次分别报告来源和证据覆盖率。</p>
-        <ul>{report.rounds.map((round) => (
-          <li key={round.number}>
-            第 {round.number} 轮 · {STEPS[round.step] ?? round.step} · {ROUND_STATUS[round.status]} · {round.result_count} 条 · {round.elapsed_ms} ms
-            {round.error_code && <span className="muted"> · {round.error_code}</span>}
-            <dl>
-              <dt>来源数</dt><dd>{round.source_count ?? "未报告"}</dd>
-              <dt>证据覆盖率</dt><dd>{evidenceCoverage(round.evidence_coverage_ratio)}</dd>
-            </dl>
-            {references(round.evidence_refs)}
-          </li>
-        ))}</ul>
+        <ul>{report.rounds.map((round) => {
+          const interrupted = round.status === "interrupted";
+          const count = interrupted || round.result_count == null ? "结果数未报告" : `${round.result_count} 条`;
+          const elapsed = interrupted || round.elapsed_ms == null ? "耗时未报告" : `${round.elapsed_ms} ms`;
+          return (
+            <li key={round.number}>
+              第 {round.number} 轮 · {STEPS[round.step] ?? round.step} · {ROUND_STATUS[round.status]} · {count} · {elapsed}
+              {round.error_code && <span className="muted"> · {round.error_code}</span>}
+              <dl>
+                <dt>来源数</dt><dd>{interrupted ? "未报告" : round.source_count ?? "未报告"}</dd>
+                <dt>证据覆盖率</dt><dd>{evidenceCoverage(round.evidence_coverage_ratio)}</dd>
+              </dl>
+              {references(round.evidence_refs)}
+            </li>
+          );
+        })}</ul>
       </details>
       {report.evidence_records.length > 0 && <details>
         <summary>证据列表 · {report.evidence_records.length} 条</summary>

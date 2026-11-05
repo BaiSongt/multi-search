@@ -61,6 +61,21 @@ class SessionPage(BaseModel):
     next_cursor: UUID | None = None
 
 
+class SessionMembership(BaseModel):
+    tenant_id: UUID
+    tenant: str
+    role: Role
+
+
+class MembershipPage(BaseModel):
+    memberships: list[SessionMembership]
+    next_cursor: str | None = None
+
+
+class SwitchMembership(InputModel):
+    tenant_id: UUID
+
+
 class KeyCreate(InputModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     environment: Literal["dev", "test", "prod"] = "dev"
@@ -201,6 +216,27 @@ async def list_sessions(
 async def revoke_session(request: Request, session_id: UUID, actor: SessionWrite) -> Response:
     await request.app.state.identity.sessions.revoke_session(actor, session_id)
     return Response(status_code=204)
+
+
+@router.get("/auth/memberships")
+async def list_memberships(
+    request: Request,
+    actor: SessionUser,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    cursor: Annotated[str | None, Query(max_length=63, pattern=TENANT_PATTERN)] = None,
+) -> MembershipPage:
+    memberships, next_cursor = await request.app.state.identity.sessions.list_memberships(
+        actor, limit, cursor
+    )
+    return MembershipPage(memberships=memberships, next_cursor=next_cursor)
+
+
+@router.post("/auth/switch")
+async def switch_membership(
+    request: Request, response: Response, body: SwitchMembership, actor: SessionWrite
+) -> SessionView:
+    raw, switched = await request.app.state.identity.sessions.switch(actor, body.tenant_id)
+    return _set_session(response, raw, switched)
 
 
 @router.get("/keys")

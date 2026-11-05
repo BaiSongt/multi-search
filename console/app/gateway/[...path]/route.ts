@@ -5,12 +5,12 @@ import { SESSION_COOKIE } from "../../lib/contracts";
 export const dynamic = "force-dynamic";
 
 const GET_ROUTES = new Set([
-  "me", "auth/sessions", "keys", "usage", "capabilities", "providers", "admin/overview", "admin/providers",
-  "admin/requests", "admin/tenants", "admin/audit", "admin/jobs", "admin/images", "admin/routing",
-  "admin/cache", "admin/settings",
+  "me", "auth/sessions", "auth/memberships", "keys", "usage", "capabilities", "providers", "admin/overview", "admin/providers",
+  "admin/requests", "admin/tenants", "admin/audit", "admin/audit/risks", "admin/jobs", "admin/images", "admin/routing",
+  "admin/cache", "admin/settings", "health/dependencies",
 ]);
 const POST_ROUTES = new Set([
-  "auth/login", "auth/refresh", "auth/logout", "auth/invitations/accept", "keys", "playground", "search", "admin/tenants",
+  "auth/login", "auth/refresh", "auth/logout", "auth/switch", "auth/invitations/accept", "keys", "playground", "search", "admin/tenants",
   "admin/routing/test", "admin/routing/publish", "admin/routing/rollback", "admin/cache/invalidate",
 ]);
 const KEY_ACTION = /^keys\/[a-f0-9-]{32,36}\/(rotate|revoke)$/i;
@@ -70,30 +70,34 @@ async function boundedBody(request: NextRequest): Promise<ArrayBuffer | null> {
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
+  const route = path.join("/");
+  const dependencyHealth = route === "health/dependencies";
   // 只转发固定管理和数据面路径，每个路径段必须匹配安全字符。
-  if (!path.every((segment) => /^[a-z0-9_-]+$/i.test(segment)) || !accepted(request.method, path.join("/"))) {
+  if (!path.every((segment) => /^[a-z0-9_-]+$/i.test(segment)) || !accepted(request.method, route)) {
     return failure(404, "HTTP_ERROR", "接口不存在");
   }
   const headers = new Headers();
-  for (const name of ["content-type", "accept", "origin", "x-csrf-token", "authorization"]) {
-    const value = request.headers.get(name);
-    if (value !== null) headers.set(name, value);
+  if (!dependencyHealth) {
+    for (const name of ["content-type", "accept", "origin", "x-csrf-token", "authorization"]) {
+      const value = request.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
+    if (route === "search") headers.set("x-multisearch-client-unavailable", "1");
+    const session = request.cookies.get(SESSION_COOKIE);
+    if (session) headers.set("cookie", `${SESSION_COOKIE}=${encodeURIComponent(session.value)}`);
   }
-  if (path.length === 1 && path[0] === "search") headers.set("x-multisearch-client-unavailable", "1");
-  const session = request.cookies.get(SESSION_COOKIE);
-  if (session) headers.set("cookie", `${SESSION_COOKIE}=${encodeURIComponent(session.value)}`);
   try {
     const body = request.method === "GET" ? undefined : await boundedBody(request);
     if (body === null) return failure(413, "INVALID_REQUEST", "请求体超过 64 KiB");
-    const target = apiUrl(`/api/v1/${path.join("/")}`);
-    target.search = request.nextUrl.search;
+    const target = apiUrl(dependencyHealth ? "/health/dependencies" : `/api/v1/${route}`);
+    if (!dependencyHealth) target.search = request.nextUrl.search;
     const upstream = await fetch(target, {
       method: request.method,
       headers,
       body,
       redirect: "error",
       cache: "no-store",
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(path.join("/") === "playground" || path.join("/") === "search" ? 65_000 : 25_000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(route === "playground" || route === "search" ? 65_000 : 25_000)]),
     });
     const output = new Headers({ "Cache-Control": "no-store" });
     for (const name of ["content-type", "x-request-id", "x-trace-id", "retry-after", "www-authenticate"]) {

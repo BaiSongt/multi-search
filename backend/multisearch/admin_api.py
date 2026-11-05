@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Query, Request
-from pydantic import Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -372,6 +372,15 @@ async def update_quota(tenant_id: UUID, body: QuotaPatch, request: Request, acto
     return {"id": tenant_id, "quota": updated}
 
 
+def _audit_tenant(actor: SessionUser, tenant_id: UUID | None) -> UUID | None:
+    _require(actor.role, AUDIT)
+    if actor.role == Role.PLATFORM_ADMIN:
+        return tenant_id
+    if tenant_id is not None and tenant_id != actor.tenant_id:
+        raise ApiError(403, "FORBIDDEN", "无权查看其他租户的审计")
+    return actor.tenant_id
+
+
 @router.get("/admin/audit")
 async def audit(
     request: Request,
@@ -380,11 +389,7 @@ async def audit(
     cursor: Cursor = None,
     tenant_id: UUID | None = None,
 ):
-    _require(actor.role, AUDIT)
-    if actor.role != Role.PLATFORM_ADMIN:
-        if tenant_id is not None and tenant_id != actor.tenant_id:
-            raise ApiError(403, "FORBIDDEN", "无权查看其他租户的审计")
-        tenant_id = actor.tenant_id
+    tenant_id = _audit_tenant(actor, tenant_id)
     try:
         before = int(cursor) if cursor is not None else None
         if before is not None and not 1 <= before < 2**63:
@@ -407,3 +412,77 @@ async def audit(
         "items": items[:limit],
         "next_cursor": str(items[limit - 1]["id"]) if len(items) > limit else None,
     }
+
+
+class AuditRisk(BaseModel):
+    event_id: str
+    tenant_id: UUID
+    occurred_at: datetime
+    code: Literal["privileged_access_change", "prod_key_without_ip_allowlist", "tenant_disabled"]
+
+
+class AuditRiskReport(BaseModel):
+    window_days: int
+    alerts: list[AuditRisk]
+    truncated: bool
+
+
+_AUDIT_RISK_DAYS = 7
+_AUDIT_RISK_LIMIT = 20
+
+
+@router.get("/admin/audit/risks")
+async def audit_risks(
+    request: Request, actor: SessionUser, tenant_id: UUID | None = None
+) -> AuditRiskReport:
+    tenant_id = _audit_tenant(actor, tenant_id)
+    async with request.app.state.db.connect() as connection:
+        result = await connection.execute(
+            text("""
+            WITH candidates AS (
+                SELECT id, tenant_id, occurred_at,
+                    CASE
+                        WHEN action = 'member.update'
+                            AND details #> '{after,enabled}' = 'true'::JSONB
+                            AND details #>> '{after,role}' IN (
+                                'platform_admin', 'operations_admin', 'tenant_admin'
+                            )
+                            AND (
+                                details #> '{before,enabled}' = 'false'::JSONB
+                                OR details #>> '{before,role}' <> details #>> '{after,role}'
+                            )
+                        THEN 'privileged_access_change'
+                        WHEN action IN ('invitation.accept', 'user.provision')
+                            AND details ->> 'role' IN (
+                                'platform_admin', 'operations_admin', 'tenant_admin'
+                            )
+                        THEN 'privileged_access_change'
+                        WHEN action = 'key.issue'
+                            AND details ->> 'environment' = 'prod'
+                            AND details -> 'ip_allowlist_count' = '0'::JSONB
+                        THEN 'prod_key_without_ip_allowlist'
+                        WHEN action = 'tenant.update'
+                            AND details #> '{before,enabled}' = 'true'::JSONB
+                            AND details #> '{after,enabled}' = 'false'::JSONB
+                        THEN 'tenant_disabled'
+                    END AS code
+                FROM audit_events
+                WHERE action IN (
+                    'member.update', 'invitation.accept', 'user.provision', 'key.issue', 'tenant.update'
+                )
+                    AND occurred_at >= statement_timestamp() - make_interval(days => :days)
+                    AND occurred_at <= statement_timestamp()
+                    AND (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant)
+            )
+            SELECT CAST(id AS TEXT) AS event_id, tenant_id, occurred_at, code
+            FROM candidates WHERE code IS NOT NULL
+            ORDER BY occurred_at DESC, id DESC LIMIT :limit
+            """),
+            {"tenant": tenant_id, "days": _AUDIT_RISK_DAYS, "limit": _AUDIT_RISK_LIMIT + 1},
+        )
+        rows = result.mappings().all()
+    return AuditRiskReport(
+        window_days=_AUDIT_RISK_DAYS,
+        alerts=[AuditRisk.model_validate(row) for row in rows[:_AUDIT_RISK_LIMIT]],
+        truncated=len(rows) > _AUDIT_RISK_LIMIT,
+    )

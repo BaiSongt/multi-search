@@ -147,10 +147,10 @@ class ResearchRound(BaseModel):
     number: int
     step: str
     mode: Literal["standard", "evidence"]
-    status: Literal["completed", "partial", "failed", "interrupted"]
-    elapsed_ms: int = 0
-    result_count: int = 0
-    source_count: int = 0
+    status: Literal["running", "completed", "partial", "failed", "interrupted"]
+    elapsed_ms: int | None = None
+    result_count: int | None = None
+    source_count: int | None = None
     evidence_coverage_ratio: float | None = Field(default=None, ge=0, le=1)
     evidence_refs: list[str] = Field(default_factory=list)
     provider_runs: list[ProviderRun] = Field(default_factory=list)
@@ -488,7 +488,13 @@ def _research_result(
     )
 
 
-def _missing_reports(state: _ResearchState, plans: list[ResearchStep]) -> None:
+def _account_interrupted_rounds(state: _ResearchState, plans: list[ResearchStep]) -> None:
+    for report in state.rounds:
+        if report.status in {"running", "interrupted"}:
+            report.status = "interrupted"
+            report.elapsed_ms = report.result_count = report.source_count = None
+            report.error_code = "RESEARCH_ROUND_INTERRUPTED"
+            state.warn("RESEARCH_ROUND_INTERRUPTED")
     missing = state.rounds_used - len(state.rounds)
     if missing <= 0:
         return
@@ -555,7 +561,7 @@ def _restore(claim: Claim, budget: ResearchBudget, plans: list[ResearchStep]) ->
     ):
         state.input_tokens = state.output_tokens = None
         state.warn("MODEL_INTERRUPTED")
-    _missing_reports(state, plans)
+    _account_interrupted_rounds(state, plans)
     return state
 
 
@@ -623,20 +629,17 @@ class ResearchOrchestrator:
         planned: int,
         stage: str,
         deadline: float,
-        *,
-        persist: bool = True,
     ) -> bool:
-        snapshot = (
-            _research_result(state, budget, planned, self.pricing).model_dump(mode="json")
-            if persist
-            else None
-        )
+        snapshot = _research_result(state, budget, planned, self.pricing).model_dump(mode="json")
+        completed = len(state.rounds)
+        if state.rounds and state.rounds[-1].status == "running":
+            completed -= 1
         async with asyncio.timeout_at(deadline):
             live = await self.store.progress(
                 claim,
                 JobProgress(
                     stage=stage,
-                    completed=len(state.rounds),
+                    completed=completed,
                     total=planned,
                     pages_fetched=sum(report.pages_fetched for report in state.rounds),
                     llm_tokens=_known_total((state.input_tokens, state.output_tokens)) or 0,
@@ -706,22 +709,23 @@ class ResearchOrchestrator:
         state.rounds_used += 1
         state.pages_charged += pages
         state.metadata_charged += metadata
-        if not await self._checkpoint(
-            claim, state, budget, planned, "searching", deadline, persist=False
-        ):
-            return False
-
-        started = monotonic()
         report = ResearchRound(
             number=state.rounds_used,
             step=plan.label,
             mode=mode,
-            status="failed",
+            status="running",
             pages_attempted=None if pages else 0,
             pages_charged=pages,
             image_metadata_fetches=None if metadata else 0,
             image_metadata_charged=metadata,
         )
+        state.rounds.append(report)
+        if not await self._checkpoint(claim, state, budget, planned, "searching", deadline):
+            return False
+
+        started = monotonic()
+        report.status = "failed"
+        report.result_count = report.source_count = 0
         round_timeout = asyncio.timeout_at(round_deadline)
         try:
             async with round_timeout:
@@ -744,7 +748,6 @@ class ResearchOrchestrator:
         else:
             self._merge_round(state, budget, report, response)
         report.elapsed_ms = max(0, int((monotonic() - started) * 1000))
-        state.rounds.append(report)
         if report.error_code:
             state.warn(f"RESEARCH_ROUND_{report.error_code}")
         if round_deadline == deadline and round_timeout.expired():
@@ -882,7 +885,7 @@ class ResearchOrchestrator:
                 return JobOutcome(JobStatus.CANCELLED)
         except TimeoutError:
             state.warn("TIME_BUDGET_EXCEEDED")
-        _missing_reports(state, plans)
+        _account_interrupted_rounds(state, plans)
         if state.rounds_used < len(plans):
             state.warn("RESEARCH_PLAN_INCOMPLETE")
         if (

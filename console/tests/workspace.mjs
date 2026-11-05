@@ -11,9 +11,7 @@ if (!["http:", "https:"].includes(base.protocol) || base.hostname !== "127.0.0.1
   throw new Error("浏览器回归只允许使用回环 Console 地址");
 }
 
-function provision(role) {
-  const tenant = `browser-${randomBytes(6).toString("hex")}`;
-  const email = `${tenant}@example.invalid`;
+function provision(role, tenant = `browser-${randomBytes(6).toString("hex")}`, email = `${tenant}@example.invalid`) {
   const password = randomBytes(24).toString("base64url");
   const result = spawnSync("docker", [
     "compose", "exec", "-T", "multisearch-api", "python", "-m", "multisearch.keys", "user-add",
@@ -251,8 +249,8 @@ async function researchJob(page, csrf) {
     rounds: [
       { number: 1, step: "original", mode: "evidence", status: "completed", elapsed_ms: 100, result_count: 1,
         source_count: 1, evidence_coverage_ratio: 1, evidence_refs: [record.evidence_id], error_code: null },
-      { number: 2, step: "limitations", mode: "evidence", status: "partial", elapsed_ms: 200, result_count: 0,
-        source_count: 0, evidence_coverage_ratio: null, evidence_refs: [], error_code: null },
+      { number: 2, step: "limitations", mode: "evidence", status: "interrupted", elapsed_ms: null, result_count: null,
+        source_count: null, evidence_coverage_ratio: null, evidence_refs: [], error_code: "RESEARCH_ROUND_INTERRUPTED" },
     ],
     evidence_records: [record], warnings: ["第二轮仅返回部分结果。"], comparisons: [],
     findings: [{ title: record.title, origin_url: origin, excerpt: record.evidence_text,
@@ -377,7 +375,8 @@ async function researchJob(page, csrf) {
     const secondRound = report.getByRole("listitem").filter({ hasText: "第 2 轮" });
     await firstRound.getByText("100%", { exact: true }).waitFor();
     await firstRound.getByText("1", { exact: true }).waitFor();
-    await secondRound.getByText("未报告", { exact: true }).waitFor();
+    await secondRound.getByText(/结果数未报告 · 耗时未报告/).waitFor();
+    assert.equal(await secondRound.getByText("未报告", { exact: true }).count(), 2);
     await report.getByRole("heading", { name: "模型综合 · 未核验" }).waitFor();
     assert.equal(await report.getByRole("link", { name: record.title }).getAttribute("href"), origin);
     await report.getByRole("button", { name: "证据 · 研究来源" }).first().click();
@@ -465,6 +464,55 @@ async function verifyInvitation(browser, adminPage, tenant, tenantId) {
   await adminPage.getByRole("button", { name: "预览调整" }).click();
   await adminPage.getByRole("button", { name: "确认调整" }).click();
   await member.getByText("租户管理员", { exact: true }).waitFor();
+}
+
+async function verifyRoleSwitch(browser, primary, account, admin, adminSession, tenant, tenantId) {
+  const adminHeaders = { Origin: base.origin, "X-CSRF-Token": adminSession.csrf_token };
+  const invitation = await admin.request.post(`/gateway/admin/tenants/${tenantId}/invitations`, {
+    data: { email: account.email, role: "tenant_admin" }, headers: adminHeaders,
+  });
+  assert.equal(invitation.status(), 201);
+  const secondary = await browser.newContext({ baseURL: base.origin });
+  const previous = await browser.newContext({ baseURL: base.origin });
+  try {
+    const accepted = await secondary.request.post("/gateway/auth/invitations/accept", {
+      data: { token: (await invitation.json()).token, password: account.password },
+      headers: { Origin: base.origin },
+    });
+    assert.equal(accepted.status(), 201);
+    const login = await secondary.request.post("/gateway/auth/login", {
+      data: account, headers: { Origin: base.origin },
+    });
+    assert.equal(login.status(), 200);
+    const original = await session(secondary);
+    await previous.addCookies(await secondary.cookies());
+
+    const page = await secondary.newPage();
+    await page.goto("/console/overview");
+    await page.getByRole("link", { name: "切换租户", exact: true }).click();
+    await waitForTitle(page, "切换租户身份");
+    await page.getByRole("button", { name: `切换到 ${tenant}`, exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "确认切换租户" });
+    await dialog.getByText(/以租户管理员身份进入/).waitFor();
+    await dialog.getByRole("button", { name: "确认切换", exact: true }).click();
+    await page.waitForURL("**/console/overview");
+    const switched = await session(secondary);
+    assert.equal(switched.tenant_id, tenantId);
+    assert.equal(switched.user_id, original.user_id);
+    assert.equal(switched.role, "tenant_admin");
+    assert.equal(switched.expires_at, original.expires_at);
+    assert.notEqual(switched.csrf_token, original.csrf_token);
+    assert.equal((await previous.request.get("/gateway/me")).status(), 401);
+    assert.equal((await session(primary)).tenant_id, original.tenant_id);
+    await page.getByRole("link", { name: "团队与权限" }).waitFor();
+    const logout = await secondary.request.post("/gateway/auth/logout", {
+      headers: { Origin: base.origin, "X-CSRF-Token": switched.csrf_token },
+    });
+    assert.equal(logout.status(), 204);
+  } finally {
+    await previous.close();
+    await secondary.close();
+  }
 }
 
 async function verifyCancellation(page, tenantId) {
@@ -762,6 +810,32 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     await signIn(adminPage, adminAccount);
     await waitForTitle(adminPage, "服务总览");
     adminSession = await session(admin);
+    const serviceState = adminPage.getByRole("region", { name: "服务状态" });
+    await serviceState.getByText("PostgreSQL", { exact: true }).waitFor();
+    const healthPath = "/gateway/health/dependencies";
+    const healthResponse = await admin.request.get(healthPath);
+    assert.equal(healthResponse.status(), 200);
+    assert.equal(healthResponse.headers()["cache-control"], "no-store");
+    const { checks } = await healthResponse.json();
+    assert.equal(checks.api, "healthy");
+    assert.equal(checks.postgresql, "healthy");
+    assert.equal(checks.redis, "healthy");
+    assert.equal((await admin.request.post(healthPath)).status(), 404);
+    await adminPage.getByRole("heading", { name: "队列压力" }).waitFor();
+    const overviewRoute = "**/gateway/admin/overview";
+    const unavailableOverview = (route) => route.fulfill({
+      status: 503,
+      json: { code: "REPORT_FIXTURE_UNAVAILABLE", message: "指标暂不可用" },
+    });
+    await adminPage.route(overviewRoute, unavailableOverview);
+    try {
+      await adminPage.getByRole("button", { name: "刷新指标" }).click();
+      await adminPage.getByRole("alert").getByText("指标暂不可用").waitFor();
+      await serviceState.getByText("PostgreSQL", { exact: true }).waitFor();
+    } finally {
+      await adminPage.unroute(overviewRoute, unavailableOverview);
+    }
+    await adminPage.getByRole("button", { name: "刷新指标" }).click();
     await adminPage.getByRole("heading", { name: "队列压力" }).waitFor();
     await adminPage.getByRole("link", { name: "查看任务与队列" }).waitFor();
     const overview = await admin.request.get("/gateway/admin/overview");
@@ -896,6 +970,50 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     await adminPage.goto("/admin/audit");
     await adminPage.getByText("quota.update", { exact: true }).first().waitFor();
     await verifyInvitation(browser, adminPage, tenant, tenantId);
+    fixtureAccounts.push(provision("tenant_admin", auditorAccount.tenant, `${auditorAccount.tenant}-risk@example.invalid`));
+    const riskPath = "/gateway/admin/audit/risks";
+    const riskHeaders = { Origin: base.origin, "X-CSRF-Token": developerSession.csrf_token };
+    const riskKey = await developer.request.post("/gateway/keys", {
+      data: { name: "审计回归生产密钥", environment: "prod", scopes: ["search:text"] },
+      headers: riskHeaders,
+    });
+    assert.equal(riskKey.status(), 201);
+    const riskKeyId = (await riskKey.json()).key.id;
+    try {
+      const scoped = await admin.request.get(riskPath, { params: { tenant_id: developerSession.tenant_id } });
+      assert.equal(scoped.status(), 200);
+      const alerts = (await scoped.json()).alerts;
+      const prodAlert = alerts.find((entry) => entry.code === "prod_key_without_ip_allowlist");
+      assert.ok(prodAlert);
+      assert.deepEqual(Object.keys(prodAlert).sort(), ["code", "event_id", "occurred_at", "tenant_id"]);
+      const auditPage = await admin.request.get("/gateway/admin/audit", {
+        params: { tenant_id: developerSession.tenant_id },
+      });
+      const source = (await auditPage.json()).items.find((entry) => String(entry.id) === prodAlert.event_id);
+      assert.equal(source?.target_id, riskKeyId);
+      assert.equal((await developer.request.get(riskPath)).status(), 403);
+      assert.equal((await auditor.request.get(riskPath, { params: { tenant_id: developerSession.tenant_id } })).status(), 403);
+      const own = await auditor.request.get(riskPath);
+      assert.equal(own.status(), 200);
+      const ownAlerts = (await own.json()).alerts;
+      assert.ok(ownAlerts.some((entry) => entry.code === "privileged_access_change"));
+      assert.ok(ownAlerts.every((entry) => entry.tenant_id === auditorSession.tenant_id));
+
+      await adminPage.goto("/admin/audit");
+      await adminPage.getByRole("heading", { name: "风险告警" }).waitFor();
+      const table = adminPage.getByRole("region", { name: "近期风险告警" });
+      await table.getByRole("row").filter({ hasText: prodAlert.event_id })
+        .getByText("签发了未限制 IP 的生产密钥").waitFor();
+      await auditorPage.goto("/admin/audit");
+      const auditorAlerts = auditorPage.getByRole("region", { name: "近期风险告警" });
+      await auditorAlerts.getByText("管理员权限相关操作").waitFor();
+      assert.equal(await auditorAlerts.getByText("签发了未限制 IP 的生产密钥").count(), 0);
+    } finally {
+      assert.equal((await developer.request.post(`/gateway/keys/${riskKeyId}/revoke`, {
+        headers: riskHeaders,
+      })).status(), 200);
+    }
+    await verifyRoleSwitch(browser, developer, developerAccount, admin, adminSession, tenant, tenantId);
     await verifyOperations(adminPage, tenantId);
     await verifyCancellation(adminPage, tenantId);
 

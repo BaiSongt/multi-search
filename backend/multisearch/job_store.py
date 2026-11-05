@@ -203,6 +203,8 @@ class JobStore:
                         CASE WHEN jsonb_array_length(COALESCE(result -> 'evidence_records', '[]'::JSONB)) > 0
                             OR jsonb_array_length(COALESCE(result -> 'ocr_pending', '[]'::JSONB)) > 0
                             OR result @? '$.results[*] ? (@.evidence_status == "ocr_pending")'
+                            OR (kind = 'research' AND
+                                jsonb_array_length(COALESCE(result -> 'results', '[]'::JSONB)) > 0)
                             THEN 'partial' ELSE 'failed' END
                     ELSE 'queued' END AS next_status,
                     CASE
@@ -221,6 +223,9 @@ class JobStore:
                     progress = jsonb_set(j.progress, '{stage}', to_jsonb(e.next_status)),
                     payload = CASE WHEN e.next_status = 'queued' THEN j.payload ELSE '{}'::JSONB END,
                     result = CASE WHEN e.next_status = 'cancelled' THEN NULL
+                        WHEN j.result #>> '{rounds,-1,status}' = 'running' THEN
+                            jsonb_set(j.result, '{rounds,-1}', (j.result #> '{rounds,-1}') ||
+                                jsonb_build_object('status', 'interrupted', 'error_code', 'RESEARCH_ROUND_INTERRUPTED'))
                         WHEN jsonb_typeof(j.result -> 'usage') = 'object'
                             AND e.model_reservation > COALESCE(
                                 (j.result #>> '{usage,llm_tokens_reserved}')::INTEGER, 0
@@ -253,7 +258,14 @@ class JobStore:
                 llm_usage_unknown = r.model_reservation > 0
                     AND NOT COALESCE((r.result #>> '{usage,llm_usage_known}')::BOOLEAN, FALSE),
                 estimated_cost = (r.result #>> '{usage,estimated_cost}')::NUMERIC,
-                cost_currency = r.result #>> '{usage,cost_currency}'
+                cost_currency = r.result #>> '{usage,cost_currency}',
+                text_results_returned = COALESCE(jsonb_array_length(jsonb_path_query_array(
+                    r.result, '$.results[*] ? (@.kind == "text")')), 0),
+                image_results_returned = COALESCE(jsonb_array_length(jsonb_path_query_array(
+                    r.result, '$.results[*] ? (@.kind == "image")')), 0),
+                image_sources_present = COALESCE(jsonb_array_length(jsonb_path_query_array(
+                    r.result, '$.results[*] ? (@.kind == "image" && @.image.source_page_url.type() == "string")')), 0),
+                elapsed_ms = LEAST(2147483647, (extract(epoch FROM (now() - u.created_at)) * 1000)::BIGINT)
             FROM recovered r WHERE u.id = r.id AND r.status IN ('partial','failed','cancelled')
         """)
         )

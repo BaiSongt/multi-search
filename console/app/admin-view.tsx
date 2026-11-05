@@ -4,23 +4,48 @@ import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { ProviderCapabilities } from "./provider-capabilities";
 import { callApi } from "./lib/api";
-import { quotaLabels, type Audit, type Overview, type Page, type Provider, type RequestRow, type Tenant, type TenantQuotaUsage } from "./lib/contracts";
+import { quotaLabels, type Audit, type AuditRiskReport, type DependencyHealth, type Overview, type Page, type Provider, type RequestRow, type ServiceStatus, type Tenant, type TenantQuotaUsage } from "./lib/contracts";
 import { CopyId, dateTime, Dialog, Empty, Failure, formatNumber, Loading, Pagination, Table, usePagination, useResource } from "./ui";
 import { Metrics, QuotaSummary, RequestTable, resourceMetrics, Trend } from "./usage-view";
 
-export function AdminOverview() {
-  const resource = useResource<Overview>("admin/overview");
-  const failures = useResource<Page<RequestRow>>("admin/requests?status=failed&limit=5");
-  if (resource.pending) return <Loading />;
-  if (!resource.data) return <Failure reason={resource.error} retry={resource.reload} />;
-  const overview = resource.data;
+const dependencyLabels: Record<keyof DependencyHealth["checks"], string> = {
+  api: "API",
+  postgresql: "PostgreSQL",
+  redis: "Redis",
+  fetch_worker: "抓取 Worker",
+  research_worker: "研究 Worker",
+  dynamic_fetch_worker: "动态抓取 Worker",
+  searxng: "SearXNG 服务",
+  crawl4ai: "Crawl4AI（API）",
+};
+const serviceStatuses: Record<ServiceStatus, { label: string; tone: string }> = {
+  healthy: { label: "正常", tone: "positive" },
+  unavailable: { label: "不可用", tone: "danger" },
+  unknown: { label: "未确认", tone: "warning" },
+  not_configured: { label: "未配置", tone: "" },
+};
+
+function DependencyChecks({ health }: { health: DependencyHealth }) {
+  return (
+    <>
+      <p className="muted">采样时间 <time dateTime={health.checked_at}>{dateTime(health.checked_at)}</time></p>
+      <dl>
+        {(Object.keys(dependencyLabels) as (keyof typeof dependencyLabels)[]).map((key) => {
+          const status = serviceStatuses[health.checks[key] ?? "unknown"] ?? serviceStatuses.unknown;
+          return <div className="definition" key={key}>
+            <dt>{dependencyLabels[key]}</dt>
+            <dd><span className={`badge ${status.tone}`}>{status.label}</span></dd>
+          </div>;
+        })}
+      </dl>
+    </>
+  );
+}
+
+function OverviewMetrics({ overview }: { overview: Overview }) {
   const queue = overview.job_queue;
   return (
     <>
-      <div className="actions">
-        <span className="muted">QPS 取最近 1 分钟，其他用量和延迟取最近 30 天。没有样本时显示「—」。</span>
-        <button type="button" onClick={() => { resource.reload(); failures.reload(); }}>刷新指标</button>
-      </div>
       <Metrics values={[
         ["平均 QPS", overview.requests_per_second, "次/s"],
         ["成功率", overview.success_rate == null ? null : overview.success_rate * 100, "%"],
@@ -46,6 +71,29 @@ export function AdminOverview() {
         </> : <Empty>队列指标暂不可用。</Empty>}
         <Link href="/admin/jobs">查看任务与队列</Link>
       </section>
+    </>
+  );
+}
+
+export function AdminOverview() {
+  const resource = useResource<Overview>("admin/overview");
+  const failures = useResource<Page<RequestRow>>("admin/requests?status=failed&limit=5");
+  const health = useResource<DependencyHealth>("health/dependencies");
+  return (
+    <>
+      <div className="actions">
+        <span className="muted">QPS 取最近 1 分钟，其他用量和延迟取最近 30 天。没有样本时显示「—」。</span>
+        <button type="button" onClick={() => { resource.reload(); failures.reload(); health.reload(); }}>刷新指标</button>
+      </div>
+      <section className="panel stack" aria-labelledby="dependency-health">
+        <h2 id="dependency-health">服务状态</h2>
+        {health.pending && <Loading />}
+        {health.error !== undefined && <Failure reason={health.error} retry={health.reload} />}
+        {health.data && <DependencyChecks health={health.data} />}
+      </section>
+      {resource.pending && <Loading />}
+      {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
+      {resource.data && <OverviewMetrics overview={resource.data} />}
       <section className="panel">
         <h2>最近异常</h2>
         {failures.pending && <Loading />}
@@ -409,17 +457,46 @@ function CreateTenant({ csrf, close, created }: { csrf: string; close: () => voi
   );
 }
 
+const AUDIT_RISK_LABELS: Record<AuditRiskReport["alerts"][number]["code"], string> = {
+  privileged_access_change: "管理员权限相关操作",
+  prod_key_without_ip_allowlist: "签发了未限制 IP 的生产密钥",
+  tenant_disabled: "租户已停用",
+};
+
 export function AuditView() {
   const pager = usePagination();
   const [filter, setFilter] = useState("");
   const query = new URLSearchParams({ limit: "20" });
   if (pager.cursor) query.set("cursor", pager.cursor);
   const resource = useResource<Page<Audit>>(`admin/audit?${query}`);
+  const risks = useResource<AuditRiskReport>("admin/audit/risks");
   const rows = resource.data?.items.filter((event) =>
     `${event.action} ${event.tenant_id} ${event.actor_id ?? ""} ${event.target_id ?? ""}`.toLowerCase().includes(filter.trim().toLowerCase())
   );
   return (
     <>
+      <section className="panel stack" aria-labelledby="audit-risk-title">
+        <div className="actions">
+          <h2 id="audit-risk-title">风险告警</h2>
+          <button type="button" onClick={risks.reload} disabled={risks.pending}>刷新风险告警</button>
+        </div>
+        {risks.pending && <Loading />}
+        {risks.error !== undefined && <Failure reason={risks.error} retry={risks.reload} />}
+        {risks.data && <>
+          <p className="muted">最近 {risks.data.window_days} 天内值得复核的管理操作。{risks.data.truncated && `仅显示最新 ${risks.data.alerts.length} 条。`}</p>
+          {risks.data.alerts.length === 0 ? <Empty>本周期没有匹配的风险告警。</Empty> :
+            <Table caption="近期风险告警" headers={["时间", "风险提示", "租户", "事件 ID"]}>
+              {risks.data.alerts.map((alert) => (
+                <tr key={alert.event_id}>
+                  <td>{dateTime(alert.occurred_at)}</td>
+                  <td><span className="badge warning">{AUDIT_RISK_LABELS[alert.code] ?? alert.code}</span></td>
+                  <td><CopyId value={alert.tenant_id} /></td>
+                  <td><CopyId value={alert.event_id} /></td>
+                </tr>
+              ))}
+            </Table>}
+        </>}
+      </section>
       <div className="actions">
         <input value={filter} aria-label="筛选本页审计事件" placeholder="筛选本页动作或 ID" onChange={(event) => setFilter(event.target.value)} />
         <button type="button" onClick={resource.reload} disabled={resource.pending}>刷新</button>

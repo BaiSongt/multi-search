@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -15,6 +15,7 @@ from .application import SearchApplication
 from .auth import authenticate_machine, console_origin, machine_peer
 from .errors import install_errors
 from .evidence_api import router as evidence_router
+from .health import DependencyHealth, DependencySnapshot
 from .identity import IdentityStore
 from .job_api import router as job_router
 from .job_application import JobApplication
@@ -113,6 +114,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     app.state.search,
                     enable_research=config.enable_research,
                 )
+                app.state.dependency_health = DependencyHealth(
+                    app.state.db, app.state.redis, client, config
+                )
                 async with meter.maintenance(), mcp.session_manager.run():
                     yield
         finally:
@@ -133,6 +137,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/live")
     async def live():
         return {"status": "alive", "version": VERSION}
+
+    @app.get("/health/dependencies")
+    async def dependency_health(request: Request, response: Response) -> DependencySnapshot:
+        response.headers["Cache-Control"] = "no-store"
+        return await request.app.state.dependency_health.snapshot()
 
     @app.get("/health/ready")
     async def ready(request: Request):

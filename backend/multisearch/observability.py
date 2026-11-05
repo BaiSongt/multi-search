@@ -72,6 +72,8 @@ _FIXED_PATHS = {
     "/api/v1/auth/login": "auth_login",
     "/api/v1/auth/refresh": "auth_refresh",
     "/api/v1/auth/logout": "auth_logout",
+    "/api/v1/auth/memberships": "auth_memberships",
+    "/api/v1/auth/switch": "auth_switch",
     "/api/v1/auth/invitations/accept": "invite_accept",
     "/api/v1/keys": "keys",
     "/api/v1/admin/providers": "admin_providers",
@@ -79,6 +81,7 @@ _FIXED_PATHS = {
     "/api/v1/admin/requests": "admin_requests",
     "/api/v1/admin/tenants": "admin_tenants",
     "/api/v1/admin/audit": "admin_audit",
+    "/api/v1/admin/audit/risks": "admin_audit_risks",
     "/api/v1/admin/settings": "admin_settings",
     "/api/v1/admin/images": "admin_images",
     "/api/v1/admin/jobs": "admin_jobs",
@@ -93,6 +96,7 @@ _FIXED_PATHS = {
     "/mcp": "mcp",
     "/health/live": "live",
     "/health/ready": "ready",
+    "/health/dependencies": "dependency_health",
     "/metrics": "metrics",
 }
 _PATTERNS = tuple(
@@ -116,6 +120,8 @@ _CONSOLE_ACTIONS = frozenset(
         "auth_login",
         "auth_refresh",
         "auth_logout",
+        "auth_memberships",
+        "auth_switch",
         "invite_accept",
         "keys",
         "key_rotate",

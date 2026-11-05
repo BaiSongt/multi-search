@@ -134,8 +134,11 @@ class Search:
         self.calls = []
 
     async def search(self, request, tenant, request_id, *, metered, deadline, routing):
-        checkpoint, _ = self.store.checkpoints[-1]
+        checkpoint, snapshot = self.store.checkpoints[-1]
         assert checkpoint.stage == "searching" and checkpoint.research_budget["search_rounds"] > 0
+        pending = snapshot["rounds"][-1]
+        assert pending["status"] == "running" and checkpoint.completed == pending["number"] - 1
+        assert pending["elapsed_ms"] is pending["result_count"] is pending["source_count"] is None
         assert metered is True and request.idempotency_key is None and request.max_llm_tokens == 0
         assert routing == DEFAULT_ROUTING and deadline >= asyncio.get_running_loop().time()
         self.calls.append((request, tenant, request_id))
@@ -304,7 +307,9 @@ async def test_recovered_job_retains_evidence_but_never_replays_reserved_round_o
     )
     await ResearchOrchestrator(first_search, first_store).run(first)
     ((_, saved),) = [
-        entry for entry in first_store.checkpoints if entry[1] and len(entry[1]["rounds"]) == 1
+        entry
+        for entry in first_store.checkpoints
+        if entry[0].stage == "researching" and entry[0].completed == 1
     ]
     interrupted = JobProgress(
         stage="running",
@@ -345,12 +350,49 @@ async def test_recovered_job_retains_evidence_but_never_replays_reserved_round_o
     assert len(search.calls) == 1
     assert search.calls[0][0].max_pages == 0 and search.calls[0][2].endswith(".3")
     assert [step.status for step in result.rounds] == ["completed", "interrupted", "completed"]
+    assert result.rounds[1].elapsed_ms is result.rounds[1].source_count is None
     assert result.usage.pages_attempted is None and result.usage.pages_charged == 3
     assert result.usage.llm_tokens is None and result.usage.llm_tokens_reserved == 1800
     assert not result.usage.llm_usage_known and result.usage.estimated_cost is None
     assert result.usage.cost_currency == "USD"
     assert result.evidence_records[0].evidence_id == evidence.evidence_id
     assert "MODEL_INTERRUPTED" in result.warnings
+
+
+async def test_reclaimed_inflight_round_has_unknown_metrics_without_replaying_it():
+    store = Store()
+    source, evidence = _record("inflight", "example.org", "a")
+    body = _request(max_search_rounds=2, max_pages=4, require_evidence=True)
+    original = _claim(body)
+    successful = _response(Mode.EVIDENCE, [source], [evidence], attempted=1)
+    await ResearchOrchestrator(Search(store, [successful, successful]), store).run(original)
+    progress, snapshot = next(
+        entry
+        for entry in store.checkpoints
+        if entry[0].stage == "searching" and entry[0].completed == 1
+    )
+    reclaimed = Claim(
+        original.job_id,
+        original.tenant_id,
+        uuid4(),
+        JobKind.RESEARCH,
+        original.payload,
+        original.deadline_at,
+        progress,
+        snapshot,
+    )
+    resume_store = Store()
+    search = Search(resume_store, [])
+    outcome = await ResearchOrchestrator(search, resume_store).run(reclaimed)
+    assert outcome.status == JobStatus.PARTIAL and not search.calls
+    result = ResearchResult.model_validate(outcome.result)
+    first, interrupted = result.rounds
+    assert first.status == "completed" and first.elapsed_ms is not None
+    assert interrupted.status == "interrupted" and interrupted.number == 2
+    assert interrupted.elapsed_ms is interrupted.result_count is interrupted.source_count is None
+    assert interrupted.step == snapshot["rounds"][1]["step"]
+    assert result.usage.search_rounds == 2
+    assert "RESEARCH_ROUND_INTERRUPTED" in result.warnings
 
 
 async def test_cache_hit_does_not_consume_page_attempts_or_report_new_fetches():

@@ -337,7 +337,9 @@ class SessionStore:
             await self._audit(connection, actor, "session.login")
         return raw, actor
 
-    async def _open(self, connection: AsyncConnection, row) -> tuple[str, SessionIdentity]:
+    async def _open(
+        self, connection: AsyncConnection, row, *, expires_at_limit: datetime | None = None
+    ) -> tuple[str, SessionIdentity]:
         session_id = uuid4()
         raw = f"mss_{session_id.hex}.{secrets.token_urlsafe(32)}"
         expires_at = await connection.scalar(
@@ -346,7 +348,8 @@ class SessionStore:
                     (id, tenant_id, user_id, secret_hash, expires_at, absolute_expires_at,
                      management_id, created_at)
                 SELECT :id, :tenant_id, :user_id, :hash,
-                       least(statement_timestamp() + interval '8 hours', deadline), deadline,
+                       least(statement_timestamp() + interval '8 hours', deadline,
+                             CAST(:expires_at AS TIMESTAMPTZ)), deadline,
                        :management_id, coalesce(:created_at, statement_timestamp())
                 FROM (
                     SELECT coalesce(:absolute, statement_timestamp() + interval '7 days') AS deadline
@@ -359,6 +362,7 @@ class SessionStore:
                 "user_id": row["user_id"],
                 "hash": self._digest("session", raw),
                 "absolute": row.get("absolute_expires_at"),
+                "expires_at": expires_at_limit,
                 "management_id": row["management_id"] if "management_id" in row else uuid4(),
                 "created_at": row.get("created_at"),
             },
@@ -399,7 +403,7 @@ class SessionStore:
                 await connection.execute(
                     text(
                         """
-                SELECT s.id, s.tenant_id, s.user_id, s.absolute_expires_at,
+                SELECT s.id, s.tenant_id, s.user_id, s.expires_at, s.absolute_expires_at,
                        s.management_id, s.created_at,
                        m.role, t.slug AS tenant, u.email
             """
@@ -421,6 +425,82 @@ class SessionStore:
         ):
             raise ApiError(403, "FORBIDDEN", "账户角色已变更，请重试")
         return row
+
+    async def list_memberships(
+        self, actor: SessionIdentity, limit: int, cursor: str | None
+    ) -> tuple[list[dict], str | None]:
+        async with self.db.connect() as connection:
+            await self.assert_actor(connection, actor)
+            result = await connection.execute(
+                text("""
+                    SELECT t.id AS tenant_id, t.slug AS tenant, m.role
+                    FROM memberships m JOIN tenants t ON t.id = m.tenant_id
+                    WHERE m.user_id = :user_id AND m.tenant_id <> :current_tenant
+                        AND m.enabled AND t.enabled AND t.slug > :cursor
+                    ORDER BY t.slug LIMIT :limit
+                """),
+                {
+                    "user_id": actor.user_id,
+                    "current_tenant": actor.tenant_id,
+                    "cursor": cursor or "",
+                    "limit": limit + 1,
+                },
+            )
+            rows = [dict(row) for row in result.mappings()]
+        return rows[:limit], rows[limit - 1]["tenant"] if len(rows) > limit else None
+
+    async def switch(self, actor: SessionIdentity, tenant_id: UUID) -> tuple[str, SessionIdentity]:
+        if tenant_id == actor.tenant_id:
+            raise ApiError(409, "MEMBERSHIP_CURRENT", "已在该租户的工作区")
+        unavailable = ApiError(404, "MEMBERSHIP_NOT_FOUND", "可切换的租户身份不存在")
+        target = {"tenant_id": tenant_id, "user_id": actor.user_id}
+        async with self.db.begin() as connection:
+            # 先检查本人目标成员资格，避免为任意租户获取锁。
+            visible = await connection.scalar(
+                text("""
+                    SELECT true FROM memberships m JOIN tenants t ON t.id = m.tenant_id
+                    WHERE (m.tenant_id, m.user_id) = (:tenant_id, :user_id)
+                        AND m.enabled AND t.enabled
+                """),
+                target,
+            )
+            if not visible:
+                raise unavailable
+            # 以固定顺序串行化双向切换和任一租户的成员更新。
+            for locked_tenant in sorted((actor.tenant_id, tenant_id)):
+                await lock_tenant(connection, locked_tenant)
+            current = await self.assert_actor(connection, actor, rotate=True)
+            membership = (
+                (
+                    await connection.execute(
+                        text("""
+                        SELECT m.tenant_id, m.user_id, m.role, t.slug AS tenant, u.email
+                        FROM memberships m JOIN tenants t ON t.id = m.tenant_id
+                        JOIN users u ON u.id = m.user_id
+                        WHERE (m.tenant_id, m.user_id) = (:tenant_id, :user_id)
+                            AND m.enabled AND t.enabled AND u.enabled
+                        FOR SHARE OF m, t, u
+                    """),
+                        target,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if membership is None:
+                raise unavailable
+            await self._close(connection, actor)
+            raw, switched = await self._open(
+                connection,
+                {
+                    **membership,
+                    "absolute_expires_at": current["absolute_expires_at"],
+                },
+                expires_at_limit=current["expires_at"],
+            )
+            await self._audit(connection, actor, "session.switch_out")
+            await self._audit(connection, switched, "session.switch_in")
+        return raw, switched
 
     async def list_sessions(
         self, actor: SessionIdentity, limit: int, cursor: UUID | None

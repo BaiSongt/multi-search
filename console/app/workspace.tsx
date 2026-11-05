@@ -88,6 +88,7 @@ export async function WorkspacePage({ workspace, route }: { workspace: Workspace
           <span className="muted desktop-only">{session.tenant}</span>
           <span className="badge">{roleLabels[session.role]}</span>
           <ThemeToggle />
+          <Link className="button" href="/auth?switch=1">切换租户</Link>
           <Link className="button" href="/console/settings">账户</Link>
         </div>
       </header>
