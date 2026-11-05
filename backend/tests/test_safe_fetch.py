@@ -2,6 +2,7 @@ import asyncio
 
 import httpx
 import pytest
+
 from multisearch import safe_fetch
 from multisearch.safe_fetch import FetchError, SafeFetcher
 

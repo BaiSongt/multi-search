@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
+
 from multisearch.contracts import ImageAttribution, ImageSearchResult, Source
 from multisearch.image_source import PublicImageSourceResolver
 from multisearch.safe_fetch import FetchedPage, FetchError

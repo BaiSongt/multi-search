@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+
 from multisearch.contracts import ImageAttribution, ImageSearchResult, Source
 from multisearch.image_attribution import ImageAttributionResolver
 

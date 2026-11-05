@@ -3,6 +3,7 @@ from hashlib import sha256
 
 import httpx
 import pytest
+
 from multisearch.crawl_parser import CrawlParser
 from multisearch.evidence import EvidenceBuilder
 from multisearch.safe_fetch import FetchedPage, FetchError
