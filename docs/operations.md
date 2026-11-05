@@ -99,7 +99,17 @@ docker compose --profile fetch exec -T multisearch-worker python - \
   https://www.rfc-editor.org/rfc/rfc8785.pdf --method pypdf < scripts/probe_public_fetch.py
 ```
 
-HTML 默认要求 Crawl4AI 提供提取提示。可用 `--method static_html` 单独验收静态解析。探针会签发并吊销临时抓取 Key，经 REST 入队和重放，校验可定位正文、证据读取以及 PostgreSQL 中的单次用量与追踪。无正文、抓取失败或解析方法不符时返回非零状态。Worker DNS 返回非公网地址时输出策略拒绝诊断。
+HTML 默认验收 `crawl4ai_static`。若部署会使用静态提取，请传 `--method static_html` 校验这一结果。`--method` 声明预期方法，`browser_dom` 同时提交动态提取请求。探针会签发并吊销临时抓取 Key，经 REST 入队和重放，校验可定位正文、证据读取以及 PostgreSQL 中的单次用量与追踪。无正文、抓取失败或方法不符时返回非零状态。Worker DNS 返回非公网地址时输出策略拒绝诊断。
+
+使用 `--json` 可保存脱敏的验收记录。报告可用于对照 API 与 Worker 版本、任务与追踪标识、证据摘要和定位、用量核对状态及失败诊断。退出码为 0 的记录表示本次指定 URL 验收通过。
+
+```sh
+docker compose --profile fetch exec -T multisearch-worker python - \
+  https://www.rfc-editor.org/rfc/rfc8785.pdf --method pypdf --json \
+  < scripts/probe_public_fetch.py > .secrets/public-fetch-pdf.json
+```
+
+移交同一部署的 HTML 和 PDF 报告时，同时记录 `git rev-parse HEAD` 和 `docker compose images`。`dns_status` 是失败后从同一 Worker 对入口域名的重查结果，重定向目标及实际连接仍以抓取结果为准。
 
 启用动态配置后，可用 `--method browser_dom` 验收允许保留摘录的公开测试 URL。页面域名、所需资源的 URL 和跨源资源的域名须事先加入对应的部署清单。受控探针使用同一隔离渲染器和临时 PostgreSQL，以夹具模拟来源 DNS 和 HTTP 响应。它覆盖同源模块与跨源脚本、JSON 生成正文，验证来源 CSP、CORS、CORP 和 COEP，以及预检、凭据和未授权子请求的阻断。探针还检查 robots、时限、证据定位、资源包指纹和任务幂等。 [部署清单](deployment.md#可选动态-html-渲染)
 

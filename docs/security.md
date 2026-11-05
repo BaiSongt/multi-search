@@ -5,7 +5,7 @@
 - [ ] 保持 PostgreSQL、Redis、SearXNG、Worker 与解析器的服务端口位于受控网络。Compose 默认只将 API 和 Console 发布到宿主机回环地址。对外服务使用 HTTPS 反向代理，设置准确的 `MULTISEARCH_PUBLIC_CONSOLE_URL` 和 `MULTISEARCH_PUBLIC_API_BASE_URL`，验证同源登录、会话 Cookie 的 Secure 属性、CSRF 与反向代理的访问日志脱敏。 [部署说明](deployment.md)
 - [ ] 使用仓库的初始化脚本生成独立的数据库、Key 哈希、SearXNG、解析器与指标密钥。限制密钥文件和备份的读取权限，定期演练数据库密码、指标令牌及机器 Key 的轮换。更换 API Key 哈希 pepper 会让已签发 Key 失效，恢复时应从独立的密钥备份中取得对应版本。 [密钥初始化](../scripts/init-secrets.py)
 - [ ] 首位管理员由本地运维终端创建。人机接口使用分离的凭据。管理员和开发者通过 Console 会话完成管理，服务间调用使用限定租户、作用域、配额和有效期的 Key。检查 Key 签发、轮换、吊销、会话注销和跨租户访问的审计事件。限制生产宿主机及 Docker 运维权限，因本地 CLI 可执行紧急账户操作。 [账户与 Key](deployment.md#创建登录账户)
-- [ ] 对 API 与 Worker 的网络出口实施部署级控制。SafeFetcher 对 URL、DNS 结果及每次重定向执行地址检查，连接锁定至已解析的公开 IP，Crawl4AI 仅从隔离网络接收经验证的 HTML。按业务复核域名策略、robots、访问频率与内容授权。阻止来自不可信网络的代理转发或直达解析器。 [抓取部署](deployment.md#抓取-worker-和-crawl4ai)
+- [ ] 对 API 与 Worker 的网络出口实施部署级控制。SafeFetcher 对 URL、DNS 返回的全部地址及每次重定向执行检查，连接锁定至已解析的公开 IP。每跳最多尝试三个地址，只有连接失败或连接超时才启用候补，TLS 按原始主机名验证。Crawl4AI 仅从隔离网络接收经验证的 HTML。按业务复核域名策略、robots、访问频率与内容授权。阻止来自不可信网络的代理转发或直达解析器。 [抓取部署](deployment.md#抓取-worker-和-crawl4ai)
 - [ ] 以部署实际配置复验租户边界、离线模式、任务恢复与负载。在启用公网 Provider 时，查询词可能发送至该 Provider。在配置模型并显式分配 token 预算时，问题和精选证据可能发送至指定模型服务。按数据分类决定可用来源和模型出口。 [深度研究部署](deployment.md#深度研究与指标)
 - [ ] 保护 `/metrics` 与 PostgreSQL 备份。为指标采集器使用独立凭据，限制采集端的网络可达范围。按本组织保留策略处理用量元数据、任务结果、证据和归档，并验证删除和恢复流程。应用内的幂等响应保留窗口为 24 小时，用量元数据当前未配置自动过期。 [运维验证](operations.md)
 - [ ] MCP 默认以回环传输和作用域 Key 验证。对互联网开放前，应完成 OAuth 2.1、授权发现、Origin 与 Host 校验以及独立客户端兼容性验收。当前实现提供基于 Key 的 MCP 传输，公网授权设施待部署方接入和验证。 [MCP 接入](mcp.md)

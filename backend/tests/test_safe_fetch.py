@@ -75,7 +75,7 @@ async def test_blocked_inputs_never_contact_dns_or_transport(network, url):
 
 async def test_dns_mixed_records_and_private_scope_fail_closed(network):
     dns, requests, answers, _ = network
-    answers["public.example"] = [PUBLIC_IP, "10.0.0.1"]
+    answers["public.example"] = [PUBLIC_IP, "1.1.1.1", "9.9.9.9", "10.0.0.1"]
     with pytest.raises(FetchError) as denied:
         await SafeFetcher().fetch("https://public.example", timeout_s=1)
     assert denied.value.code == "FETCH_TARGET_BLOCKED"
@@ -83,6 +83,68 @@ async def test_dns_mixed_records_and_private_scope_fail_closed(network):
         with pytest.raises(FetchError):
             await SafeFetcher().fetch("https://public.example", timeout_s=1, network_scope=scope)
     assert dns == [("public.example", 443)] and not requests
+
+
+@pytest.mark.parametrize(
+    ("alternative", "connect_error"),
+    [("1.1.1.1", httpx.ConnectError), ("2606:4700:4700::1111", httpx.ConnectTimeout)],
+)
+async def test_connect_failure_uses_validated_alternative_without_changing_host(
+    network, alternative, connect_error
+):
+    dns, requests, answers, responses = network
+    host = "public.example"
+    answers[host] = [alternative, PUBLIC_IP] if ":" in alternative else [PUBLIC_IP, alternative]
+
+    async def page(request):
+        if request.url.host == PUBLIC_IP:
+            assert 0 < request.extensions["timeout"]["connect"] <= 1
+            raise connect_error("fixture", request=request)
+        assert request.extensions["timeout"]["connect"] is None
+        return httpx.Response(200, headers={"Content-Type": "text/plain"}, text="evidence")
+
+    responses[(host, "/")] = page
+    result = await SafeFetcher().fetch(f"https://{host}/", timeout_s=2)
+
+    assert result.body == b"evidence" and result.url == f"https://{host}/"
+    assert dns == [(host, 443)] * 2
+    assert [item.url.host for item in requests] == [PUBLIC_IP, PUBLIC_IP, alternative]
+    assert all(item.headers["host"] == item.extensions["sni_hostname"] == host for item in requests)
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadError, httpx.WriteError, 429, 503])
+async def test_only_connect_errors_can_try_another_address(network, failure):
+    _, requests, answers, responses = network
+    host = "public.example"
+    answers[host] = [PUBLIC_IP, "1.1.1.1"]
+
+    async def page(request):
+        if isinstance(failure, int):
+            return httpx.Response(failure)
+        raise failure("fixture", request=request)
+
+    responses[(host, "/")] = page
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch(f"https://{host}/", timeout_s=2)
+    assert error.value.code == ("FETCH_RATE_LIMITED" if failure == 429 else "FETCH_UNAVAILABLE")
+    assert [item.url.host for item in requests] == [PUBLIC_IP, PUBLIC_IP]
+
+
+async def test_connect_fallback_deduplicates_and_bounds_attempts(network):
+    dns, requests, answers, responses = network
+    host = "public.example"
+    ipv6 = "2606:4700:4700::1111"
+    answers[host] = [PUBLIC_IP, PUBLIC_IP, "1.1.1.1", "9.9.9.9", ipv6]
+
+    async def unavailable(request):
+        raise httpx.ConnectError("fixture", request=request)
+
+    responses[(host, "/robots.txt")] = unavailable
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch(f"https://{host}/", timeout_s=2)
+    assert error.value.code == "FETCH_UNAVAILABLE"
+    assert dns == [(host, 443)]
+    assert [item.url.host for item in requests] == [PUBLIC_IP, ipv6, "1.1.1.1"]
 
 
 async def test_pins_ip_host_sni_and_revalidates_dns_on_every_hop(network):

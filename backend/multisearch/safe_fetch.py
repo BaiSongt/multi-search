@@ -4,6 +4,7 @@ import re
 import socket
 from collections import OrderedDict
 from collections.abc import Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.message import Message
@@ -39,6 +40,8 @@ _ROBOTS_TTL_SECONDS = 600
 _ROBOTS_CACHE_ENTRIES = 256
 _MAX_BODY_BYTES = 1024 * 1024
 _MAX_TIMEOUT_S = 60
+_MAX_CONNECT_ATTEMPTS = 3
+_CONNECT_FALLBACK_TIMEOUT_S = 2
 _MIN_HOST_DELAY = 0.2
 
 type IP = IPv4Address | IPv6Address
@@ -448,7 +451,7 @@ class SafeFetcher:
                     _check_domains(target, domain_allowlist, domain_denylist)
                     lock = self._host_locks[hash(target.host) % len(self._host_locks)]
                     async with lock:
-                        rules = await self._robots_policy(target)
+                        rules = await self._robots_policy(target, deadline)
                         if not rules.rules.can_fetch(target.url, _USER_AGENT):
                             raise FetchError(
                                 403, "FETCH_ROBOTS_DENIED", "站点 robots.txt 禁止抓取此地址"
@@ -463,6 +466,7 @@ class SafeFetcher:
                             target,
                             content_types,
                             max_body_bytes,
+                            deadline=deadline,
                             resource_request=resource_request,
                             request_origin=request_origin,
                         )
@@ -477,7 +481,7 @@ class SafeFetcher:
             raise FetchError(502, "FETCH_UNAVAILABLE", "来源暂时不可达", retryable=True) from None
         raise FetchError(502, "FETCH_REDIRECT_LIMIT", "来源重定向超限或形成循环")
 
-    async def _robots_policy(self, target: _Target) -> _RobotsPolicy:
+    async def _robots_policy(self, target: _Target, deadline: float) -> _RobotsPolicy:
         cached = self._robots_cache.get(target.origin)
         if cached is not None and cached.expires > monotonic():
             self._robots_cache.move_to_end(target.origin)
@@ -485,7 +489,9 @@ class SafeFetcher:
         robots = _target(f"{target.origin}/robots.txt")
         try:
             for _ in range(_MAX_REDIRECTS + 1):
-                response = await self._request(robots, _ROBOTS_TYPES, _ROBOTS_BODY_BYTES)
+                response = await self._request(
+                    robots, _ROBOTS_TYPES, _ROBOTS_BODY_BYTES, deadline=deadline
+                )
                 if response.status not in _REDIRECTS:
                     break
                 robots = _redirect(robots, response.location)
@@ -529,21 +535,26 @@ class SafeFetcher:
         content_types: frozenset[str],
         max_bytes: int,
         *,
+        deadline: float,
         resource_request: bool = False,
         request_origin: str | None = None,
     ) -> _Response:
         try:
             literal = ip_address(target.host)
         except ValueError:
-            addresses = [_public_ip(value) for value in await _resolve(target.host, target.port)]
+            addresses = list(
+                dict.fromkeys(
+                    _public_ip(value) for value in await _resolve(target.host, target.port)
+                )
+            )
         else:
             addresses = [_public_ip(str(literal))]
         if not addresses:
             raise FetchError(502, "FETCH_UNAVAILABLE", "来源没有可用的公网地址", retryable=True)
-        # 连接池只在当前跳使用。IP 固定到经过检查的 DNS 答案，TLS 仍验证原始主机名。
-        address = next(
-            (value for value in addresses if isinstance(value, IPv4Address)), addresses[0]
-        )
+        ipv4 = [address for address in addresses if address.version == 4]
+        ipv6 = [address for address in addresses if address.version == 6]
+        # 先验证全部答案，再为当前跳挑选少量候补。保留 IPv4 首选并尽早尝试另一地址族。
+        candidates = (ipv4[:1] + ipv6[:1] + ipv4[1:] + ipv6[1:])[:_MAX_CONNECT_ATTEMPTS]
         headers = {
             "Host": target.authority,
             "User-Agent": _USER_AGENT,
@@ -556,14 +567,33 @@ class SafeFetcher:
             httpx.AsyncClient(
                 transport=_transport(), trust_env=False, follow_redirects=False
             ) as client,
-            client.stream(
-                "GET",
-                target.pin(address),
-                headers=headers,
-                extensions={"sni_hostname": target.host},
-                timeout=None,
-            ) as response,
+            AsyncExitStack() as stream,
         ):
+            for index, address in enumerate(candidates, 1):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise _budget_exhausted()
+                more_addresses = index < len(candidates)
+                timeout = (
+                    httpx.Timeout(None, connect=min(_CONNECT_FALLBACK_TIMEOUT_S, remaining / 2))
+                    if more_addresses
+                    else None
+                )
+                try:
+                    response = await stream.enter_async_context(
+                        client.stream(
+                            "GET",
+                            target.pin(address),
+                            headers=headers,
+                            extensions={"sni_hostname": target.host},
+                            timeout=timeout,
+                        )
+                    )
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    if not more_addresses:
+                        raise
+                else:
+                    break
             status = response.status_code
             if status != 200:
                 return _Response(status, response.headers.get("location"))
