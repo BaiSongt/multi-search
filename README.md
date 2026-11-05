@@ -4,7 +4,7 @@
 
 ## 简体中文
 
-MultiSearch 是可独立部署的通用检索平台。当前预发布版本为 `0.3.0-alpha.2`。
+MultiSearch 是可独立部署的通用检索平台。当前预发布版本为 `0.3.0-alpha.3`。
 
 REST 和 MCP 支持网页文字、新闻和图片检索。平台通过 DDGS 与 SearXNG 提供模式选择、预算、回退、融合去重和来源追踪。开发者可管理 API Key、查看用量并在 Playground 检索。管理员可查看请求与审计、配置 Provider 和租户配额。
 
@@ -37,7 +37,7 @@ docker compose up --build --wait
 
 ## English
 
-MultiSearch is a self-hosted general-purpose search platform. The current prerelease is `0.3.0-alpha.2`.
+MultiSearch is a self-hosted general-purpose search platform. The current prerelease is `0.3.0-alpha.3`.
 
 REST and MCP support web text, news, and image search. DDGS and SearXNG supply candidates with mode selection, budgets, fallback, deduplication, and source tracking. Developers can manage API keys, see usage, and search in the Playground. Administrators can inspect requests and audit events, configure providers, and manage tenant quotas.
 

@@ -114,3 +114,10 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - Crossref 与 arXiv 的 12 条独立学术样本完成两种模式的 24 次请求，全部返回 HTTP 200。按候选标识符比对原始文献，L1 命中 4／12，L2 命中 6／12。四条直接 DOI 查询在两种模式中均未命中对应文献，精确标识符检索仍需修正。 [学术样本](../scripts/ops/academic_cases.jsonl)
 - 独立 PostgreSQL 中导入 40 份本地文档，验证 11 次本地查询与 4 次公网来源拒绝，覆盖有序上限、重导入、租户隔离以及 `offline` 和 `private`。本机端到端 P50 为 10 ms。 [本地索引探针](../scripts/probe_local_index.py)
 - 扫描七个实际运行镜像并生成 SBOM。移除构建工具后，已识别的 Python 和 npm 包未发现严重或高危记录，底层镜像的高危门禁仍未通过。 [镜像报告](security.md#运行镜像-sbom-与漏洞扫描)
+
+### `0.3.0-alpha.3` 复验
+
+- 287 项后端测试、Console 类型检查和 Chromium 回归通过。七个 Compose 服务健康。
+- 学术基准的四个 DOI 和三个 arXiv ID 在 L1、L2 中均排在第一，包含旧式 ID 和明确指定的 `v2`。12 条样本的原始文献前十命中从 L1 4／12、L2 6／12 提升到 11／12、12／12。OpenAlex 另用一条真实 DOI 验证单文献接口。 [学术复核命令](operations.md#性能与质量基线)
+- 十次公网诊断样本中，四次图片检索成功，六次文字检索返回 502。按追踪 ID 确认真实失败的验证码与限流原因码已写入 PostgreSQL。完整公网质量与人工 Top-10 门禁仍待复验。
+- 升级前备份可恢复到 `0008_trace_and_cost`。派生 PostgreSQL 镜像使用原数据卷启动，保留 575 条既有用量记录并完成 `0009_provider_reasons`。独立 PostgreSQL 队列复验覆盖四租户 20 并发、吊销、租约恢复和取消。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
