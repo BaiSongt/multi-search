@@ -16,6 +16,7 @@ from protego import Protego
 
 from .contracts import Scope
 from .errors import ApiError
+from .pdf_child import PDF_MAX_BYTES, PDF_SIGNATURE
 
 _USER_AGENT = "MultiSearchBot/0.1"
 _PORTS = {"http": 80, "https": 443}
@@ -27,7 +28,7 @@ _TRANSITION_NETWORKS = tuple(
 _SPECIAL_IPV4 = tuple(
     ip_network(value) for value in ("168.63.129.16/32", "192.0.0.0/24", "192.88.99.0/24")
 )
-_PAGE_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain"})
+_PAGE_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain", "application/pdf"})
 _ROBOTS_TYPES = frozenset({"text/plain"})
 _REDIRECTS = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
@@ -385,7 +386,10 @@ class SafeFetcher:
             mime_header = response.headers.get("content-type", "")
             kind = mime_header.partition(";")[0].strip().lower()
             if kind not in content_types:
-                raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "当前只支持 HTML 或纯文本")
+                raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "来源响应类型不受支持")
+            is_pdf = kind == "application/pdf"
+            if is_pdf:
+                max_bytes = min(max_bytes, PDF_MAX_BYTES)
             mime = Message()
             mime["Content-Type"] = mime_header
             maximum = snippet_limit(response.headers.get_list("x-robots-tag"))
@@ -402,6 +406,8 @@ class SafeFetcher:
                 if len(body) + len(chunk) > max_bytes:
                     raise FetchError(413, "FETCH_BODY_TOO_LARGE", "来源响应超过抓取上限")
                 body.extend(chunk)
+            if body.startswith(PDF_SIGNATURE) != is_pdf:
+                raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "PDF 响应类型与文件签名不符")
             return _Response(
                 status,
                 content_type=kind,

@@ -189,6 +189,39 @@ async def test_unsupported_content_and_site_headers(network, headers, code):
     assert error.value.code == code
 
 
+@pytest.mark.parametrize(
+    ("content_type", "max_body_bytes", "content", "expected"),
+    [
+        ("application/pdf", 512, b"%PDF-1.7\nfixture", None),
+        ("text/plain", 512, b"%PDF-1.7\nfixture", "FETCH_CONTENT_UNSUPPORTED"),
+        ("application/octet-stream", 512, b"%PDF-1.7\nfixture", "FETCH_CONTENT_UNSUPPORTED"),
+        ("application/pdf", 8, b"%PDF-1.7\nfixture", "FETCH_BODY_TOO_LARGE"),
+        (
+            "application/pdf",
+            2 * 1024 * 1024,
+            b"%PDF-" + b"x" * (1024 * 1024),
+            "FETCH_BODY_TOO_LARGE",
+        ),
+    ],
+)
+async def test_pdf_fetch_requires_declared_mime_and_matching_bounded_signature(
+    network, content_type, max_body_bytes, content, expected
+):
+    _, requests, _, responses = network
+    responses[("one.example", "/reference.pdf")] = httpx.Response(
+        200, headers={"Content-Type": content_type}, content=content
+    )
+    fetcher = SafeFetcher(max_body_bytes=max_body_bytes)
+    if expected is not None:
+        with pytest.raises(FetchError) as error:
+            await fetcher.fetch("https://one.example/reference.pdf", timeout_s=2)
+        assert error.value.code == expected
+    else:
+        result = await fetcher.fetch("https://one.example/reference.pdf", timeout_s=2)
+        assert result.body == content and result.content_type == content_type
+    assert [request.url.path for request in requests] == ["/robots.txt", "/reference.pdf"]
+
+
 class Stream(httpx.AsyncByteStream):
     def __init__(self, delay):
         self.delay = delay

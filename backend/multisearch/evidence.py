@@ -16,6 +16,7 @@ from .evidence_contracts import STATIC_EXTRACTION_VERSION
 from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
+from .pdf_parser import PDF_EXTRACTION_VERSION, PdfParser
 from .safe_fetch import FetchedPage, FetchError, SafeFetcher, snippet_limit
 
 _MAX_EXCERPT = 512
@@ -75,6 +76,7 @@ class _Block:
     text: str
     section: str | None
     heading: bool = False
+    page_number: int | None = None
 
 
 def _clean(value: str) -> str:
@@ -186,7 +188,7 @@ def _publication(value: str) -> datetime | None:
 
 def _content(
     blocks: list[_Block],
-    kind: Literal["html_text", "plain_text"],
+    kind: Literal["html_text", "plain_text", "pdf_text"],
     query: str | None,
     excerpt_limit: int,
     hints: tuple[str, ...],
@@ -195,11 +197,11 @@ def _content(
     choices: list[tuple[int, bool, int, _Block]] = []
     offset = 0
     for block in blocks:
-        if not block.heading:
+        if not block.heading and block.text:
             folded = block.text.casefold()
             score = sum(term.casefold() in folded for term in terms)
             selected = bool(hints) and block.text[:512] in hints
-            choices.append((score, selected, offset, block))
+            choices.append((score, selected, 0 if block.page_number is not None else offset, block))
         offset += len(block.text) + 1
     if not choices:
         raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文")
@@ -220,6 +222,7 @@ def _content(
         section=block.section,
         text_offset_start=start,
         text_offset_end=start + len(excerpt),
+        page_number=block.page_number,
     )
     text_sha = sha256("\n".join(block.text for block in blocks).encode("utf-8")).hexdigest()
     return excerpt, locator, text_sha, selected
@@ -229,6 +232,7 @@ class EvidenceBuilder:
     def __init__(self, fetcher: SafeFetcher, parser: CrawlParser | None = None):
         self.fetcher = fetcher
         self.parser = parser
+        self.pdf = PdfParser()
 
     async def extract(
         self,
@@ -251,7 +255,19 @@ class EvidenceBuilder:
         )
         warnings: list[str] = []
         hints: tuple[str, ...] = ()
-        if page.content_type in {"text/html", "application/xhtml+xml"}:
+        if page.content_type == "application/pdf":
+            if page.max_snippet == 0:
+                raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文")
+            parsed_pdf = await self.pdf.parse(page.body, timeout_s=deadline - monotonic())
+            blocks = [
+                _Block(text, None, page_number=index)
+                for index, text in enumerate(parsed_pdf.pages, start=1)
+            ]
+            metadata, meta_limit = {}, None
+            kind = "pdf_text"
+            if parsed_pdf.truncated:
+                warnings.append("pdf_page_or_text_limit_reached")
+        elif page.content_type in {"text/html", "application/xhtml+xml"}:
             blocks, metadata, meta_limit = _html_page(page)
             kind = "html_text"
             if self.parser and any(not block.heading for block in blocks):
@@ -275,6 +291,16 @@ class EvidenceBuilder:
             raise FetchError(504, "TIME_BUDGET_EXCEEDED", "正文提取时限已耗尽", retryable=True)
         doi = metadata.get("citation_doi", "").removeprefix("https://doi.org/")
         identity = f"{page.url}\n{text_sha}\n{locator.text_offset_start}:{locator.text_offset_end}"
+        if locator.page_number is not None:
+            identity += f"\npage:{locator.page_number}"
+        if locator.kind == "pdf_text":
+            method, extraction_version = "pypdf", PDF_EXTRACTION_VERSION
+        elif selected:
+            method = "crawl4ai_static"
+            extraction_version = f"{CRAWL4AI_VERSION}+normalizer.{STATIC_EXTRACTION_VERSION}"
+        else:
+            method = "static_html" if locator.kind == "html_text" else "plain_text"
+            extraction_version = STATIC_EXTRACTION_VERSION
         return EvidenceRecord(
             evidence_id=f"ev_{sha256(identity.encode('utf-8')).hexdigest()[:32]}",
             result_id=result_id,
@@ -290,13 +316,7 @@ class EvidenceBuilder:
             evidence_text=excerpt,
             locator=locator,
             content_sha256=text_sha,
-            extraction_method="crawl4ai_static"
-            if selected
-            else ("static_html" if locator.kind == "html_text" else "plain_text"),
-            extraction_version=(
-                f"{CRAWL4AI_VERSION}+normalizer.{STATIC_EXTRACTION_VERSION}"
-                if selected
-                else STATIC_EXTRACTION_VERSION
-            ),
+            extraction_method=method,
+            extraction_version=extraction_version,
             warnings=warnings,
         )

@@ -11,6 +11,7 @@
 | `POST /api/v1/search` | API Key | 统一文字与图片检索 |
 | `POST /api/v1/playground` | Console 会话与 CSRF | 使用同一搜索契约并按当前租户计量 |
 | `POST /api/v1/fetch` | API Key 的 `fetch` | 批量网页提取，返回 202 和任务标识 |
+| `POST /api/v1/research` | API Key 的 `research` 与所需搜索作用域 | 创建 L4 研究任务，返回 202 |
 | `GET /api/v1/jobs/{id}` | 对应任务作用域 | 查看当前租户的任务状态与结果 |
 | `POST /api/v1/jobs/{id}/cancel` | 对应任务作用域 | 取消当前租户的非终态任务 |
 | `GET /api/v1/evidence/{id}` | API Key 的 `fetch` 或 `research` | 读取当前租户的证据 |
@@ -35,8 +36,9 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 | `quick` | 首选 DDGS，按需回退 SearXNG | 4000 ms | 10 |
 | `standard` | 可用 Provider 并行检索与融合 | 12000 ms | 30 |
 | `evidence` | 并行发现候选并提取有定位的正文或核查图片来源 | 45000 ms | 30，最多 8 页正文 |
+| `deep` | 异步多轮检索、证据汇总与可选模型综合 | 900000 ms，含排队 | 每轮最多 30 条，整项任务最多 5 轮与 30 页 |
 
-请求可通过 `max_latency_ms`、`max_results`、`max_image_results` 和 `max_pages` 收紧预算。请求同时包含可用和不可用的来源模态组合时，返回部分结果及告警。`mode=auto` 配合 `require_evidence=true` 使用 L3。机器身份执行证据检索需要 `fetch` 和相应搜索作用域。显式指定快速、标准或本地模式并要求证据时返回 `EVIDENCE_UNAVAILABLE`。指定深度研究时返回 `MODE_UNAVAILABLE`。
+请求可通过 `max_latency_ms`、`max_results`、`max_image_results` 和 `max_pages` 收紧预算。请求同时包含可用和不可用的来源模态组合时，返回部分结果及告警。`mode=auto` 配合 `require_evidence=true` 使用 L3。机器身份执行证据检索需要 `fetch` 和相应搜索作用域。显式指定快速、标准或本地模式并要求证据时返回 `EVIDENCE_UNAVAILABLE`。部署未启用深度研究时返回 `MODE_UNAVAILABLE`。
 
 私网与离线检索只接受已启用的 `source_types=["local"]`，请求直接进入当前租户的本地索引。未启用或混入公网来源时返回 `SOURCE_UNAVAILABLE`，请求内容不会送往公网。
 
@@ -54,6 +56,8 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 错误对象包含 `request_id`、`code`、`message`、`retryable`，适用时含 `retry_after_ms`。响应头 `X-Request-ID` 可用于关联当前请求。典型状态如下。
 
+响应头 `X-Trace-ID` 由服务端生成，与脱敏运行日志中的追踪标识对应。
+
 | HTTP | 典型错误码 | 处理 |
 | --- | --- | --- |
 | 401 | `AUTH_REQUIRED` | 检查 Key 是否提供且有效 |
@@ -70,7 +74,15 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 正文提取成功时，`evidence_records` 返回来源、取得时间、实际摘录、规范化正文 SHA-256 和字符偏移。结果以 `evidence_refs` 指向记录，并标记为 `content_extracted`。摘要、提取失败或预算外结果保持 `unverified`。L3 图片区分来源页访问、原图匹配与许可核验。
 
+公开 PDF 的 `locator.kind` 为 `pdf_text`，`page_number` 从 1 开始，偏移针对该页规范化文本。`content_sha256` 覆盖已检查的规范化页及其边界，触及检查上限时证据带有截断警告。没有文本层、已加密或损坏的 PDF 会返回提取错误。
+
 `POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。
+
+`POST /api/v1/research` 使用 SearchRequest，接受 `auto` 或 `deep`。同一请求也可通过 `POST /api/v1/search` 并设置 `mode=deep` 提交。REST 与 MCP 共享任务与幂等标识。研究启动只扣一次，结果记录轮次、来源、证据、页数和模型计量。恢复时保留已预留的预算，执行中断不会令预算重新计数。未知的模型用量保持未知。
+
+任务响应正文中的 `trace_id` 始终关联首次成功提交，查询和幂等重试的 `X-Trace-ID` 响应头关联当次传输。研究结果区分已预留 Token、实际 Token 和用量是否已知。`estimated_cost` 仅估算模型费用，未调用模型时为零，缺少用量或费率时为 `null`。报告按轮记录去重来源数和证据覆盖率。
+
+启用本地索引时，纯本地研究按离线执行，正文公网抓取与模型预算均为零。Console 使用同源 Playground 提交研究，再通过 `/api/v1/console/jobs/{id}` 查询或取消本人任务。
 
 ### 管理面
 

@@ -1,6 +1,6 @@
 [project]
 name = "multisearch"
-version = "0.2.0a1"
+version = "0.3.0a1"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "mcp==2.3.0",
     "protego==0.7.0",
     "pydantic==2.14.3",
+    "pypdf==6.21.4",
     "redis==8.1.0",
     "sqlalchemy[asyncio]==2.1.8",
     "uvicorn==0.54.0",

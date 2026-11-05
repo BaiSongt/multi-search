@@ -3,8 +3,8 @@ MultiSearch
 本项目代码采用 Apache License 2.0，包含明确的专利许可条款。
 MultiSearch source code is licensed under Apache License 2.0, which includes an express patent grant.
 
-第三方组件保留上游许可证与版权声明。以下为首轮直接组件，传递依赖版本见 backend/uv.lock 和 console/package-lock.json。
-Third-party components retain their upstream licenses and copyright notices. Lockfiles record transitive dependency versions.
+第三方组件保留上游许可证与版权声明。传递依赖版本见 backend/uv.lock、deploy/crawl4ai/uv.lock 和 console/package-lock.json。
+Third-party components retain their upstream licenses and copyright notices. The backend, Crawl4AI and Console lockfiles record transitive versions.
 
 FastAPI — MIT — https://github.com/fastapi/fastapi/blob/master/LICENSE
 Pydantic — MIT — https://github.com/pydantic/pydantic/blob/main/LICENSE
@@ -14,6 +14,7 @@ DDGS — MIT — https://github.com/deedy5/ddgs/blob/main/LICENSE
 Crawl4AI — Apache-2.0 — https://github.com/unclecode/crawl4ai/blob/v0.9.5/LICENSE
 lxml — BSD-3-Clause — https://github.com/lxml/lxml/blob/master/LICENSES.txt
 Protego — BSD-3-Clause — https://github.com/scrapy/protego/blob/master/LICENSE
+pypdf — BSD-3-Clause — https://pypi.org/project/pypdf/6.21.4/
 MCP Python SDK — MIT — https://github.com/modelcontextprotocol/python-sdk/blob/v2.3.0/LICENSE
 SQLAlchemy — MIT — https://github.com/sqlalchemy/sqlalchemy/blob/main/LICENSE
 Alembic — MIT — https://github.com/sqlalchemy/alembic/blob/main/LICENSE

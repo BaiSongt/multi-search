@@ -85,3 +85,20 @@ docker compose --profile fetch ps
 ```
 
 Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心跳。Crawl4AI 只在独立内部网络接受 Worker 传入的已验证 HTML，使用令牌鉴权。公开 URL 由 SafeFetcher 逐跳检查并固定目标 IP，遵守 robots 和摘录限制。解析器不接收 URL，且无需浏览器或公网访问。API 的同步 L3 默认使用静态提取。如需让同步 L3 使用隔离解析器，在启用 `fetch` 配置时设置 `CRAWL4AI_BASE_URL=http://crawl4ai:11235`。
+
+PDF 需要匹配 MIME 和文件签名，输入上限为 1 MiB。每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。当前镜像支持 PDF 文本层，OCR 引擎需另行集成。
+
+## 深度研究与指标
+
+设置 `MULTISEARCH_ENABLE_DEEP_RESEARCH=true`，启动研究配置。默认研究采用确定性分解、检索和证据汇总，无需模型凭据。为机器客户端签发 `research` 和相应的文字或图片搜索作用域。
+
+```sh
+python scripts/init-secrets.py
+docker compose --profile research up -d --build --wait
+```
+
+需要模型综合时，部署操作员配置 `MULTISEARCH_RESEARCH_MODEL_BACKEND=openai` 或 `ollama`，以及 `MULTISEARCH_RESEARCH_MODEL_BASE_URL`、`MULTISEARCH_RESEARCH_MODEL_NAME` 和所需凭据。请求需显式设置正数 `max_llm_tokens`。OpenAI 兼容服务需要支持 Responses 和输入 token 计数接口。离线本地研究不调用模型。
+
+如需费用估算，同时设置 `MULTISEARCH_RESEARCH_COST_CURRENCY`、`MULTISEARCH_RESEARCH_INPUT_PER_MILLION_TOKENS` 和 `MULTISEARCH_RESEARCH_OUTPUT_PER_MILLION_TOKENS`。费率由部署操作员按实际模型和计价币种提供。
+
+Compose 从单独的指标密钥文件保护 `/metrics`。指标、脱敏追踪、备份及演练命令见运维文档。 [运维验证](operations.md)
