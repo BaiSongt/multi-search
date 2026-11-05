@@ -187,6 +187,8 @@ class SearchBudget(BaseModel):
     max_results: int
     max_image_results: int
     search_rounds: int
+    max_image_metadata_fetches: int = 0
+    image_metadata_fetches: int = 0
     pages_fetched: int = 0
     llm_tokens: int = 0
 

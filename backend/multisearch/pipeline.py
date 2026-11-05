@@ -336,23 +336,35 @@ def fuse(
         (group for candidates in groups.values() for group in candidates),
         key=lambda group: -sum(group.votes.values()),
     )
-    eligible: list[_Group] = []
+    return select_results(
+        [
+            group.result.model_copy(update={"relevance_score": round(sum(group.votes.values()), 6)})
+            for group in ranked
+        ],
+        limit,
+        image_limit,
+    )
+
+
+def select_results(
+    ranked: list[SearchResult],
+    limit: int,
+    image_limit: int,
+) -> list[SearchResult]:
+    eligible: list[SearchResult] = []
     images = 0
-    for group in ranked:
-        if group.result.kind == "image":
+    for result in ranked:
+        if result.kind == "image":
             if images >= image_limit:
                 continue
             images += 1
-        eligible.append(group)
+        eligible.append(result)
     selected = eligible[:limit]
-    if len(selected) >= 2 and len({group.result.kind for group in selected}) == 1:
+    if len(selected) >= 2 and len({result.kind for result in selected}) == 1:
         other = next(
-            (group for group in eligible[limit:] if group.result.kind != selected[0].result.kind),
+            (result for result in eligible[limit:] if result.kind != selected[0].kind),
             None,
         )
         if other is not None:
             selected[-1] = other
-    return [
-        group.result.model_copy(update={"relevance_score": round(sum(group.votes.values()), 6)})
-        for group in selected
-    ]
+    return selected

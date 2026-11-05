@@ -16,8 +16,10 @@
 | `image.rights_checked_at`、`image.rights_evidence_url` | 许可核验时间与证据链接 |
 | `image.source_page_verified` | 来源页是否已经核查 |
 
-首轮平台只做链接发现与来源字段规范化。默认 `image_options.source_page_required=true`，缺少可用来源页的候选被过滤。设为 `false` 时，可以返回 `source_page_url=null` 并附缺失告警。此处来源页有效性指链接格式与来源字段符合契约，实际页面可访问性仍待核验。
+默认 `image_options.source_page_required=true`，缺少可用来源页的候选被过滤。设为 `false` 时，可以返回 `source_page_url=null` 并附缺失告警。链接格式合规与实际核验分开记录。
 
-首轮候选的 `rights_status` 为 `unknown`，作者、权利人和许可证证据没有可靠来源时为 `null`。过滤策略默认 `any_with_status`；`declared_only` 和 `verified_only` 排除未知状态，因此当前通常返回零条。检索引擎名称只用于溯源。使用者应从来源页取得与用途相符的权利依据。
+过滤策略默认 `any_with_status`。设为 `declared_only` 或 `verified_only` 时，默认最多核查 3 个候选，可用 `max_image_metadata_fetches` 收紧或调整至 5。也可在默认策略下显式开启核查。响应预算记录实际发起的核查次数。
+
+当前核验器只访问固定的 Wikimedia Commons HTTPS API。文件页与 API 返回的原图一致时设置 `source_page_verified`。已识别的许可链接、名称和模板一致且有页面版本证据时标记 `verified_license`。证据不足、互相矛盾或来源不支持时分别保留声明、冲突或未知状态。没有可靠依据的作者或权利人字段保持 `null`。`declared_only` 接受已声明或已核验记录，`verified_only` 仅接受已核验记录。检索引擎名称只用于溯源。
 
 `min_width`、`min_height`、`orientation` 基于上游尺寸元数据筛选。缺少所需尺寸的候选无法满足条件。图片类型取决于引擎支持，对无法执行的筛选返回告警。结果不因去重或预览而触发服务端下载原图。
