@@ -145,3 +145,10 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 隔离源站夹具通过 REST、Worker、Crawl4AI、pypdf 和 PostgreSQL，HTML 与 PDF 各返回一条可定位证据。损坏 PDF 失败，扫描 PDF 返回 OCR 待处理，两者都没有生成证据。受保护的提取 Counter 对四种对应结果分别计数一次。
 - 真实 Compose 对公开 RFC 的 HTML 和 PDF 分别执行抓取。Worker DNS 返回非公网地址，两项正向公网门禁均返回 `FETCH_TARGET_BLOCKED`。受保护的 `unknown/blocked` 指标恰好增加 2，两次结构化追踪均记录相同诊断码。 [公网探针](operations.md#公网正文验收)
 - Chromium 打开由 100 条查询、200 次公网请求生成的离线评审工作区，验证查询审定、分项标注、部分进度导入导出、报告摘要不匹配拒绝及无自动外部请求。原报告有 1157 条候选，开发文档两种模式均无候选。实际人工标注和公网覆盖率复验仍待完成。 [评审操作](operations.md#性能与质量基线)
+
+### `0.3.0-alpha.7` 复验
+
+- 318 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 角色工作区回归通过。七个 Compose 服务健康，七个运行镜像生成 SBOM 并通过严重及高危漏洞扫描门禁。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
+- 实际 API、MCP、PostgreSQL 和 Worker 复用同一个带日期范围的本地研究任务。五份夹具中只返回 UTC 窗口首尾的两份文档，排除窗口外和无日期的三份。任务完成后清除原始负载。 [日期探针](operations.md#性能与质量基线)
+- 20 条日期固定的新闻样本在 `0.3.0-alpha.6` 的同步检索上运行 L1/L2，共 40 次 HTTP 200。L1 返回 22 条候选、12 次空结果，L2 返回 35 条候选、11 次空结果。57 条候选的发布日期格式有效且均落在请求范围内。两种模式的适配器共过滤 200 次发布日期未知的上游候选。原站发布日期的人工复核尚未完成，最终时效性错误率留空。
+- Chromium 离线打开该新闻报告的评审页，可独立标注原站发布日期和 Top-10 三项条件。页面无自动外部请求。 [评审操作](operations.md#性能与质量基线)
