@@ -41,7 +41,7 @@ FailureStatus = Literal["failed", "timeout", "rate_limited"]
 LocaleFilter = Literal[
     "unsupported", "upstream_best_effort", "upstream_requires_language", "upstream_requires_region"
 ]
-DateFilter = Literal["metadata_postfilter", "upstream_and_metadata_postfilter"]
+DateFilter = Literal["unsupported", "metadata_postfilter", "upstream_and_metadata_postfilter"]
 
 
 @dataclass(frozen=True)

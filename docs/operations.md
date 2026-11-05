@@ -120,6 +120,8 @@ python scripts/ops/benchmark_search.py --compose-stats --output .secrets/ops/pub
 
 报告按模式和模态分组，列出成功请求的墙钟 P50/P95、HTTP 状态、Provider 限流、图片来源页完整率和许可证核验比例。失败样本保留已返回的 Provider 状态、尝试次数、冷却提示和服务端追踪 ID。`provider_attempted_reason_counts` 和 `provider_skipped_reason_counts` 分别汇总发起调用和零尝试时的诊断。`upstream_failures_without_runs` 统计没有来源诊断的超时或不可用错误。Provider 限流率以报告中 `status=rate_limited` 的 Provider 记录为分子，SearXNG 内部单个引擎可能在 Provider 返回 `partial` 时限流。容器 CPU 与内存来自运行前后两次采样。
 
+原始报告的每条候选保留 `provider_ids`。核对 Wikipedia 候补时，可结合该字段与实际尝试次数区分独立适配器和 SearXNG 的 Wikipedia 引擎。
+
 使用原始报告生成本地评审工作区，并在浏览器打开生成的 HTML。确认每条查询符合样本要求，并分别判断每个候选的相关性、可访问性和内容匹配。需要暂停时可以导出进度，之后在同一报告的工作区导入继续。
 
 ```sh

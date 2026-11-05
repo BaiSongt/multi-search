@@ -86,6 +86,7 @@ class Settings:
         default_factory=dict, repr=False
     )
     trusted_proxies: frozenset[IPAddress] = frozenset()
+    enable_wikipedia: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -165,4 +166,5 @@ class Settings:
             renderer_token=secret("MULTISEARCH_RENDERER_TOKEN") if dynamic_enabled else "",
             dynamic_fetch_resources=dynamic_resources,
             trusted_proxies=_trusted_proxies(),
+            enable_wikipedia=os.getenv("MULTISEARCH_ENABLE_WIKIPEDIA", "false").lower() == "true",
         )

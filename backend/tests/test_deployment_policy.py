@@ -16,6 +16,13 @@ def test_default_policy_file_preserves_current_routing_and_image_requests():
     request = SearchRequest(query="example", modalities=["image"])
     assert policy.baseline() == DEFAULT_ROUTING
     assert policy.provider("ddgs") == DeploymentPolicy().provider("ddgs")
+    assert policy.provider("wikipedia").requests_per_minute == 10
+    assert (
+        DeploymentPolicy.model_validate({"providers": {"wikipedia": {"priority": 2}}})
+        .provider("wikipedia")
+        .requests_per_minute
+        == 10
+    )
     assert policy.apply_image_options(request) is request
 
 

@@ -17,6 +17,7 @@ routing:
 providers:
   ddgs: {enabled: true, priority: 0, requests_per_minute: 120}
   searxng: {enabled: true, priority: 0, requests_per_minute: 120}
+  wikipedia: {enabled: true, priority: 0, requests_per_minute: 10}
 
 # 取消注释以设置图片请求的默认过滤。调用方可逐项覆盖。
 # image_options:

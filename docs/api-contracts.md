@@ -44,6 +44,8 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 `language` 和 `region` 按上游能力尽力处理。`time_range` 使用 `{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}`，按 UTC 日期比较，含起止两天。仅保留来源时间字段已知且位于范围内的候选，新闻使用发布日期。深度研究的各轮检索沿用提交时的日期范围。Playground 的新闻卡片分别显示发布日期和检索时间。`domain_allowlist` 和 `domain_denylist` 用于过滤结果来源域名。请求的域名字段不会授予访问内网的权限。
 
+启用 Wikipedia 后，适用的公网网页文字请求在常规来源无候选时可回退到英文或中文项目。结果的 `provider_ids` 包含 `wikipedia`，返回标题和条目链接，摘要为空。带显式地区或日期约束的请求仍按支持对应条件的常规来源执行。 [候补部署](deployment.md#可选-wikipedia-候补)
+
 `cache_policy=use` 默认读取可用缓存。`refresh` 重新搜索并更新可缓存响应，`bypass` 直接检索且跳过缓存写入。`local` 只支持 `use`，未命中时以部分结果返回 `LOCAL_CACHE_MISS`。缓存按租户隔离，按查询、有效路由参数和 Provider 组合区分。命中时 `cache_hit=true`，返回当前调用的请求标识。完整结果缓存期限为文字一小时、图片半小时、新闻十分钟，新闻优先于图片和普通文字。正常空结果缓存 30 秒，上游部分失败的响应跳过缓存。
 
 默认每租户 60 次每分钟，单 API 进程全局并发 20、每租户并发上限 5。租户与 Key 可配置分钟、日、月、模态、模式和并发上限。各周期使用 UTC。文字与图片额度分别按请求包含相应模态的次数计算，混合请求同时占用两类模态额度。入账在 PostgreSQL 同租户事务内完成，缓存命中和已接受但上游失败的请求各计一次。上游重试与回退只增加 Provider 调用记录。

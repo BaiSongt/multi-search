@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections import Counter, deque
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from math import ceil
@@ -55,6 +56,7 @@ _MODE_LIMITS = {Mode.LOCAL: (2_000, 30), Mode.QUICK: (4_000, 10), Mode.STANDARD:
 _PROVIDER_CONCURRENT = 5
 _PROVIDER_REQUESTS_PER_MINUTE = 120
 _PROVIDER_WINDOW_SECONDS = 60
+_TERMINAL_FALLBACK_MAX_SECONDS = 1.5
 _RATE_WINDOW_MS = 60_000
 _SUCCESS = {"success", "empty", "partial"}
 _RATE_SCRIPT = """
@@ -187,7 +189,10 @@ class SearchService:
         self.load_cache_epochs = None
         self.attribution_slots = asyncio.Semaphore(5)
         self.states = {
-            provider.provider_id: ProviderState({pair: Circuit() for pair in self._pairs(provider)})
+            provider.provider_id: ProviderState(
+                {pair: Circuit() for pair in self._pairs(provider)},
+                slots=asyncio.Semaphore(self._upstream_concurrency(provider)),
+            )
             for provider in providers
         }
         self.active = 0
@@ -207,6 +212,13 @@ class SearchService:
         }
 
     @staticmethod
+    def _upstream_concurrency(provider: Provider) -> int:
+        profile = getattr(provider, "capabilities", None)
+        if isinstance(profile, ProviderCapabilities) and profile.upstream_concurrency is not None:
+            return min(_PROVIDER_CONCURRENT, profile.upstream_concurrency)
+        return _PROVIDER_CONCURRENT
+
+    @staticmethod
     def _accepts_identifier(
         provider: Provider, pair: Pair, identifier: AcademicIdentifier | None
     ) -> bool:
@@ -216,11 +228,27 @@ class SearchService:
             or getattr(provider, "identifier_kind", identifier.kind) == identifier.kind
         )
 
-    def _supported_pairs(self, identifier: AcademicIdentifier | None = None) -> set[Pair]:
+    def _enabled_providers(
+        self, request: SearchRequest | None, allow_terminal: bool = True
+    ) -> Iterator[Provider]:
+        for provider in self.providers.values():
+            if not self.provider_policies[provider.provider_id].enabled:
+                continue
+            if not allow_terminal and getattr(provider, "fallback_only", False):
+                continue
+            supports_request = getattr(provider, "supports_request", None)
+            if request is None or supports_request is None or supports_request(request):
+                yield provider
+
+    def _supported_pairs(
+        self,
+        identifier: AcademicIdentifier | None = None,
+        request: SearchRequest | None = None,
+        allow_terminal: bool = True,
+    ) -> set[Pair]:
         pairs = {
             pair
-            for provider in self.providers.values()
-            if self.provider_policies[provider.provider_id].enabled
+            for provider in self._enabled_providers(request, allow_terminal)
             for pair in self._pairs(provider)
             if self._accepts_identifier(provider, pair, identifier)
         }
@@ -289,9 +317,7 @@ class SearchService:
                 profile = None
             upstream_limit = None
             if profile:
-                upstream_limit = min(
-                    _PROVIDER_CONCURRENT, profile.upstream_concurrency or _PROVIDER_CONCURRENT
-                )
+                upstream_limit = self._upstream_concurrency(self.providers[provider_id])
             pair_health = [
                 {
                     "source_type": source,
@@ -509,9 +535,10 @@ class SearchService:
         result = ProviderResult([])
         status: RunStatus = "timeout"
         circuit = state.circuits[pair]
+        max_attempts = 1 if getattr(provider, "fallback_only", False) else 2
         try:
             async with asyncio.timeout(deadline - monotonic()):
-                for index in range(2):
+                for index in range(max_attempts):
                     async with state.slots:
                         now = monotonic()
                         remaining = deadline - now
@@ -547,7 +574,7 @@ class SearchService:
                             result.reason_codes = tuple(
                                 sorted(set(result.reason_codes + error.reason_codes))
                             )
-                            if status == "rate_limited" and retry_after:
+                            if retry_after:
                                 retry_until = monotonic() + retry_after
                                 if retry_until >= state.retry_until:
                                     state.retry_until = retry_until
@@ -570,7 +597,7 @@ class SearchService:
                             upstream_seconds += monotonic() - now
                         if status in _SUCCESS:
                             return result, status, attempts, upstream_seconds
-                    if index or status not in {"timeout", "rate_limited"}:
+                    if index + 1 >= max_attempts or status not in {"timeout", "rate_limited"}:
                         break
                     delay = max(uniform(0.1, 0.25), retry_after or 0)
                     if delay + 0.15 >= deadline - monotonic():
@@ -660,6 +687,10 @@ class SearchService:
         )
         return result, run
 
+    def _dispatchable(self, provider: Provider, pair: Pair, now: float) -> bool:
+        state = self.states[provider.provider_id]
+        return state.circuits[pair].available(now, state.retry_until)
+
     async def _run_pair(
         self,
         request: SearchRequest,
@@ -674,9 +705,10 @@ class SearchService:
         preferred = ("ddgs", "searxng") if mode == Mode.QUICK else ("searxng", "ddgs")
         eligible = [
             provider
-            for provider in self.providers.values()
-            if self.provider_policies[provider.provider_id].enabled
-            and pair in self._pairs(provider)
+            for provider in self._enabled_providers(
+                request, mode != Mode.QUICK or rules.quick_fallback
+            )
+            if pair in self._pairs(provider)
             and self._accepts_identifier(provider, pair, identifier)
         ]
         eligible.sort(
@@ -685,41 +717,61 @@ class SearchService:
                 preferred.index(p.provider_id) if p.provider_id in preferred else len(preferred),
             )
         )
+        primary, terminal = [], []
+        for provider in eligible:
+            group = terminal if getattr(provider, "fallback_only", False) else primary
+            group.append(provider)
+        now = monotonic()
+        primary_deadline = deadline
+        if (
+            deadline - now >= 1.25
+            and any(self._dispatchable(provider, pair, now) for provider in primary)
+            and any(self._dispatchable(provider, pair, now) for provider in terminal)
+        ):
+            primary_deadline -= min(1.0, (deadline - now) * 0.2)
         if mode in {Mode.STANDARD, Mode.EVIDENCE}:
-            return await asyncio.gather(
-                *(
-                    self._run_provider(provider, request, pair, limit, deadline)
-                    for provider in eligible
-                )
+            runs = await asyncio.gather(
+                *(self._run_provider(p, request, pair, limit, primary_deadline) for p in primary)
             )
-
-        runs = []
-        if not rules.quick_fallback:
-            eligible = eligible[:1]
-        for index, provider in enumerate(eligible):
+        else:
+            runs = []
+            if not rules.quick_fallback:
+                primary = primary[:1]
+            for index, provider in enumerate(primary):
+                now = monotonic()
+                if now >= primary_deadline:
+                    break
+                remaining_providers = sum(
+                    self._dispatchable(item, pair, now) for item in primary[index:]
+                )
+                # 只为当前可以调度的候补来源预留时间。
+                provider_deadline = min(
+                    primary_deadline, now + (deadline - now) / max(1, remaining_providers)
+                )
+                result, run = await self._run_provider(
+                    provider, request, pair, limit, provider_deadline
+                )
+                runs.append((result, run))
+                if any(
+                    permitted_rights is None
+                    or (
+                        isinstance(item, ImageSearchResult)
+                        and item.image.rights_status in permitted_rights
+                    )
+                    for item in result.results
+                ):
+                    return runs
+        if any(result.results for result, _ in runs):
+            return runs
+        for provider in terminal:
             now = monotonic()
             if now >= deadline:
                 break
-            remaining_providers = sum(
-                self.states[item.provider_id]
-                .circuits[pair]
-                .available(now, self.states[item.provider_id].retry_until)
-                for item in eligible[index:]
-            )
-            # 只为当前可以调度的候补来源预留时间。
-            provider_deadline = now + (deadline - now) / max(1, remaining_providers)
             result, run = await self._run_provider(
-                provider, request, pair, limit, provider_deadline
+                provider, request, pair, limit, min(deadline, now + _TERMINAL_FALLBACK_MAX_SECONDS)
             )
             runs.append((result, run))
-            if any(
-                permitted_rights is None
-                or (
-                    isinstance(item, ImageSearchResult)
-                    and item.image.rights_status in permitted_rights
-                )
-                for item in result.results
-            ):
+            if result.results:
                 break
         return runs
 
@@ -792,7 +844,9 @@ class SearchService:
         identifier = (
             academic_identifier(request.query) if Source.ACADEMIC in request.source_types else None
         )
-        supported = self._supported_pairs(identifier)
+        supported = self._supported_pairs(
+            identifier, request, mode != Mode.QUICK or routing.policy.quick_fallback
+        )
         warnings = [
             f"SOURCE_MODALITY_UNAVAILABLE:{source}:{kind}"
             for source, kind in requested
@@ -1105,12 +1159,14 @@ class SearchService:
         identifier = (
             academic_identifier(request.query) if Source.ACADEMIC in request.source_types else None
         )
-        supported = self._supported_pairs(identifier)
+        mode = Mode.EVIDENCE if needs_evidence else resolve_mode(request, policy)
+        supported = self._supported_pairs(
+            identifier, request, mode != Mode.QUICK or policy.quick_fallback
+        )
         if not supported.intersection(
             (source, kind) for source in request.source_types for kind in request.modalities
         ):
             raise ApiError(422, "SOURCE_MODALITY_UNAVAILABLE", "请求的来源与模态组合不可用")
-        mode = Mode.EVIDENCE if needs_evidence else resolve_mode(request, policy)
         if local_only and request.mode == Mode.AUTO:
             mode = Mode.LOCAL
         if mode == Mode.LOCAL and not local_only and request.cache_policy != "use":

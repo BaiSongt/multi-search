@@ -270,6 +270,8 @@ def test_temporal_benchmark_checks_utc_boundaries_and_reviews_publication_dates(
         {"kind": "text", "published_at": stamp, "retrieved_at": "2025-10-01T00:00:00+00:00"}
         for stamp in published
     ]
+    returned[0]["provider_ids"] = ["wikipedia", " searxng ", "wikipedia", None, "", "  "]
+    returned[1]["provider_ids"] = "ddgs"
     cases = tmp_path / "cases.jsonl"
     base = {
         "category": "news",
@@ -338,6 +340,13 @@ def test_temporal_benchmark_checks_utc_boundaries_and_reviews_publication_dates(
     assert all(request["time_range"] == window for request in received.values())
     report = json.loads(original.read_bytes())
     assert all(row["time_range"] == window for row in report["samples"])
+    assert [result["provider_ids"] for result in report["samples"][0]["results"]] == [
+        ["searxng", "wikipedia"],
+        [],
+        [],
+        [],
+        [],
+    ]
     summary = report["summary"]["quick:text"]["temporality"]
     assert summary == {
         "filtered_requests": 3,

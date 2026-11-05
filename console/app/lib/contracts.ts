@@ -173,7 +173,7 @@ export type DependencyHealth = {
 };
 
 type ProviderLocaleFilter = "unsupported" | "upstream_best_effort" | "upstream_requires_language" | "upstream_requires_region";
-type ProviderDateFilter = "metadata_postfilter" | "upstream_and_metadata_postfilter";
+type ProviderDateFilter = "unsupported" | "metadata_postfilter" | "upstream_and_metadata_postfilter";
 export type ProviderFilters = {
   language: ProviderLocaleFilter;
   region: ProviderLocaleFilter;

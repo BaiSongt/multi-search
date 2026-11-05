@@ -5,6 +5,7 @@ from time import monotonic
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -28,6 +29,7 @@ from multisearch.providers import ProviderFailure, ProviderResult
 from multisearch.routing_policy import DEFAULT_ROUTING, RoutingRules
 from multisearch.search import SearchService
 from multisearch.settings import Settings
+from multisearch.wikipedia_provider import WikipediaProvider
 
 
 class MemoryRedis:
@@ -129,6 +131,95 @@ async def test_quick_allocates_full_time_to_usable_source_when_fallback_is_open(
     assert result.result_count == 1 and not result.partial
     assert ddgs.calls[0][-1] > 3
     assert not searxng.calls
+
+
+class TerminalProvider(FakeProvider):
+    fallback_only = True
+    pairs = frozenset({(Source.WEB, Modality.TEXT)})
+
+
+@pytest.mark.parametrize("mode", ["quick", "standard"])
+async def test_terminal_provider_never_precedes_ordinary_web_candidates(mode):
+    ddgs = FakeProvider("ddgs")
+    searxng = FakeProvider("searxng")
+    terminal = TerminalProvider("wikipedia")
+    search = service(terminal, searxng, ddgs)
+    search.provider_policies["wikipedia"] = ProviderPolicy(priority=100)
+
+    result = await search.search(SearchRequest(query="clock", mode=mode), "tenant", "test")
+
+    assert not terminal.calls and not result.partial
+    if mode == "quick":
+        assert [run.provider_id for run in result.provider_runs] == ["ddgs"]
+        assert 1.85 < ddgs.calls[0][-1] <= 2.0
+        assert not searxng.calls
+    else:
+        assert [run.provider_id for run in result.provider_runs] == ["searxng", "ddgs"]
+
+
+@pytest.mark.parametrize("mode", ["quick", "standard"])
+async def test_terminal_provider_gets_time_after_slow_primary(mode):
+    async def slow():
+        await asyncio.Event().wait()
+
+    terminal = TerminalProvider("wikipedia")
+    search = service(FakeProvider("ddgs", handler=slow), terminal)
+    request = SearchRequest(query="clock", mode=mode, max_latency_ms=1400)
+
+    result = await search.search(request, "tenant", "test")
+
+    assert result.partial and result.results[0].provider_ids == ["wikipedia"]
+    assert [(run.status, run.attempts) for run in result.provider_runs] == [
+        ("timeout", 1),
+        ("success", 1),
+    ]
+    assert 0 < terminal.calls[0][-1] <= 0.3
+    assert not search.redis.cache
+
+
+async def test_quick_policy_can_disable_terminal_fallback():
+    terminal = TerminalProvider("wikipedia")
+    search = service(FakeProvider("ddgs", handler=failed), terminal)
+    search.routing = DEFAULT_ROUTING.model_copy(
+        update={"policy": RoutingRules(quick_fallback=False)}
+    )
+    request = SearchRequest(query="clock", mode="quick")
+
+    with pytest.raises(ApiError) as failure:
+        await search.search(request, "tenant", "test")
+    assert failure.value.code == "PROVIDER_UNAVAILABLE"
+    assert [run.provider_id for run in failure.value.provider_runs] == ["ddgs"]
+    assert not terminal.calls
+
+
+async def test_ineligible_wikipedia_is_not_advertised_for_filtered_request():
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("network"))
+    ) as client:
+        search = service(WikipediaProvider(client))
+        request = SearchRequest(query="tides", language="en", region="US")
+        with pytest.raises(ApiError) as failure:
+            await search.search(request, "tenant", "test")
+        assert failure.value.code == "SOURCE_MODALITY_UNAVAILABLE"
+
+
+async def test_terminal_upstream_unavailable_hint_prevents_new_attempt():
+    async def overloaded():
+        raise ProviderFailure(
+            "failed", retry_after=5, reason_codes=(ProviderReason.UPSTREAM_UNAVAILABLE,)
+        )
+
+    terminal = TerminalProvider("wikipedia", handler=overloaded)
+    search = service(terminal)
+    for query, expected in (("first", ("failed", 1)), ("second", ("circuit_open", 0))):
+        with pytest.raises(ApiError) as failure:
+            await search.search(SearchRequest(query=query), "tenant", query)
+        assert failure.value.code == "PROVIDER_UNAVAILABLE"
+        assert 0 < failure.value.retry_after_ms <= 5000
+        (run,) = failure.value.provider_runs
+        assert (run.status, run.attempts) == expected
+        assert run.reason_codes == ["upstream_unavailable"]
+    assert len(terminal.calls) == 1
 
 
 async def test_quick_falls_back_when_first_image_candidates_fail_requested_license():

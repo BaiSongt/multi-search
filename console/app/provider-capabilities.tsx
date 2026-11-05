@@ -9,6 +9,7 @@ const localeLabels: Record<ProviderFilters["language"], string> = {
 };
 
 const dateLabels: Record<ProviderFilters["date_range"], string> = {
+  unsupported: "不支持",
   metadata_postfilter: "按候选元数据过滤",
   upstream_and_metadata_postfilter: "上游过滤后核对元数据",
 };
@@ -59,7 +60,7 @@ export function ProviderCapabilities({ provider }: { provider: Provider }) {
           <Definition label="来源与模态">{source_type} / {modality}</Definition>
           <Definition label="语言">{localeLabels[filters.language]}</Definition>
           <Definition label="地区">{localeLabels[filters.region]}</Definition>
-          <Definition label="日期">{dateFields[filters.date_field]} · {dateLabels[filters.date_range]}</Definition>
+          <Definition label="日期">{filters.date_range === "unsupported" ? dateLabels.unsupported : `${dateFields[filters.date_field]} · ${dateLabels[filters.date_range]}`}</Definition>
           {filters.exact_identifier_date_range && <Definition label="精确标识符日期">{dateLabels[filters.exact_identifier_date_range]}</Definition>}
           {filters.image_options && <ImageFilters options={filters.image_options} />}
         </dl>

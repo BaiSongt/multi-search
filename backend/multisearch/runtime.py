@@ -17,6 +17,7 @@ from .safe_fetch import SafeFetcher
 from .search import SearchService
 from .settings import Settings
 from .vertical_providers import create_vertical_providers
+from .wikipedia_provider import WikipediaProvider
 
 
 def build_evidence(
@@ -66,6 +67,8 @@ async def build_search(
     evidence: EvidenceBuilder,
 ) -> SearchService:
     providers = create_providers(config, client)
+    if config.enable_wikipedia:
+        providers.append(WikipediaProvider(client))
     providers.extend(
         create_vertical_providers(
             client,

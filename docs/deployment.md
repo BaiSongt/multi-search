@@ -69,6 +69,12 @@ docker compose exec -T multisearch-api python -m multisearch.keys revoke --id KE
 
 配置文件启用 JSON 格式，保留 Web、新闻和图片类别所需的候选引擎，关闭 SearXNG 图片代理。每个引擎的实际覆盖与可用性受网络环境及上游限制。冒烟脚本会从 API 容器测试 `categories=images&format=json`，分别记录候选数与上游未响应数。[SearXNG Search API](https://docs.searxng.org/dev/search_api.html)
 
+## 可选 Wikipedia 候补
+
+设置 `MULTISEARCH_ENABLE_WIKIPEDIA=true` 并重新创建 API 和 Worker。仅在公网网页文字检索的常规来源都未返回合适候选时，平台才会将查询发送到 Wikimedia Action API。快速模式同时受 `quick_fallback` 控制。查询语言的 `en` 和 `zh` 前缀分别选择英文和中文项目，未指定语言时选择英文。显式地区、日期和精确学术标识符请求会跳过该来源，域名白名单和黑名单继续生效。
+
+每个进程默认每分钟最多发起 10 次 Wikipedia 请求，并串行访问上游。管理台可暂停此来源或调整部署额度，仍需遵守 Wikimedia 的共享出口限制。响应最多含 5 个条目的标题、Wikipedia 页面链接及来源标识。需要正文证据时，现有抓取与权限检查照常执行。 [Wikimedia API 访问政策](https://www.mediawiki.org/wiki/Wikimedia_APIs/Access_policy) · [Action API 搜索](https://www.mediawiki.org/wiki/API:Search)
+
 ## 部署策略基线
 
 Compose 将 `config.example.yaml` 以只读方式挂载到 API 和 Worker。自定义时将其复制为 `config.local.yaml`，编辑后在 `.env` 中设置 `MULTISEARCH_POLICY_PATH=./config.local.yaml`，再重新创建两个服务。独立启动 Python 服务时可用 `MULTISEARCH_POLICY_FILE` 指定同一文件。文件支持模式预算、自动快速模式阈值、快速回退、缓存时限、来源优先级／限流及图片过滤默认值。配置应与发布记录一起保存。 [配置示例](../config.example.yaml)

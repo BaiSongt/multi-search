@@ -1129,6 +1129,16 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     if (await searxng.getByText(/^web \/ image ·/).count()) {
       await searxng.getByText("候选图片过滤", { exact: true }).waitFor();
     }
+    if (process.env.MULTISEARCH_TEST_WIKIPEDIA === "true") {
+      const wikipedia = providers.getByRole("row").filter({ hasText: "wikipedia" });
+      await wikipedia.getByText("能力详情", { exact: true }).click();
+      const capability = (label) => wikipedia.locator(".definition").filter({
+        has: adminPage.getByText(label, { exact: true }),
+      }).locator("dd");
+      assert.equal(await capability("日期").innerText(), "不支持");
+      assert.equal(await capability("地区").innerText(), "不支持");
+      assert.equal(await capability("每进程上游并发上限").innerText(), "1");
+    }
     await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession, auditor);
     await verifyRetainedQuery(adminPage, developer, developerSession, operations, operationsSession);
     await verifyImageQuality(adminPage, developer, developerSession, operations);

@@ -9,7 +9,7 @@ from .policy import ProviderPolicy
 from .routing_policy import DEFAULT_ROUTING, RoutingRules, RoutingVersion
 
 _MAX_POLICY_BYTES = 32 * 1024
-ProviderName = Literal["ddgs", "searxng", "openalex", "crossref", "arxiv", "github"]
+ProviderName = Literal["ddgs", "searxng", "openalex", "crossref", "arxiv", "github", "wikipedia"]
 
 
 class _PolicyLoader(yaml.SafeLoader):
@@ -42,7 +42,10 @@ class DeploymentPolicy(BaseModel):
 
     def provider(self, name: str) -> ProviderPolicy:
         values = self.providers.get(name)
-        return ProviderPolicy(**values.model_dump()) if values else ProviderPolicy()
+        overrides = values.model_dump(exclude_unset=True) if values else {}
+        if name == "wikipedia":
+            overrides.setdefault("requests_per_minute", 10)
+        return ProviderPolicy(**overrides)
 
     def apply_image_options(self, request: SearchRequest) -> SearchRequest:
         if self.image_options is None or Modality.IMAGE not in request.modalities:

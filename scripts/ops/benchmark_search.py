@@ -130,9 +130,16 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
     samples = []
     for item in data.get("results", [])[:10] if status == 200 else []:
         image = item.get("image") or {}
+        provider_ids = item.get("provider_ids")
+        providers = (
+            sorted({value.strip() for value in provider_ids if isinstance(value, str)} - {""})
+            if isinstance(provider_ids, list)
+            else []
+        )
         samples.append(
             {
                 "result_id": item.get("result_id"),
+                "provider_ids": providers,
                 "kind": item.get("kind"),
                 "title": item.get("title"),
                 "url": item.get("url"),
