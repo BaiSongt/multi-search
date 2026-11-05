@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent } from "react";
 import { callApi } from "./lib/api";
-import type { Capabilities, EvidenceRecord, ImageResult, RightsStatus, SearchResponse } from "./lib/contracts";
+import type { Capabilities, EvidenceRecord, ImageResult, JobAccepted, RightsStatus, SearchResponse, SearchResult } from "./lib/contracts";
+import { ResearchJob } from "./research-job";
 import { Copy, CopyId, dateTime, Dialog, Empty, ExternalLink, Failure, Loading, safeLink, useResource } from "./ui";
 
 const RIGHTS: Record<RightsStatus, { label: string; color: string }> = {
@@ -71,7 +72,7 @@ function ImageDetails({ result, close }: { result: ImageResult; close: () => voi
 }
 
 type ModalityChoice = "text" | "image" | "mixed";
-const MODES = { auto: "自动", quick: "快速", standard: "标准", local: "本地缓存", evidence: "证据检索" };
+const MODES = { auto: "自动", quick: "快速", standard: "标准", local: "本地缓存", evidence: "证据检索", deep: "深度研究" };
 const SOURCES: Record<string, string> = { web: "Web", news: "新闻", academic: "学术", code: "代码", local: "本地", patent: "专利" };
 const SCOPES: Record<string, string> = { public: "公共网络", private: "私有网络", offline: "离线" };
 const DEFAULT_PAIRS = [
@@ -82,6 +83,9 @@ const DEFAULT_PAIRS = [
 
 function searchBody(fields: FormData, imageOnly: boolean) {
   const choice = imageOnly ? "image" : fields.get("modality") ?? "text";
+  const mode = fields.get("mode") ?? "auto";
+  const source = fields.get("source") ?? "web";
+  const offlineResearch = mode === "deep" && source === "local";
   const modalities = choice === "mixed" ? ["text", "image"] : [choice];
   const width = fields.get("min_width");
   const height = fields.get("min_height");
@@ -91,20 +95,25 @@ function searchBody(fields: FormData, imageOnly: boolean) {
   const region = fields.get("region");
   const latency = fields.get("max_latency_ms");
   const pages = fields.get("max_pages");
+  const rounds = fields.get("max_search_rounds");
+  const modelTokens = fields.get("max_llm_tokens");
   const metadataFetches = fields.get("max_image_metadata_fetches");
   return {
     query: String(fields.get("query") ?? "").trim(),
-    mode: fields.get("mode") ?? "auto",
-    source_types: [fields.get("source") ?? "web"],
+    mode,
+    source_types: [source],
     modalities,
     max_results: Number(fields.get("max_results") || "10"),
     ...(language ? { language } : {}),
     ...(region ? { region } : {}),
     ...(latency ? { max_latency_ms: Number(latency) } : {}),
-    ...(pages ? { max_pages: Number(pages) } : {}),
+    ...(pages && !offlineResearch ? { max_pages: Number(pages) } : {}),
+    ...(rounds ? { max_search_rounds: Number(rounds) } : {}),
+    ...(modelTokens && !offlineResearch ? { max_llm_tokens: Number(modelTokens) } : {}),
     ...(metadataFetches ? { max_image_metadata_fetches: Number(metadataFetches) } : {}),
-    ...(fields.has("require_evidence") ? { require_evidence: true } : {}),
-    ...(fields.has("network_scope") ? { network_scope: fields.get("network_scope") } : {}),
+    ...(fields.has("require_evidence") && !offlineResearch ? { require_evidence: true } : {}),
+    ...(mode === "deep" ? { network_scope: offlineResearch ? "offline" : "public" }
+      : fields.has("network_scope") ? { network_scope: fields.get("network_scope") } : {}),
     ...(choice === "text" ? {} : {
       image_options: {
         source_page_required: !fields.has("image_options_present") || fields.has("source_page_required"),
@@ -144,12 +153,47 @@ function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () 
   );
 }
 
+function ResultCards({ results, showImage, label = "搜索结果" }: { results: SearchResult[]; showImage: (result: ImageResult) => void; label?: string }) {
+  return results.length === 0 ? <Empty>没有符合条件的结果。</Empty> : (
+    <section aria-label={label} className="result-grid">
+      {results.map((result) => (
+        <article className="result-card" key={`${result.kind}-${result.result_id}`}>
+          {result.kind === "image" && <Thumbnail key={result.image.thumbnail_url ?? result.result_id} result={result} />}
+          <h3>{result.title}</h3>
+          {result.kind === "image" ? (
+            <>
+              <div className="actions">
+                <RightsBadge status={result.image.rights_status} />
+                <span className="muted">{result.image.source_site_name ?? result.image.source_site_domain ?? "来源未提供"}</span>
+              </div>
+              {result.image.width && result.image.height && <span className="muted">{result.image.width} × {result.image.height} px</span>}
+              <div className="actions">
+                <ExternalLink href={result.image.source_page_url}>{result.image.source_page_url ? "来源页" : "来源页未提供"}</ExternalLink>
+                <ExternalLink href={result.image.original_url}>原图</ExternalLink>
+                <button type="button" onClick={() => showImage(result)}>图片详情</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="muted">{result.snippet ?? "暂无摘要"}</p>
+              <ExternalLink href={result.url}>查看来源</ExternalLink>
+            </>
+          )}
+          <span className="muted">{result.provider_ids.join("、")}</span>
+        </article>
+      ))}
+    </section>
+  );
+}
+
 export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { csrf: string; imageOnly?: boolean; sessionSearch?: boolean }) {
   const [modality, setModality] = useState<ModalityChoice>(imageOnly ? "image" : "text");
   const [mode, setMode] = useState("auto");
+  const [source, setSource] = useState("");
   const [draft, setDraft] = useState<ReturnType<typeof searchBody>>();
   const [request, setRequest] = useState<ReturnType<typeof searchBody>>();
   const [response, setResponse] = useState<SearchResponse>();
+  const [researchJob, setResearchJob] = useState<JobAccepted>();
   const [selected, setSelected] = useState<ImageResult>();
   const [evidence, setEvidence] = useState<EvidenceRecord>();
   const [pending, setPending] = useState(false);
@@ -157,16 +201,23 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
   const capabilities = useResource<Capabilities>("capabilities");
   const limits = capabilities.data?.limits;
   const evidenceAvailable = capabilities.data?.modes.evidence === "available";
+  const researchAvailable = sessionSearch && capabilities.data?.research === "available";
   const imageAvailable = capabilities.data ? capabilities.data.modalities.image === "available" : true;
-  const allowedModes = Object.entries(MODES).filter(([name]) => capabilities.data
-    ? capabilities.data.modes[name] === "available" : name !== "evidence");
+  const allowedModes = Object.entries(MODES).filter(([name]) => {
+    if (name === "deep") return researchAvailable;
+    return capabilities.data ? capabilities.data.modes[name] === "available" : name !== "evidence";
+  });
+  const selectedMode = allowedModes.some(([name]) => name === mode) ? mode : "auto";
+  const deep = selectedMode === "deep";
   const pairs = capabilities.data?.combinations ?? DEFAULT_PAIRS;
-  const scopes = Object.entries(SCOPES).filter(([scope]) => capabilities.data
-    ? capabilities.data.network_scopes[scope] === "available" : scope === "public");
   const sources = [...new Set(pairs.filter((pair) => modality === "mixed"
     ? pairs.some((item) => item.source_type === pair.source_type && item.modality !== pair.modality && ["text", "image"].includes(item.modality))
     : pair.modality === modality).map((pair) => pair.source_type))];
-  const modeLimit = limits?.modes[mode === "auto" ? "standard" : mode];
+  const selectedSource = sources.includes(source) ? source : sources[0] ?? "";
+  const offlineResearch = deep && selectedSource === "local";
+  const scopes = Object.entries(SCOPES).filter(([scope]) => capabilities.data && !deep
+    ? capabilities.data.network_scopes[scope] === "available" : scope === (offlineResearch ? "offline" : "public"));
+  const modeLimit = limits?.modes[selectedMode === "auto" ? "standard" : selectedMode];
 
   async function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -178,10 +229,13 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
     setRequest(body);
     setPending(true);
     try {
-      const result = await callApi<SearchResponse>(key ? "search" : "playground", {
-        method: "POST", body, ...(key ? { key } : { csrf }),
-      });
-      setResponse(result);
+      if (body.mode === "deep") {
+        setResearchJob(await callApi<JobAccepted>("playground", { method: "POST", body, csrf }));
+      } else {
+        setResponse(await callApi<SearchResponse>(key ? "search" : "playground", {
+          method: "POST", body, ...(key ? { key } : { csrf }),
+        }));
+      }
     } catch (reason) {
       setError(reason);
     } finally {
@@ -198,25 +252,29 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
           <label className="wide">关键词<input name="query" required maxLength={1024} placeholder={imageOnly ? "例如：Golden Gate Bridge" : "例如：NASA"} /></label>
           {!imageOnly && (
             <label>模态
-              <select name="modality" value={modality} onChange={(event) => setModality(event.target.value as ModalityChoice)}>
+              <select name="modality" value={modality} onChange={(event) => {
+                setModality(event.target.value as ModalityChoice);
+                setSource("");
+              }}>
                 <option value="text">文字</option><option value="image" disabled={!imageAvailable}>图片</option><option value="mixed" disabled={!imageAvailable}>混合</option>
               </select>
             </label>
           )}
           <label>来源
-            <select name="source" key={modality} disabled={!sources.length}>
+            <select name="source" value={selectedSource} onChange={(event) => setSource(event.target.value)} disabled={!sources.length}>
               {sources.length
                 ? sources.map((source) => <option key={source} value={source}>{SOURCES[source] ?? source}</option>)
                 : <option value="">暂无可用来源</option>}
             </select>
           </label>
           <label>搜索深度
-            <select name="mode" value={mode} onChange={(event) => setMode(event.target.value)}>
+            <select name="mode" value={selectedMode} onChange={(event) => setMode(event.target.value)}>
               {allowedModes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
           <label>最多结果<input type="number" name="max_results" defaultValue={10} required min={1} max={30} /></label>
         </div>
+        {deep && <p className="muted">深度研究使用当前会话提交后台任务。{offlineResearch ? "本地研究只读取离线索引。" : "研究范围为公共网络。"}</p>}
         {modality !== "text" && (
           <fieldset>
             <legend>图片筛选</legend>
@@ -237,24 +295,30 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
           <div className="form-grid">
             <label>语言<input name="language" placeholder="zh-CN" maxLength={22} /></label>
             <label>地区<input name="region" pattern="[A-Z]{2}" placeholder="HK" maxLength={2} /></label>
-            <label>网络范围<select name="network_scope">{scopes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label>网络范围<select name="network_scope" key={`${deep}-${offlineResearch}`} disabled={deep}>{scopes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <label>请求时限（ms）<input name="max_latency_ms" type="number" min={100} max={modeLimit?.max_latency_ms ?? 900000} placeholder={String(modeLimit?.max_latency_ms ?? "")} /></label>
-            {evidenceAvailable && (
+            {(deep ? !offlineResearch && modality !== "image" : evidenceAvailable) && (
               <>
                 <label>最多抓取页数<input name="max_pages" type="number" min={0} max={30} /></label>
                 <label className="check"><input type="checkbox" name="require_evidence" />要求提供证据</label>
               </>
             )}
-            <label>API Key<input name="api_key" type="password" autoComplete="off" maxLength={128} required={!sessionSearch}
-              placeholder={sessionSearch ? "留空使用当前会话" : "输入获授权的 API Key"} /></label>
+            {deep && <>
+              <label>最多检索轮次<input name="max_search_rounds" type="number" min={1} max={5} /></label>
+              {!offlineResearch && <label>模型 Token 上限<input name="max_llm_tokens" type="number" min={0} max={100000} placeholder="0" /></label>}
+            </>}
+            <label>API Key<input name="api_key" type="password" autoComplete="off" maxLength={128} required={!sessionSearch} disabled={deep}
+              placeholder={deep ? "使用当前会话" : sessionSearch ? "留空使用当前会话" : "输入获授权的 API Key"} /></label>
           </div>
         </details>
-        <div className="actions"><button type="submit" className="primary" disabled={pending || !sources.length}>{pending ? "检索中…" : "搜索"}</button></div>
+        <div className="actions"><button type="submit" className="primary" disabled={pending || !sources.length}>{deep ? pending ? "提交中…" : "启动深度研究" : pending ? "检索中…" : "搜索"}</button></div>
       </form>
       {draft && <details className="panel"><summary>查看请求预览</summary><pre>{JSON.stringify(draft, null, 2)}</pre></details>}
       {request && <details className="panel"><summary>查看请求 JSON</summary><pre>{JSON.stringify(request, null, 2)}</pre></details>}
       {pending && <Loading />}
       {error !== undefined && <Failure reason={error} />}
+      {researchJob && <ResearchJob key={researchJob.job_id} accepted={researchJob} csrf={csrf} showEvidence={setEvidence}
+        renderResults={(results) => <ResultCards results={results} showImage={setSelected} label="研究候选结果" />} />}
       {response && (
         <>
           <section className="panel" aria-label="搜索摘要">
@@ -267,36 +331,7 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
             </div>
             {response.warnings.length > 0 && <ul>{response.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
           </section>
-          {response.results.length === 0 ? <Empty>没有符合条件的结果。</Empty> : (
-            <section aria-label="搜索结果" className="result-grid">
-              {response.results.map((result) => (
-                <article className="result-card" key={`${result.kind}-${result.result_id}`}>
-                  {result.kind === "image" && <Thumbnail key={result.image.thumbnail_url ?? result.result_id} result={result} />}
-                  <h3>{result.title}</h3>
-                  {result.kind === "image" ? (
-                    <>
-                      <div className="actions">
-                        <RightsBadge status={result.image.rights_status} />
-                        <span className="muted">{result.image.source_site_name ?? result.image.source_site_domain ?? "来源未提供"}</span>
-                      </div>
-                      {result.image.width && result.image.height && <span className="muted">{result.image.width} × {result.image.height} px</span>}
-                      <div className="actions">
-                        <ExternalLink href={result.image.source_page_url}>{result.image.source_page_url ? "来源页" : "来源页未提供"}</ExternalLink>
-                        <ExternalLink href={result.image.original_url}>原图</ExternalLink>
-                        <button type="button" onClick={() => setSelected(result)}>图片详情</button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <p className="muted">{result.snippet ?? "暂无摘要"}</p>
-                      <ExternalLink href={result.url}>查看来源</ExternalLink>
-                    </>
-                  )}
-                  <span className="muted">{result.provider_ids.join("、")}</span>
-                </article>
-              ))}
-            </section>
-          )}
+          <ResultCards results={response.results} showImage={setSelected} />
           <details className="panel"><summary>查看原始响应 JSON</summary><pre>{JSON.stringify(response, null, 2)}</pre></details>
           {response.evidence_records && response.evidence_records.length > 0 && (
             <section className="panel" aria-label="证据列表">

@@ -1,26 +1,38 @@
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID, uuid4
 
+from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from .contracts import Modality, Mode
+from .contracts import Modality, Mode, ProviderRun, SearchResult
 from .errors import ApiError
 from .evidence_contracts import EvidenceRecord
-from .evidence_store import save_evidence
+from .evidence_store import save_evidence, save_images
 from .job_contracts import JobError, JobKind, JobProgress, JobStatus, JobView
-from .metering import SearchPrincipal, assert_principal, enforce_quota
-from .policy import lock_tenant
+from .metering import (
+    SearchPrincipal,
+    assert_principal,
+    enforce_quota,
+    has_concurrency_slot,
+    save_provider_runs,
+)
+from .policy import lock_tenant, try_lock_tenant
 from .reporting import _cursor, _read_cursor
+from .tracing import trace_id
 
 LEASE_SECONDS = 20
 _ACTIVE = {"queued", "running", "cancelling"}
+_RESULTS = TypeAdapter(list[SearchResult])
 _VIEW = """
     id AS job_id, tenant_id, kind, status, created_at, updated_at, deadline_at, attempts,
-    max_attempts, progress, result, error
+    max_attempts, progress, result, error,
+    (SELECT u.trace_id FROM usage_events u WHERE u.id = search_jobs.id) AS trace_id,
+    (SELECT u.request_id FROM usage_events u WHERE u.id = search_jobs.id) AS request_id
 """
 
 
@@ -34,6 +46,8 @@ class Claim:
     deadline_at: datetime
     progress: JobProgress | None = None
     checkpoint: dict | None = None
+    trace_id: str | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +81,8 @@ class JobStore:
         idempotency_key: str | None,
         max_latency_ms: int,
         total: int,
+        *,
+        worker_available: bool = True,
     ) -> JobView:
         mode = Mode.EVIDENCE if kind == JobKind.FETCH else Mode.DEEP
         encoded = _json(payload)
@@ -106,6 +122,8 @@ class JobStore:
                     if existing["request_hash"] != fingerprint:
                         raise ApiError(409, "IDEMPOTENCY_CONFLICT", "幂等标识已用于不同的任务")
                     return JobView.model_validate(dict(existing))
+            if not worker_available:
+                raise ApiError(503, "WORKER_UNAVAILABLE", "后台 Worker 暂不可用", retryable=True)
             queue_size = await connection.scalar(
                 text("""
                 SELECT count(*) FROM search_jobs WHERE tenant_id = :tenant
@@ -129,6 +147,7 @@ class JobStore:
                 {
                     "id": uuid4(),
                     "request_id": request_id,
+                    "trace_id": trace_id(),
                     "hash": fingerprint,
                     "payload": encoded,
                     "progress": _json({"stage": "queued", "completed": 0, "total": total}),
@@ -140,10 +159,10 @@ class JobStore:
             await connection.execute(
                 text("""
                 INSERT INTO usage_events (id, tenant_id, principal_kind, principal_id, user_id, key_id,
-                    request_id, operation, mode, modalities, source_types, created_at,
+                    request_id, trace_id, operation, mode, modalities, source_types, created_at,
                     reservation_expires_at, research_jobs_started)
                 VALUES (:id, :tenant, :principal_kind, :principal, :owner, :key_id,
-                    :request_id, :kind, :mode, :modalities, :sources, :now, :deadline, :research_started)
+                    :request_id, :trace_id, :kind, :mode, :modalities, :sources, :now, :deadline, :research_started)
             """),
                 params,
             )
@@ -212,7 +231,12 @@ class JobStore:
             )
             UPDATE usage_events u SET status = r.status, code = r.error_code,
                 pages_fetched = GREATEST(u.pages_fetched, COALESCE((r.progress ->> 'pages_fetched')::INTEGER, 0)),
-                llm_tokens = GREATEST(u.llm_tokens, COALESCE((r.progress ->> 'llm_tokens')::INTEGER, 0))
+                llm_tokens = GREATEST(u.llm_tokens, COALESCE((r.progress ->> 'llm_tokens')::INTEGER, 0)),
+                llm_tokens_reserved = COALESCE((r.progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0),
+                llm_usage_unknown = COALESCE((r.progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0) > 0
+                    AND NOT COALESCE((r.result #>> '{usage,llm_usage_known}')::BOOLEAN, FALSE),
+                estimated_cost = (r.result #>> '{usage,estimated_cost}')::NUMERIC,
+                cost_currency = r.result #>> '{usage,cost_currency}'
             FROM recovered r WHERE u.id = r.id AND r.status IN ('partial','failed','cancelled')
         """)
         )
@@ -220,31 +244,110 @@ class JobStore:
     async def claim(self, kinds: tuple[JobKind, ...]) -> Claim | None:
         async with self.db.begin() as connection:
             await self._recover(connection)
-            result = await connection.execute(
+            cutoff = await connection.scalar(text("SELECT clock_timestamp()"))
+        params = {
+            "kinds": [kind.value for kind in kinds],
+            "cutoff": cutoff,
+            "after": None,
+            "id": None,
+        }
+        while True:
+            async with self.db.connect() as connection:
+                candidates = (
+                    await connection.execute(
+                        text("""
+                    SELECT id, tenant_id, created_at FROM search_jobs
+                    WHERE status = 'queued' AND deadline_at > now() AND kind = ANY(:kinds)
+                        AND created_at <= :cutoff
+                        AND (CAST(:after AS TIMESTAMPTZ) IS NULL OR (created_at, id) > (:after, :id))
+                    ORDER BY created_at, id LIMIT 64
+                """),
+                        params,
+                    )
+                ).all()
+            if not candidates:
+                return None
+            for job_id, tenant_id, _ in candidates:
+                async with self.db.begin() as connection:
+                    if await try_lock_tenant(connection, tenant_id):
+                        claim = await self._claim_candidate(connection, job_id, tenant_id)
+                        if claim is not None:
+                            return claim
+            if len(candidates) < 64:
+                return None
+            last_id, _, last_created_at = candidates[-1]
+            params.update(after=last_created_at, id=last_id)
+
+    async def _claim_candidate(
+        self,
+        connection: AsyncConnection,
+        job_id: UUID,
+        tenant_id: UUID,
+    ) -> Claim | None:
+        row = (
+            (
+                await connection.execute(
+                    text("""
+            SELECT j.owner_id, j.principal_id, u.principal_kind, COALESCE(k.limits, '{}'::JSONB) AS limits
+            FROM search_jobs j JOIN usage_events u ON u.id = j.id
+            LEFT JOIN api_keys k ON k.id = u.key_id
+            WHERE j.id = :id AND j.status = 'queued' AND j.deadline_at > now()
+            FOR UPDATE OF j SKIP LOCKED
+        """),
+                    {"id": job_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            return None
+        now = (await connection.scalar(text("SELECT clock_timestamp()"))).astimezone(UTC)
+        principal = SearchPrincipal(
+            tenant_id, row["owner_id"], row["principal_id"], row["principal_kind"], row["limits"]
+        )
+        try:
+            await assert_principal(connection, principal, now)
+        except ApiError:
+            await connection.execute(
                 text("""
+                WITH stopped AS (
+                    UPDATE search_jobs SET status = 'failed', updated_at = now(), payload = '{}'::JSONB,
+                        progress = jsonb_set(progress, '{stage}', '"failed"'::JSONB),
+                        error = '{"code":"JOB_PRINCIPAL_INACTIVE","message":"任务身份已停用"}'::JSONB
+                    WHERE id = :id RETURNING id
+                )
+                UPDATE usage_events SET status = 'failed', code = 'JOB_PRINCIPAL_INACTIVE'
+                FROM stopped WHERE usage_events.id = stopped.id
+            """),
+                {"id": job_id},
+            )
+            return None
+        if not await has_concurrency_slot(connection, principal, now, self.max_concurrent):
+            return None
+        result = await connection.execute(
+            text("""
                 UPDATE search_jobs SET status = 'running', attempts = attempts + 1,
                     lease_token = :token, lease_expires_at = now() + make_interval(secs => :lease),
                     updated_at = now(), progress = jsonb_set(progress, '{stage}', '"running"'::JSONB)
-                WHERE id = (
-                    SELECT id FROM search_jobs
-                    WHERE status = 'queued' AND deadline_at > now() AND kind = ANY(:kinds)
-                    ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
-                )
+                WHERE id = :id AND deadline_at > clock_timestamp()
                 RETURNING id AS job_id, tenant_id, kind, lease_token, payload, deadline_at,
-                    progress, result AS checkpoint
+                    progress, result AS checkpoint,
+                    (SELECT u.trace_id FROM usage_events u WHERE u.id = search_jobs.id) AS trace_id,
+                    (SELECT u.request_id FROM usage_events u WHERE u.id = search_jobs.id) AS request_id
             """),
-                {"token": uuid4(), "lease": LEASE_SECONDS, "kinds": [k.value for k in kinds]},
-            )
-            row = result.mappings().one_or_none()
-            if row is None:
-                return None
-            return Claim(
-                **{
-                    **row,
-                    "kind": JobKind(row["kind"]),
-                    "progress": JobProgress.model_validate(row["progress"]),
-                }
-            )
+            {"id": job_id, "token": uuid4(), "lease": LEASE_SECONDS},
+        )
+        claimed = result.mappings().one_or_none()
+        if claimed is None:
+            return None
+        return Claim(
+            **{
+                **claimed,
+                "kind": JobKind(claimed["kind"]),
+                "progress": JobProgress.model_validate(claimed["progress"]),
+            }
+        )
 
     async def renew(self, claim: Claim) -> bool:
         async with self.db.begin() as connection:
@@ -316,10 +419,18 @@ class JobStore:
             )
             if row is None:
                 return False
+            result = (outcome.result or {}) if row["status"] != "cancelled" else {}
+            results = _RESULTS.validate_python(result.get("results", []))
+            usage = result.get("usage", {})
+            reserved = (row["progress"].get("research_budget") or {}).get("llm_tokens_reserved", 0)
+            cost = usage.get("estimated_cost")
             await connection.execute(
                 text("""
                 UPDATE usage_events SET status = :status, code = :code, pages_fetched = :pages,
-                    llm_tokens = :tokens,
+                    llm_tokens = :tokens, llm_tokens_reserved = :reserved,
+                    llm_usage_unknown = :usage_unknown, estimated_cost = :cost, cost_currency = :currency,
+                    text_results_returned = :text_count,
+                    image_results_returned = :image_count, image_sources_present = :source_count,
                     elapsed_ms = LEAST(2147483647, (extract(epoch FROM (now() - created_at)) * 1000)::BIGINT)
                 WHERE id = :id
             """),
@@ -329,21 +440,47 @@ class JobStore:
                     "code": row["error"]["code"] if row["error"] else None,
                     "pages": max(outcome.pages_fetched, row["progress"].get("pages_fetched", 0)),
                     "tokens": max(outcome.llm_tokens, row["progress"].get("llm_tokens", 0)),
+                    "reserved": max(reserved, usage.get("llm_tokens_reserved", 0)),
+                    "usage_unknown": not usage.get("llm_usage_known", reserved == 0),
+                    "cost": Decimal(cost) if cost is not None else None,
+                    "currency": usage.get("cost_currency"),
+                    "text_count": sum(item.kind == "text" for item in results),
+                    "image_count": sum(item.kind == "image" for item in results),
+                    "source_count": sum(
+                        item.kind == "image" and item.image.source_page_url is not None
+                        for item in results
+                    ),
                 },
             )
-            if row["status"] in {"completed", "partial"} and outcome.result is not None:
+            if row["status"] in {"completed", "partial"}:
                 await save_evidence(
                     connection,
                     claim.job_id,
                     [
                         EvidenceRecord.model_validate(record)
-                        for record in outcome.result.get("evidence_records", [])
+                        for record in result.get("evidence_records", [])
+                    ],
+                )
+                await save_images(connection, claim.job_id, results)
+            if claim.kind == JobKind.RESEARCH:
+                await save_provider_runs(
+                    connection,
+                    claim.job_id,
+                    [
+                        ProviderRun.model_validate(run)
+                        for round_record in result.get("rounds", [])
+                        for run in round_record.get("provider_runs", [])
                     ],
                 )
             return True
 
     async def get(
-        self, job_id: UUID, tenant_id: UUID | None, kinds: tuple[JobKind, ...]
+        self,
+        job_id: UUID,
+        tenant_id: UUID | None,
+        kinds: tuple[JobKind, ...],
+        *,
+        owner_id: UUID | None = None,
     ) -> JobView:
         async with self.db.connect() as connection:
             row = (
@@ -352,9 +489,15 @@ class JobStore:
                         text(f"""
                 SELECT {_VIEW} FROM search_jobs WHERE id = :id
                     AND (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant)
+                    AND (CAST(:owner AS UUID) IS NULL OR owner_id = :owner)
                     AND kind = ANY(:kinds)
             """),
-                        {"id": job_id, "tenant": tenant_id, "kinds": [k.value for k in kinds]},
+                        {
+                            "id": job_id,
+                            "tenant": tenant_id,
+                            "owner": owner_id,
+                            "kinds": [k.value for k in kinds],
+                        },
                     )
                 )
                 .mappings()
@@ -365,14 +508,25 @@ class JobStore:
             return JobView.model_validate(dict(row))
 
     async def cancel(
-        self, job_id: UUID, tenant_id: UUID | None, kinds: tuple[JobKind, ...]
+        self,
+        job_id: UUID,
+        tenant_id: UUID | None,
+        kinds: tuple[JobKind, ...],
+        *,
+        owner_id: UUID | None = None,
     ) -> JobView:
         async with self.db.begin() as connection:
-            params = {"id": job_id, "tenant": tenant_id, "kinds": [k.value for k in kinds]}
+            params = {
+                "id": job_id,
+                "tenant": tenant_id,
+                "owner": owner_id,
+                "kinds": [k.value for k in kinds],
+            }
             status = await connection.scalar(
                 text("""
                 SELECT status FROM search_jobs WHERE id = :id
                     AND (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant) AND kind = ANY(:kinds)
+                    AND (CAST(:owner AS UUID) IS NULL OR owner_id = :owner)
                 FOR UPDATE
             """),
                 params,

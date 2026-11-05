@@ -68,7 +68,9 @@ class UsageReports:
                     text(f"""
             SELECT {_TOTALS}, COALESCE(SUM(pages_fetched), 0) AS pages_fetched,
                 COALESCE(SUM(research_jobs_started), 0) AS research_jobs_started,
-                COALESCE(SUM(llm_tokens), 0) AS llm_tokens
+                COALESCE(SUM(llm_tokens), 0) AS llm_tokens,
+                COALESCE(SUM(llm_tokens_reserved), 0) AS llm_tokens_reserved,
+                COUNT(*) FILTER (WHERE llm_usage_unknown) AS llm_usage_unknown_requests
             FROM usage_events WHERE {_SCOPE} AND created_at >= :start
         """),
                     {**scope.params(), "start": _start()},
@@ -104,6 +106,7 @@ class UsageReports:
             "mode": None,
             "modality": None,
             "source_type": None,
+            "trace_id": None,
             "since": None,
             "until": None,
             **filters,
@@ -114,7 +117,7 @@ class UsageReports:
         }
         result = await connection.execute(
             text(f"""
-            SELECT id, request_id, tenant_id, key_id, operation, mode, modalities, source_types,
+            SELECT id, request_id, trace_id, tenant_id, key_id, operation, mode, modalities, source_types,
                 {_RESOLVED_STATUS} AS status,
                 CASE WHEN status = 'running' AND reservation_expires_at <= now()
                      THEN 'REQUEST_INTERRUPTED' ELSE code END AS code,
@@ -124,6 +127,7 @@ class UsageReports:
                 AND (CAST(:mode AS TEXT) IS NULL OR mode = :mode)
                 AND (CAST(:modality AS TEXT) IS NULL OR :modality = ANY(modalities))
                 AND (CAST(:source_type AS TEXT) IS NULL OR :source_type = ANY(source_types))
+                AND (CAST(:trace_id AS TEXT) IS NULL OR trace_id = :trace_id)
                 AND (CAST(:since AS TIMESTAMPTZ) IS NULL OR created_at >= :since)
                 AND (CAST(:until AS TIMESTAMPTZ) IS NULL OR created_at < :until)
                 AND (CAST(:after AS TIMESTAMPTZ) IS NULL OR (created_at, id) < (:after, :id))

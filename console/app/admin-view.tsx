@@ -247,13 +247,14 @@ export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: b
   const pager = usePagination();
   const query = new URLSearchParams({ limit: "20" });
   if (pager.cursor) query.set("cursor", pager.cursor);
+  if (filter.trim()) query.set("q", filter.trim());
   const resource = useResource<Page<Tenant>>(`admin/tenants?${query}`);
-  const rows = resource.data?.items.filter((tenant) => `${tenant.slug} ${tenant.id}`.toLowerCase().includes(filter.trim().toLowerCase()));
+  const rows = resource.data?.items;
   return (
     <>
       <div className="actions">
         {!quotas && <button type="button" className="primary" onClick={() => setCreating(true)}>新建租户</button>}
-        <input value={filter} aria-label="筛选本页租户" placeholder="筛选本页租户名或 ID" onChange={(event) => setFilter(event.target.value)} />
+        <input value={filter} aria-label="筛选租户" placeholder="筛选租户名或 ID" maxLength={63} onChange={(event) => { pager.reset(); setFilter(event.target.value); }} />
         <button type="button" onClick={resource.reload} disabled={resource.pending}>刷新</button>
       </div>
       {resource.pending && <Loading />}

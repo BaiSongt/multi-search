@@ -159,6 +159,157 @@ async function evidenceResult(page) {
   await page.unroute("**/gateway/capabilities");
 }
 
+async function researchJob(page, csrf) {
+  const publicId = "dc11817c-17f1-4488-848e-bda75b0aa471";
+  const localId = "93fd7a11-4de8-416e-a33f-89ce2618f299";
+  const traceId = "b".repeat(32);
+  const origin = "https://example.org/research";
+  const budget = { max_latency_ms: 50000, max_search_rounds: 2, max_pages: 3, max_results: 10,
+    max_image_results: 0, max_image_metadata_fetches: 0, max_llm_tokens: 500 };
+  const localBudget = { ...budget, max_pages: 0, max_llm_tokens: 0 };
+  const record = {
+    evidence_id: "research-evidence-1", result_id: null, origin_url: origin, canonical_url: origin,
+    document_identifier: null, retrieved_at: "2026-11-05T00:00:00Z", published_at: null,
+    title: "研究来源", content_type: "text/html", evidence_text: "来源原文包含测试证据。",
+    locator: { kind: "html_text", section: null, text_offset_start: 12, text_offset_end: 24, page_number: null },
+    content_sha256: "1".repeat(64), extraction_method: "static_html", extraction_version: "1",
+    verification_status: "content_extracted", access_policy: "metadata_and_excerpt",
+  };
+  const result = {
+    mode: "deep", summary: "完成两轮检索并保留一条可定位证据。", planned_rounds: 2, results: [],
+    rounds: [
+      { number: 1, step: "original", mode: "evidence", status: "completed", elapsed_ms: 100, result_count: 1,
+        evidence_refs: [record.evidence_id], error_code: null },
+      { number: 2, step: "limitations", mode: "evidence", status: "partial", elapsed_ms: 200, result_count: 0,
+        evidence_refs: [], error_code: null },
+    ],
+    evidence_records: [record], warnings: ["第二轮仅返回部分结果。"], comparisons: [],
+    findings: [{ title: record.title, origin_url: origin, excerpt: record.evidence_text,
+      evidence_refs: [record.evidence_id], verification_status: "content_extracted" }],
+    model_findings: [{ claim: "模型综合结论", evidence_refs: [record.evidence_id], verification_status: "model_synthesis_unverified" }],
+    budget, usage: { search_rounds: 2, pages_attempted: null, pages_charged: 3, pages_fetched: 1,
+      image_metadata_fetches: 0, image_metadata_charged: 0, llm_tokens: null, llm_tokens_reserved: 500 },
+  };
+  function job(id, status, stage, completed, report = null) {
+    return { job_id: id, tenant_id: publicId, kind: "research", status, created_at: "2026-11-05T00:00:00Z",
+      updated_at: "2026-11-05T00:00:01Z", deadline_at: "2026-11-05T00:00:50Z", attempts: 1, max_attempts: 3,
+      request_id: "research-request-fixture", trace_id: traceId,
+      progress: { stage, completed, total: 2, pages_fetched: report ? 1 : 0,
+        research_budget: { search_rounds: completed, pages_charged: 0, image_metadata_charged: 0, llm_tokens_reserved: 0 } },
+      result: report, error: null };
+  }
+
+  // 独立检查真实网关的路径白名单及上游跟踪标识。
+  const missing = await page.request.get(`/gateway/console/jobs/${publicId}`);
+  assert.equal(missing.status(), 404);
+  assert.equal((await missing.json()).code, "JOB_NOT_FOUND");
+  assert.match(missing.headers()["x-trace-id"], /^[a-f0-9]{32}$/);
+  for (const [method, path] of [["GET", `${publicId}/cancel`], ["POST", publicId], ["GET", publicId.replaceAll("-", "")]]) {
+    const rejected = await page.request.fetch(`/gateway/console/jobs/${path}`, { method });
+    assert.equal(rejected.status(), 404);
+    assert.equal(rejected.headers()["x-trace-id"], undefined);
+  }
+
+  let available = false;
+  let publicPolls = 0;
+  let finishPublic = false;
+  let cancelled = false;
+  const capabilityRoute = "**/gateway/capabilities";
+  const submitRoute = "**/gateway/playground";
+  const jobsRoute = "**/gateway/console/jobs/**";
+  await page.route(capabilityRoute, (route) => route.fulfill({ json: {
+    research: available ? "available" : "unavailable", modes: { auto: "available", deep: "available" },
+    source_types: { web: "available", local: "available" }, modalities: { text: "available" },
+    network_scopes: { public: "available", offline: "available" },
+    combinations: [{ source_type: "web", modality: "text" }, { source_type: "local", modality: "text" }],
+    limits: { modes: { deep: { max_latency_ms: 900000, max_results: 30 } }, max_image_metadata_fetches: 0 },
+  } }));
+  await page.route(submitRoute, async (route) => {
+    const req = route.request();
+    assert.equal(req.method(), "POST");
+    assert.equal(req.headers()["x-csrf-token"], csrf);
+    assert.equal(req.headers().authorization, undefined);
+    const body = req.postDataJSON();
+    assert.equal(body.mode, "deep");
+    assert.equal(body.max_search_rounds, 2);
+    const local = body.source_types[0] === "local";
+    assert.equal(body.network_scope, local ? "offline" : "public");
+    assert.equal(body.max_pages, local ? undefined : 3);
+    assert.equal(body.max_llm_tokens, local ? undefined : 500);
+    const id = local ? localId : publicId;
+    await route.fulfill({ status: 202, json: {
+      job_id: id, status: "queued", status_url: `/api/v1/console/jobs/${id}`, budget: local ? localBudget : budget, trace_id: traceId,
+    } });
+  });
+  await page.route(jobsRoute, async (route) => {
+    const req = route.request();
+    const path = new URL(req.url()).pathname;
+    assert.equal(req.headers()["x-csrf-token"], csrf);
+    if (path.endsWith(`/${localId}/cancel`)) {
+      assert.equal(req.method(), "POST");
+      cancelled = true;
+      await route.fulfill({ json: job(localId, "cancelling", "searching", 0) });
+    } else {
+      assert.equal(req.method(), "GET");
+      if (path.endsWith(`/${localId}`)) {
+        await route.fulfill({ json: cancelled ? job(localId, "cancelled", "cancelled", 0) : job(localId, "queued", "queued", 0) });
+      } else {
+        assert.ok(path.endsWith(`/${publicId}`));
+        publicPolls += 1;
+        await route.fulfill({ json: finishPublic ? job(publicId, "partial", "completed", 2, result) : job(publicId, "running", "searching", 1) });
+      }
+    }
+  });
+
+  const deep = page.getByLabel("搜索深度");
+  const task = page.getByRole("region", { name: "深度研究任务" });
+  const report = page.getByRole("region", { name: "研究报告" });
+  const submit = page.getByRole("button", { name: "启动深度研究" });
+  try {
+    await page.goto("/console/playground");
+    await deep.locator('option[value="quick"]').waitFor({ state: "detached" });
+    assert.equal(await deep.locator('option[value="deep"]').count(), 0);
+    available = true;
+    await page.reload();
+    await deep.selectOption("deep");
+    await page.getByLabel("关键词").fill("浏览器深度研究测试");
+    await page.getByText("高级参数与 API Key", { exact: true }).click();
+    assert.ok(await page.getByLabel("API Key", { exact: true }).isDisabled());
+    await page.getByLabel("最多检索轮次").fill("2");
+    await page.getByLabel("最多抓取页数").fill("3");
+    await page.getByLabel("模型 Token 上限").fill("500");
+    await submit.click();
+    await task.getByText("检索与证据提取 · 1/2 轮", { exact: true }).waitFor();
+    await task.getByText("最多 3", { exact: true }).waitFor();
+    await task.getByText(traceId, { exact: true }).waitFor();
+    await task.getByText("research-request-fixture", { exact: true }).waitFor();
+    finishPublic = true;
+    await task.getByText("部分完成", { exact: true }).waitFor();
+    await task.getByText("未报告 / 500", { exact: true }).waitFor();
+    assert.ok(publicPolls >= 2);
+    await report.getByText(result.summary).waitFor();
+    await report.getByRole("heading", { name: "模型综合 · 未核验" }).waitFor();
+    assert.equal(await report.getByRole("link", { name: record.title }).getAttribute("href"), origin);
+    await report.getByRole("button", { name: "证据 · 研究来源" }).first().click();
+    const dialog = page.getByRole("dialog", { name: "可定位证据" });
+    await dialog.getByText(record.evidence_text).waitFor();
+    await dialog.getByText("12–24", { exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+    await page.getByLabel(/^来源/).selectOption("local");
+    await page.getByText(/本地研究只读取离线索引/).waitFor();
+    await submit.click();
+    await task.getByRole("button", { name: "取消研究", exact: true }).click();
+    await task.getByText("已取消", { exact: true }).waitFor();
+    assert.ok(cancelled);
+    await report.waitFor({ state: "detached" });
+  } finally {
+    await page.unroute(jobsRoute);
+    await page.unroute(submitRoute);
+    await page.unroute(capabilityRoute);
+  }
+}
+
 async function exportUsage(page, context) {
   const actor = await session(context);
   const id = `-browser-csv-${randomBytes(4).toString("hex")}`;
@@ -371,6 +522,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     assert.ok(await developerPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await unknownImage(developerPage);
     await evidenceResult(developerPage);
+    await researchJob(developerPage, developerSession.csrf_token);
     await exportUsage(developerPage, developer);
 
     assert.deepEqual((await (await admin.request.get("/gateway/keys")).json()).keys, []);
@@ -388,7 +540,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     tenantIds.push(tenantId);
     await adminPage.getByText(tenant, { exact: true }).waitFor();
     await adminPage.goto("/admin/quotas");
-    await adminPage.getByLabel("筛选本页租户").fill(tenant);
+    await adminPage.getByLabel("筛选租户").fill(tenant);
     await adminPage.getByRole("button", { name: "编辑额度" }).click();
     await adminPage.getByRole("dialog").getByLabel("每日请求", { exact: true }).fill("99");
     await adminPage.getByRole("button", { name: "预览变更" }).click();

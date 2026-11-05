@@ -185,6 +185,7 @@ async def requests(
     mode: Mode | None = None,
     modality: Modality | None = None,
     source_type: Source | None = None,
+    trace_id: Annotated[str | None, Query(pattern=r"^[0-9a-f]{32}$")] = None,
     since: datetime | None = None,
     until: datetime | None = None,
 ):
@@ -207,6 +208,7 @@ async def requests(
         mode=mode,
         modality=modality,
         source_type=source_type,
+        trace_id=trace_id,
         since=since,
         until=until,
     )
@@ -214,7 +216,11 @@ async def requests(
 
 @router.get("/admin/tenants")
 async def tenants(
-    request: Request, actor: SessionUser, limit: PageSize = 30, cursor: Cursor = None
+    request: Request,
+    actor: SessionUser,
+    limit: PageSize = 30,
+    cursor: Cursor = None,
+    q: Annotated[str, Query(max_length=63)] = "",
 ):
     _require(actor.role, {Role.PLATFORM_ADMIN})
     async with request.app.state.db.connect() as connection:
@@ -224,10 +230,11 @@ async def tenants(
                 (SELECT COUNT(*) FROM usage_events u WHERE u.tenant_id = t.id AND
                     u.created_at >= now() - interval '30 days') AS search_requests
             FROM tenants t LEFT JOIN quota_policies q ON q.tenant_id = t.id
-            WHERE CAST(:cursor AS TEXT) IS NULL OR t.slug > :cursor
+            WHERE (CAST(:cursor AS TEXT) IS NULL OR t.slug > :cursor)
+                AND (strpos(t.slug, :q) > 0 OR strpos(CAST(t.id AS TEXT), :q) > 0)
             ORDER BY t.slug LIMIT :limit
         """),
-            {"cursor": cursor, "limit": limit + 1},
+            {"cursor": cursor, "limit": limit + 1, "q": q.strip().lower()},
         )
         items = [dict(row) for row in result.mappings()]
     for item in items:

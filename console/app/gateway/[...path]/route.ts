@@ -16,6 +16,9 @@ const POST_ROUTES = new Set([
 const KEY_ACTION = /^keys\/[a-f0-9-]{32,36}\/(rotate|revoke)$/i;
 const JOB_VIEW = /^admin\/jobs\/[a-f0-9-]{32,36}$/i;
 const JOB_CANCEL = /^admin\/jobs\/[a-f0-9-]{32,36}\/cancel$/i;
+const CONSOLE_JOB = "console/jobs/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
+const CONSOLE_JOB_VIEW = new RegExp(`^${CONSOLE_JOB}$`, "i");
+const CONSOLE_JOB_CANCEL = new RegExp(`^${CONSOLE_JOB}/cancel$`, "i");
 const ADMIN_UPDATE = /^admin\/(?:providers\/[a-z0-9_-]{1,64}|tenants\/[a-f0-9-]{32,36}(?:\/quota)?)$/i;
 const TEAM_READ = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/(?:members|invitations)$/i;
 const TEAM_WRITE = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/invitations(?:\/[a-f0-9-]{32,36}\/revoke)?$/i;
@@ -23,8 +26,9 @@ const MEMBER_UPDATE = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/members\/[a-f
 const BODY_LIMIT = 64 * 1024;
 
 function accepted(method: string, path: string) {
-  if (method === "GET") return GET_ROUTES.has(path) || JOB_VIEW.test(path) || TEAM_READ.test(path);
-  if (method === "POST") return POST_ROUTES.has(path) || KEY_ACTION.test(path) || JOB_CANCEL.test(path) || TEAM_WRITE.test(path);
+  if (method === "GET") return GET_ROUTES.has(path) || JOB_VIEW.test(path) || CONSOLE_JOB_VIEW.test(path) || TEAM_READ.test(path);
+  if (method === "POST") return POST_ROUTES.has(path) || KEY_ACTION.test(path) || JOB_CANCEL.test(path) || TEAM_WRITE.test(path)
+    || CONSOLE_JOB_CANCEL.test(path);
   return method === "PATCH" && (ADMIN_UPDATE.test(path) || MEMBER_UPDATE.test(path));
 }
 
@@ -87,7 +91,7 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(path.join("/") === "playground" || path.join("/") === "search" ? 65_000 : 25_000)]),
     });
     const output = new Headers({ "Cache-Control": "no-store" });
-    for (const name of ["content-type", "x-request-id", "retry-after", "www-authenticate"]) {
+    for (const name of ["content-type", "x-request-id", "x-trace-id", "retry-after", "www-authenticate"]) {
       const value = upstream.headers.get(name);
       if (value !== null) output.set(name, value);
     }

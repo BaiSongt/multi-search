@@ -8,12 +8,14 @@ from .errors import ApiError
 from .identity import MachineIdentity
 from .metering import SearchPrincipal, UsageMeter
 from .search import SearchService
+from .tracing import bind_trace, trace_id
 
 
 class SearchApplication:
-    def __init__(self, service: SearchService, meter: UsageMeter):
+    def __init__(self, service: SearchService, meter: UsageMeter, *, telemetry=None):
         self.service = service
         self.meter = meter
+        self.telemetry = telemetry
 
     async def machine_search(
         self, body: SearchRequest, identity: MachineIdentity, request_id: str
@@ -33,6 +35,37 @@ class SearchApplication:
         self, body: SearchRequest, principal: SearchPrincipal, request_id: str
     ) -> SearchResponse:
         started = monotonic()
+        try:
+            with bind_trace(trace_id(), request_id):
+                return await self._search(body, principal, request_id, started)
+        except CancelledError:
+            if self.telemetry:
+                self.telemetry.record_search_failure(
+                    body.mode,
+                    "cancelled",
+                    "REQUEST_CANCELLED",
+                    body.modalities,
+                    int((monotonic() - started) * 1000),
+                )
+            raise
+        except ApiError as error:
+            if self.telemetry:
+                self.telemetry.record_search_failure(
+                    body.mode,
+                    "failed",
+                    error.code,
+                    body.modalities,
+                    int((monotonic() - started) * 1000),
+                )
+            raise
+
+    async def _search(
+        self,
+        body: SearchRequest,
+        principal: SearchPrincipal,
+        request_id: str,
+        started: float,
+    ) -> SearchResponse:
         routing = self.service.routing
         mode, budget = self.service.plan(body, routing=routing)
         deadline = started + budget.max_latency_ms / 1000
@@ -48,7 +81,10 @@ class SearchApplication:
         if admission.replay:
             if "error" in admission.replay:
                 raise ApiError(**admission.replay["error"])
-            return SearchResponse.model_validate(admission.replay["response"])
+            replay = SearchResponse.model_validate(admission.replay["response"])
+            if self.telemetry:
+                self.telemetry.record_search(replay, replay=True, source_types=body.source_types)
+            return replay
 
         try:
             response = await self.service.search(
@@ -78,4 +114,6 @@ class SearchApplication:
             await self.meter.finish(admission, response=response)
         except (SQLAlchemyError, OSError):
             raise ApiError(503, "USAGE_UNAVAILABLE", "计量服务暂不可用", retryable=True) from None
+        if self.telemetry:
+            self.telemetry.record_search(response, source_types=body.source_types)
         return response

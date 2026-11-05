@@ -105,6 +105,7 @@ export const quotaLabels: Record<string, string> = {
 export type RequestRow = {
   id: string;
   request_id: string;
+  trace_id?: string | null;
   tenant_id: string;
   key_id: string | null;
   mode: string;
@@ -164,8 +165,22 @@ export type Invitation = { id: string; email: string; role: Role; status: string
 export type IssuedInvitation = { invitation: Invitation; token: string };
 
 export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "partial" | "failed" | "cancelled";
+export type ResearchBudget = {
+  max_latency_ms: number;
+  max_search_rounds: number;
+  max_pages: number;
+  max_results: number;
+  max_image_results: number;
+  max_image_metadata_fetches: number;
+  max_llm_tokens: number;
+};
+
+export type JobAccepted = { job_id: string; status: JobStatus; status_url: string; budget: ResearchBudget; trace_id?: string | null };
+
 export type Job = {
   job_id: string;
+  request_id?: string | null;
+  trace_id?: string | null;
   tenant_id: string;
   kind: "fetch" | "research";
   status: JobStatus;
@@ -174,7 +189,7 @@ export type Job = {
   deadline_at: string;
   attempts: number;
   max_attempts: number;
-  progress: { stage: string; completed: number; total: number };
+  progress: { stage: string; completed: number; total: number; pages_fetched?: number };
   result: unknown;
   error: { code: string; message: string } | null;
 };
@@ -246,6 +261,41 @@ export type EvidenceRecord = {
   verification_status: string;
   access_policy: string;
 };
+
+export type ResearchResult = {
+  mode: "deep";
+  summary: string;
+  planned_rounds: number;
+  rounds: {
+    number: number;
+    step: string;
+    mode: "standard" | "evidence";
+    status: "completed" | "partial" | "failed" | "interrupted";
+    elapsed_ms: number;
+    result_count: number;
+    evidence_refs: string[];
+    error_code: string | null;
+  }[];
+  results: SearchResult[];
+  evidence_records: EvidenceRecord[];
+  findings: { title: string | null; excerpt: string; evidence_refs: string[]; origin_url: string; verification_status: "content_extracted" }[];
+  comparisons: { round_number: number; evidence_refs: string[]; source_hosts: string[]; assessment: "source_independence_pending" }[];
+  model_findings: { claim: string; evidence_refs: string[]; verification_status: "model_synthesis_unverified" }[];
+  budget: ResearchBudget;
+  usage: {
+    search_rounds: number;
+    pages_attempted: number | null;
+    pages_charged: number;
+    pages_fetched: number;
+    image_metadata_fetches: number | null;
+    image_metadata_charged: number;
+    llm_tokens: number | null;
+    llm_tokens_reserved: number;
+  };
+  warnings: string[];
+};
+
+export type ResearchJobView = Omit<Job, "kind" | "result"> & { kind: "research"; result: ResearchResult | null };
 
 export type Capabilities = {
   fetch?: string;

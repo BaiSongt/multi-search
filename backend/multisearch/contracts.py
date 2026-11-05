@@ -210,6 +210,7 @@ class SearchBudget(BaseModel):
 
 class SearchResponse(BaseModel):
     request_id: str
+    trace_id: str | None = None
     status: Literal["completed", "partial"]
     mode_requested: Mode
     mode_executed: Mode

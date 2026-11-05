@@ -64,3 +64,14 @@ async def lock_tenant(connection: AsyncConnection, tenant_id: UUID) -> None:
         ),
         {"tenant": tenant_id},
     )
+
+
+async def try_lock_tenant(connection: AsyncConnection, tenant_id: UUID) -> bool:
+    return bool(
+        await connection.scalar(
+            text(
+                "SELECT pg_try_advisory_xact_lock(hashtextextended(CAST(CAST(:tenant AS UUID) AS TEXT), 173))"
+            ),
+            {"tenant": tenant_id},
+        )
+    )

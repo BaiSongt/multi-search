@@ -11,12 +11,13 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from multisearch.contracts import Mode, SearchRequest
 from multisearch.errors import ApiError
 from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
 from multisearch.identity import IdentityStore
 from multisearch.job_contracts import JobKind, JobStatus
 from multisearch.job_store import JobOutcome, JobStore
-from multisearch.metering import SearchPrincipal
+from multisearch.metering import SearchPrincipal, UsageMeter
 from multisearch.settings import Settings
 from multisearch.worker import Worker
 
@@ -102,6 +103,85 @@ async def exercise(db, pepper: str):
     assert cancelled.status == JobStatus.CANCELLED and cancelled.result is None
 
 
+async def exercise_concurrency(db, pepper: str):
+    identity = IdentityStore(db, pepper)
+    jobs = JobStore(db)
+    kinds = (JobKind.FETCH,)
+
+    async def key(tenant):
+        raw = await identity.issue(tenant, f"{tenant}@example.invalid", ["fetch", "search:text"], 1)
+        issued = await identity.authenticate(raw)
+        return SearchPrincipal(issued.tenant_id, issued.owner_id, issued.key_id, "key")
+
+    async def submit(principal, number):
+        return await jobs.create(
+            principal,
+            JobKind.FETCH,
+            {"url": f"https://example.org/{number}"},
+            uuid4().hex,
+            f"burst-{number}",
+            30_000,
+            1,
+        )
+
+    owners = [await key(f"burst-{index}") for index in range(4)]
+    first, other = owners[:2]
+    async with db.begin() as connection:
+        await connection.execute(
+            text("UPDATE api_keys SET limits = CAST(:limits AS JSONB) WHERE id = :id"),
+            {"id": first.principal_id, "limits": '{"concurrency":1}'},
+        )
+    queued = await asyncio.gather(*(submit(owners[index % 4], index) for index in range(20)))
+    assert len({job.job_id for job in queued}) == 20
+
+    meter = UsageMeter(db, jobs.max_concurrent)
+    body = SearchRequest(query="synthetic concurrency fixture")
+    admission = await meter.reserve(first, body, Mode.QUICK, uuid4().hex, 30_000)
+    expected = {job.job_id: job.tenant_id for job in queued}
+    seen = set()
+    while len(seen) < 15:
+        claims = [
+            claim
+            for claim in await asyncio.gather(*(jobs.claim(kinds) for _ in range(20)))
+            if claim
+        ]
+        assert claims, "其他租户有待执行任务，但没有领到任务"
+        for claim in claims:
+            assert claim.job_id not in seen and expected[claim.job_id] == claim.tenant_id
+            assert claim.tenant_id != first.tenant_id, "同步请求占用 Key 并发时仍领到任务"
+            seen.add(claim.job_id)
+        await asyncio.gather(*(Worker(jobs, ProbeEvidence()).execute(claim) for claim in claims))
+    assert await jobs.claim(kinds) is None
+    await meter.finish(admission, cancelled=True)
+    for _ in range(5):
+        claim = await jobs.claim(kinds)
+        assert claim.tenant_id == first.tenant_id and claim.job_id not in seen
+        assert await jobs.claim(kinds) is None, "Worker 超过了 Key 的并发上限"
+        seen.add(claim.job_id)
+        await Worker(jobs, ProbeEvidence()).execute(claim)
+    assert seen == set(expected)
+    for job in queued:
+        view = await jobs.get(job.job_id, job.tenant_id, kinds)
+        assert view.status == JobStatus.COMPLETED and view.attempts == 1
+    async with db.connect() as connection:
+        assert (
+            await connection.scalar(
+                text("""
+            SELECT count(*) FROM usage_events WHERE id = ANY(:ids)
+                AND status = 'completed' AND pages_fetched = 1
+        """),
+                {"ids": list(seen)},
+            )
+            == 20
+        )
+
+    revoked = await submit(other, 21)
+    await identity.revoke(other.principal_id)
+    assert await jobs.claim(kinds) is None
+    stopped = await jobs.get(revoked.job_id, other.tenant_id, kinds)
+    assert stopped.status == JobStatus.FAILED and stopped.error.code == "JOB_PRINCIPAL_INACTIVE"
+
+
 async def main():
     settings = Settings.from_env()
     name = "multisearch_job_probe_" + uuid4().hex[:16]
@@ -125,7 +205,9 @@ async def main():
             env={**os.environ, "DATABASE_URL": url},
         )
         await exercise(scratch, settings.key_pepper)
+        await exercise_concurrency(scratch, settings.key_pepper)
         print("通过独立 PostgreSQL 的队列幂等、租户隔离、租约恢复、旧 Worker 隔离、取消与证据计量")
+        print("通过四租户 20 并发队列、同步请求与任务共享并发额度、撤销后阻止领取")
     finally:
         await scratch.dispose()
         try:

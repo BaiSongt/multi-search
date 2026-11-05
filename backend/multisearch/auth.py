@@ -19,12 +19,28 @@ async def require_machine(
     request: Request,
     auth: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> MachineIdentity:
+    telemetry = getattr(request.app.state, "telemetry", None)
     if auth is None:
+        if telemetry:
+            telemetry.record_auth("failed")
         raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
+    return await authenticate_machine(request.app.state.identity, auth.credentials, telemetry)
+
+
+async def authenticate_machine(store, raw: str, telemetry=None) -> MachineIdentity:
     try:
-        return await request.app.state.identity.authenticate(auth.credentials)
+        identity = await store.authenticate(raw)
+    except ApiError:
+        if telemetry:
+            telemetry.record_auth("failed")
+        raise
     except (SQLAlchemyError, OSError, TimeoutError) as error:
+        if telemetry:
+            telemetry.record_auth("unavailable")
         raise ApiError(503, "AUTH_UNAVAILABLE", "鉴权服务暂不可用", retryable=True) from error
+    if telemetry:
+        telemetry.record_auth("success", scopes=identity.scopes)
+    return identity
 
 
 SearchKey = Annotated[MachineIdentity, Depends(require_machine)]

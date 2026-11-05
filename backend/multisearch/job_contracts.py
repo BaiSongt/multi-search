@@ -65,6 +65,8 @@ class JobProgress(BaseModel):
 
 class JobView(BaseModel):
     job_id: UUID
+    request_id: str | None = None
+    trace_id: str | None = None
     tenant_id: UUID
     kind: JobKind
     status: JobStatus
@@ -80,6 +82,7 @@ class JobView(BaseModel):
 
 class JobAccepted(BaseModel):
     job_id: UUID
+    trace_id: str | None = None
     status: JobStatus
     status_url: str
     budget: dict[str, int]

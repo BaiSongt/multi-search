@@ -128,6 +128,8 @@ function JobDetails({ id, csrf, close, changed }: { id: string; csrf: string; cl
         <div className="stack">
           <dl>
             <dt>任务 ID</dt><dd><CopyId value={job.job_id} /></dd>
+            {job.request_id && <><dt>请求 ID</dt><dd><CopyId value={job.request_id} /></dd></>}
+            {job.trace_id && <><dt>追踪 ID</dt><dd><CopyId value={job.trace_id} /></dd></>}
             <dt>租户 ID</dt><dd><CopyId value={job.tenant_id} /></dd>
             <dt>任务状态</dt><dd><JobBadge status={job.status} /></dd>
             <dt>类型</dt><dd>{KIND[job.kind] ?? job.kind}</dd>

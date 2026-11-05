@@ -27,6 +27,14 @@ class Settings:
     crawl4ai_url: str = ""
     crawl4ai_token: str = field(default="", repr=False)
     enable_local_index: bool = False
+    enable_research: bool = False
+    research_model_backend: str = ""
+    research_model_base_url: str = field(default="", repr=False)
+    research_model_name: str = ""
+    research_model_api_key: str = field(default="", repr=False)
+    research_cost_currency: str = ""
+    research_input_per_million_tokens: str = ""
+    research_output_per_million_tokens: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -74,4 +82,17 @@ class Settings:
             crawl4ai_token=crawl4ai_token,
             enable_local_index=os.getenv("MULTISEARCH_ENABLE_LOCAL_INDEX", "false").lower()
             == "true",
+            enable_research=os.getenv("MULTISEARCH_ENABLE_DEEP_RESEARCH", "false").lower()
+            == "true",
+            research_model_backend=os.getenv("MULTISEARCH_RESEARCH_MODEL_BACKEND", "").lower(),
+            research_model_base_url=os.getenv("MULTISEARCH_RESEARCH_MODEL_BASE_URL", ""),
+            research_model_name=os.getenv("MULTISEARCH_RESEARCH_MODEL_NAME", ""),
+            research_model_api_key=secret("MULTISEARCH_RESEARCH_MODEL_API_KEY"),
+            research_cost_currency=os.getenv("MULTISEARCH_RESEARCH_COST_CURRENCY", ""),
+            research_input_per_million_tokens=os.getenv(
+                "MULTISEARCH_RESEARCH_INPUT_PER_MILLION_TOKENS", ""
+            ),
+            research_output_per_million_tokens=os.getenv(
+                "MULTISEARCH_RESEARCH_OUTPUT_PER_MILLION_TOKENS", ""
+            ),
         )

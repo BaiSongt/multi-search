@@ -14,13 +14,23 @@ services:
       MULTISEARCH_PUBLIC_CONSOLE_URL: ${MULTISEARCH_PUBLIC_CONSOLE_URL:-http://127.0.0.1:3000}
       MULTISEARCH_ENABLE_ACADEMIC: ${MULTISEARCH_ENABLE_ACADEMIC:-false}
       MULTISEARCH_ENABLE_LOCAL_INDEX: ${MULTISEARCH_ENABLE_LOCAL_INDEX:-false}
+      MULTISEARCH_ENABLE_DEEP_RESEARCH: ${MULTISEARCH_ENABLE_DEEP_RESEARCH:-false}
+      MULTISEARCH_RESEARCH_MODEL_BACKEND: ${MULTISEARCH_RESEARCH_MODEL_BACKEND:-}
+      MULTISEARCH_RESEARCH_MODEL_BASE_URL: ${MULTISEARCH_RESEARCH_MODEL_BASE_URL:-}
+      MULTISEARCH_RESEARCH_MODEL_NAME: ${MULTISEARCH_RESEARCH_MODEL_NAME:-}
+      MULTISEARCH_RESEARCH_COST_CURRENCY: ${MULTISEARCH_RESEARCH_COST_CURRENCY:-}
+      MULTISEARCH_RESEARCH_INPUT_PER_MILLION_TOKENS: ${MULTISEARCH_RESEARCH_INPUT_PER_MILLION_TOKENS:-}
+      MULTISEARCH_RESEARCH_OUTPUT_PER_MILLION_TOKENS: ${MULTISEARCH_RESEARCH_OUTPUT_PER_MILLION_TOKENS:-}
+      MULTISEARCH_RESEARCH_MODEL_API_KEY: ${MULTISEARCH_RESEARCH_MODEL_API_KEY:-}
       MULTISEARCH_VERTICAL_SOURCES: ${MULTISEARCH_VERTICAL_SOURCES:-}
       MULTISEARCH_OPENALEX_KEY: ${MULTISEARCH_OPENALEX_KEY:-}
       MULTISEARCH_GITHUB_TOKEN: ${MULTISEARCH_GITHUB_TOKEN:-}
       MULTISEARCH_CROSSREF_EMAIL: ${MULTISEARCH_CROSSREF_EMAIL:-}
       CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-}
       CRAWL4AI_API_TOKEN_FILE: /run/secrets/crawl4ai_api_token
-    secrets: [postgres_password, api_key_hash_pepper, crawl4ai_api_token]
+      MULTISEARCH_METRICS_TOKEN_FILE: /run/secrets/metrics_token
+      MULTISEARCH_METRICS_ALLOW_LOOPBACK: ${MULTISEARCH_METRICS_ALLOW_LOOPBACK:-false}
+    secrets: [postgres_password, api_key_hash_pepper, crawl4ai_api_token, metrics_token]
     ports:
       - "127.0.0.1:${MULTISEARCH_API_PORT:-8765}:8765"
     networks: [gateway, data, search, parser]
@@ -67,7 +77,7 @@ services:
       retries: 12
 
   multisearch-worker:
-    profiles: [fetch]
+    profiles: [fetch, research]
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -95,7 +105,7 @@ services:
       retries: 12
 
   crawl4ai:
-    profiles: [fetch]
+    profiles: [fetch, research]
     build:
       context: .
       dockerfile: deploy/crawl4ai/Dockerfile
@@ -188,3 +198,5 @@ secrets:
     file: ./.secrets/searxng_secret
   crawl4ai_api_token:
     file: ./.secrets/crawl4ai_api_token
+  metrics_token:
+    file: ./.secrets/metrics_token

@@ -96,6 +96,7 @@ export function RequestTable({ rows, showTenant = false, caption = "调用记录
         <Dialog title="请求详情" close={() => setSelected(undefined)}>
           <dl>
             <dt>请求 ID</dt><dd><CopyId value={selected.request_id} /></dd>
+            {selected.trace_id && <><dt>追踪 ID</dt><dd><CopyId value={selected.trace_id} /></dd></>}
             <dt>记录 ID</dt><dd><CopyId value={selected.id} /></dd>
             <dt>租户 ID</dt><dd><CopyId value={selected.tenant_id} /></dd>
             <dt>密钥 ID</dt><dd><CopyId value={selected.key_id} /></dd>

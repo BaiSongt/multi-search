@@ -12,12 +12,17 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from .crawl_parser import CrawlParser
 from .evidence import EvidenceBuilder
+from .identity import IdentityStore
 from .job_contracts import FetchRequest, JobError, JobKind, JobProgress, JobStatus
 from .job_store import Claim, JobOutcome, JobStore
-from .safe_fetch import FetchError, SafeFetcher
+from .ops_store import OpsStore
+from .research import ResearchOrchestrator, ResearchPricing
+from .research_model import create_research_model
+from .runtime import build_evidence, build_search, load_search_policies
+from .safe_fetch import FetchError
 from .settings import Settings
+from .tracing import bind_trace, redact_http_client_logging, trace_event
 
 logger = logging.getLogger(__name__)
 HEALTH_FILE = Path("/tmp/multisearch-worker-ready")
@@ -61,17 +66,29 @@ class Worker:
             # 先预留本页。进程中断后跳过结果未知的尝试，避免重复消耗页数。
             if not await self.store.progress(claim, progress, checkpoint=result):
                 return JobOutcome(JobStatus.CANCELLED, pages_fetched=len(records))
+            remaining = _remaining(claim)
+            if remaining <= 0:
+                warnings.append("TIME_BUDGET_EXCEEDED")
+                break
             try:
-                record = await self.evidence.extract(
-                    url,
-                    timeout_s=min(remaining, 20),
-                    network_scope=body.network_scope,
-                    domain_allowlist=body.domain_allowlist,
-                    domain_denylist=body.domain_denylist,
+                async with asyncio.timeout(min(remaining, 20)):
+                    record = await self.evidence.extract(
+                        url,
+                        timeout_s=min(remaining, 20),
+                        network_scope=body.network_scope,
+                        domain_allowlist=body.domain_allowlist,
+                        domain_denylist=body.domain_denylist,
+                    )
+            except TimeoutError:
+                trace_event("fetch.extract", status="timeout")
+                errors.append(
+                    {"index": index, "code": "TIME_BUDGET_EXCEEDED", "message": "抓取时限已耗尽"}
                 )
             except FetchError as error:
+                trace_event("fetch.extract", status="failed")
                 errors.append({"index": index, "code": error.code, "message": str(error)})
             else:
+                trace_event("fetch.extract", status="success")
                 records.append(record.model_dump(mode="json"))
             progress.pages_fetched = len(records)
             if not await self.store.progress(claim, progress, checkpoint=result):
@@ -92,6 +109,11 @@ class Worker:
                 return
 
     async def execute(self, claim: Claim) -> None:
+        with bind_trace(claim.trace_id, claim.request_id or claim.job_id.hex):
+            trace_event("job.execute", status=claim.kind.value)
+            await self._execute(claim)
+
+    async def _execute(self, claim: Claim) -> None:
         work = asyncio.create_task(self.handlers[claim.kind](claim))
         watch = asyncio.create_task(self._watch(claim))
         try:
@@ -111,7 +133,8 @@ class Worker:
             if not work.done():
                 work.cancel()
                 await asyncio.gather(work, return_exceptions=True)
-            await self.store.finish(claim, outcome)
+            saved = await self.store.finish(claim, outcome)
+            trace_event("job.finish", status=outcome.status.value if saved else "lease_lost")
         finally:
             for task in (work, watch):
                 if not task.done():
@@ -146,6 +169,7 @@ async def heartbeat(redis: Redis, worker: Worker) -> None:
 
 
 async def main() -> None:
+    redact_http_client_logging()
     settings = Settings.from_env()
     db = create_async_engine(
         settings.database_url,
@@ -153,17 +177,42 @@ async def main() -> None:
         hide_parameters=True,
         connect_args={"timeout": 2, "command_timeout": 3},
     )
-    redis = Redis.from_url(settings.redis_url, socket_timeout=2, socket_connect_timeout=2)
+    redis = Redis.from_url(
+        settings.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
+    )
     try:
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
-            parser = (
-                CrawlParser(client, settings.crawl4ai_url, settings.crawl4ai_token)
-                if settings.crawl4ai_url
-                else None
-            )
-            worker = Worker(
-                JobStore(db, settings.max_concurrent), EvidenceBuilder(SafeFetcher(), parser)
-            )
+            evidence = build_evidence(settings, client)
+            store = JobStore(db, settings.max_concurrent)
+            worker = Worker(store, evidence)
+            if settings.enable_research:
+                identity = IdentityStore(db, settings.key_pepper)
+                ops = OpsStore(db, redis, identity.sessions, settings.key_pepper)
+                search = await build_search(settings, db, redis, client, ops, evidence)
+                model = create_research_model(
+                    client,
+                    backend=settings.research_model_backend,
+                    base_url=settings.research_model_base_url,
+                    model=settings.research_model_name,
+                    api_key=settings.research_model_api_key,
+                )
+                price_fields = {
+                    "currency": settings.research_cost_currency,
+                    "input_per_million_tokens": settings.research_input_per_million_tokens,
+                    "output_per_million_tokens": settings.research_output_per_million_tokens,
+                }
+                pricing = (
+                    ResearchPricing.model_validate(price_fields)
+                    if any(price_fields.values())
+                    else None
+                )
+                orchestrator = ResearchOrchestrator(search, store, model, pricing=pricing)
+
+                async def research(claim: Claim) -> JobOutcome:
+                    await load_search_policies(search, db, ops)
+                    return await orchestrator.run(claim)
+
+                worker.handlers[JobKind.RESEARCH] = research
             async with asyncio.TaskGroup() as group:
                 group.create_task(heartbeat(redis, worker))
                 group.create_task(worker.run())

@@ -43,6 +43,7 @@ from .routing_policy import (
 )
 from .safe_fetch import FetchError
 from .settings import Settings
+from .tracing import trace_event, trace_id
 
 if TYPE_CHECKING:
     from .local_index import LocalIndex
@@ -552,6 +553,9 @@ class SearchService:
             count=len(result.results),
             attempts=attempts,
         )
+        trace_event(
+            "provider.run", status=status, elapsed_ms=run.elapsed_ms, provider=provider.provider_id
+        )
         return result, run
 
     async def _run_pair(
@@ -822,7 +826,7 @@ class SearchService:
                 return None
             attempted += 1
             try:
-                return await self.evidence.extract(
+                record = await self.evidence.extract(
                     result.url,
                     timeout_s=min(remaining, 12),
                     result_id=result.result_id,
@@ -831,7 +835,10 @@ class SearchService:
                     domain_allowlist=request.domain_allowlist,
                     domain_denylist=request.domain_denylist,
                 )
+                trace_event("fetch.extract", status="success")
+                return record
             except (FetchError, TimeoutError):
+                trace_event("fetch.extract", status="failed")
                 return None
 
         selected = targets[: budget.max_pages]
@@ -963,6 +970,7 @@ class SearchService:
             raise ApiError(422, "INVALID_REQUEST", "幂等请求需要启用用量计量")
         routing = routing or self.routing
         mode, budget = self.plan(request, routing=routing)
+        trace_event("router.plan", status=mode.value)
         deadline = deadline if deadline is not None else started + budget.max_latency_ms / 1000
         if started >= deadline:
             raise _time_error()
@@ -1004,6 +1012,7 @@ class SearchService:
             return response.model_copy(
                 update={
                     "request_id": request_id,
+                    "trace_id": trace_id(),
                     "mode_requested": request.mode,
                     "routing_policy_version": routing.version,
                     "elapsed_ms": int((monotonic() - started) * 1000),

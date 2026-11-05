@@ -11,6 +11,7 @@ from multisearch.errors import install_errors
 from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
 from multisearch.identity import MachineIdentity
 from multisearch.job_api import router
+from multisearch.job_application import JobApplication
 from multisearch.job_contracts import FetchRequest, JobKind, JobStatus
 from multisearch.job_store import Claim
 from multisearch.safe_fetch import FetchError
@@ -122,6 +123,7 @@ async def test_fetch_enforces_scope_network_and_worker_gate():
 
     app.dependency_overrides[require_machine] = auth
     app.state.redis = NoWorker()
+    app.state.job_application = JobApplication(None, app.state.redis, None, enable_research=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         body = {"url": "https://example.org"}
         assert (await client.post("/api/v1/fetch", json=body)).status_code == 403

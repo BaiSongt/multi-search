@@ -12,12 +12,22 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from .contracts import Modality, Mode, SearchRequest, SearchResponse
+from .contracts import Modality, Mode, ProviderRun, SearchRequest, SearchResponse
 from .errors import ApiError
 from .evidence_store import save_search_metadata
 from .policy import lock_tenant, tenant_quota
+from .tracing import trace_id
 
 logger = logging.getLogger(__name__)
+ACTIVE_EXECUTION = """
+    status = 'running' AND (
+        (operation = 'search' AND reservation_expires_at > :now)
+        OR (operation IN ('fetch','research') AND EXISTS (
+            SELECT 1 FROM search_jobs j WHERE j.id = usage_events.id
+                AND j.status IN ('running','cancelling') AND j.lease_expires_at > :now
+        ))
+    )
+"""
 
 
 @dataclass(frozen=True)
@@ -61,10 +71,7 @@ def _quota_checks(
         for unit, (_, end) in windows.items()
     }
     if include_concurrency:
-        checks["concurrency"] = (
-            "operation = 'search' AND status = 'running' AND reservation_expires_at > :now",
-            None,
-        )
+        checks["concurrency"] = (ACTIVE_EXECUTION, None)
     for modality in modalities:
         if modality in {"text", "image"}:
             checks[f"{modality}_per_day"] = (
@@ -174,6 +181,60 @@ async def enforce_quota(
             )
 
 
+async def save_provider_runs(
+    connection: AsyncConnection,
+    usage_id: UUID,
+    runs: list[ProviderRun],
+) -> None:
+    if not runs:
+        return
+    await connection.execute(
+        text("""
+        INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count)
+        VALUES (:usage_id, :ordinal, :provider_id, :status, :elapsed_ms, :count)
+    """),
+        [
+            {
+                "usage_id": usage_id,
+                "ordinal": index,
+                **run.model_dump(include={"provider_id", "status", "elapsed_ms", "count"}),
+            }
+            for index, run in enumerate(runs)
+        ],
+    )
+
+
+async def has_concurrency_slot(
+    connection: AsyncConnection,
+    principal: SearchPrincipal,
+    now: datetime,
+    max_concurrent: int,
+) -> bool:
+    quota = await tenant_quota(connection, principal.tenant_id, max_concurrent)
+    key_limit = principal.limits.get("concurrency")
+    result = (
+        (
+            await connection.execute(
+                text(f"""
+        SELECT count(*) AS tenant_count,
+            count(*) FILTER (WHERE key_id = CAST(:key_id AS UUID)) AS key_count
+        FROM usage_events WHERE tenant_id = :tenant AND ({ACTIVE_EXECUTION})
+    """),
+                {
+                    "tenant": principal.tenant_id,
+                    "now": now,
+                    "key_id": principal.principal_id if principal.kind == "key" else None,
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return result["tenant_count"] < quota["concurrency"] and (
+        key_limit is None or result["key_count"] < key_limit
+    )
+
+
 class UsageMeter:
     def __init__(self, db: AsyncEngine, max_concurrent: int):
         self.db = db
@@ -226,6 +287,7 @@ class UsageMeter:
             "key_id": principal.principal_id if principal.kind == "key" else None,
             "hash": fingerprint,
             "request_id": request_id,
+            "trace_id": trace_id(),
             "mode": mode.value,
             "modalities": [value.value for value in body.modalities],
             "source_types": [value.value for value in body.source_types],
@@ -284,12 +346,12 @@ class UsageMeter:
             await connection.execute(
                 text("""
                 INSERT INTO usage_events (
-                    id, tenant_id, principal_kind, principal_id, user_id, key_id, request_id,
+                    id, tenant_id, principal_kind, principal_id, user_id, key_id, request_id, trace_id,
                     idempotency_key, idempotency_until, request_hash, mode, modalities, source_types,
                     created_at, reservation_expires_at
                 )
                 VALUES (
-                    :id, :tenant, :kind, :principal, :user_id, :key_id, :request_id,
+                    :id, :tenant, :kind, :principal, :user_id, :key_id, :request_id, :trace_id,
                     :idempotency_key, :idem_until, :hash, :mode, :modalities, :source_types,
                     :now, :lease
                 )
@@ -361,24 +423,8 @@ class UsageMeter:
                     "replay": json.dumps(replay, ensure_ascii=False) if replay else None,
                 },
             )
-            if response is not None and response.provider_runs:
-                await connection.execute(
-                    text("""
-                    INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count)
-                    VALUES (:usage_id, :ordinal, :provider_id, :status, :elapsed_ms, :count)
-                """),
-                    [
-                        {
-                            "usage_id": admission.event_id,
-                            "ordinal": index,
-                            **run.model_dump(
-                                include={"provider_id", "status", "elapsed_ms", "count"}
-                            ),
-                        }
-                        for index, run in enumerate(response.provider_runs)
-                    ],
-                )
             if response is not None:
+                await save_provider_runs(connection, admission.event_id, response.provider_runs)
                 await save_search_metadata(connection, admission.event_id, response)
 
     async def cancel(self, admission: Admission) -> None:

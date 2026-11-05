@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from .contracts import ImageSearchResult, SearchResponse
+from .contracts import ImageSearchResult, SearchResponse, SearchResult
 from .errors import ApiError
 from .evidence_contracts import EvidenceRecord
 
@@ -38,7 +38,15 @@ async def save_search_metadata(
     response: SearchResponse,
 ) -> None:
     await save_evidence(connection, usage_id, response.evidence_records)
-    observations = [result for result in response.results if isinstance(result, ImageSearchResult)]
+    await save_images(connection, usage_id, response.results)
+
+
+async def save_images(
+    connection: AsyncConnection,
+    usage_id: UUID,
+    results: list[SearchResult],
+) -> None:
+    observations = [result for result in results if isinstance(result, ImageSearchResult)]
     if not observations:
         return
     await connection.execute(
