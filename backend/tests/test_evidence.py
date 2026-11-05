@@ -116,6 +116,9 @@ async def test_extract_observes_each_attempt_with_known_type_and_preserves_error
     (trace,) = [json.loads(entry.message) for entry in caplog.records]
     assert trace["trace_id"] == "test-trace" and trace["status"] == "blocked"
     assert trace["error_code"] == "FETCH_TARGET_BLOCKED" and ORIGIN not in caplog.text
+    fetch.side_effect = FetchError(403, "FETCH_ROBOTS_DENIED", "robots denied")
+    with pytest.raises(FetchError, match="robots denied"):
+        await builder.extract(ORIGIN, timeout_s=1)
     fetch.side_effect = TimeoutError()
     with pytest.raises(TimeoutError):
         await builder.extract(ORIGIN, timeout_s=1)
@@ -133,6 +136,7 @@ async def test_extract_observes_each_attempt_with_known_type_and_preserves_error
         await builder.extract(ORIGIN, timeout_s=1)
     assert recorder.call_args_list == [
         call("text/html", "completed"),
+        call(None, "blocked"),
         call(None, "blocked"),
         call(None, "timeout"),
         call(None, "cancelled"),
