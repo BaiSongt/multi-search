@@ -54,7 +54,7 @@ npm audit --package-lock-only --ignore-scripts --registry=https://registry.npmjs
 python scripts/ops/image_security.py --profile research --output .secrets/ops/image-security-2026-11-06 --fail-on-high
 ```
 
-脚本根据运行容器的镜像 ID 读取本地镜像，要求所选 Compose 配置的服务均在运行。它记录 Trivy 和漏洞数据库版本，并以同一个数据库快照生成每个镜像的原始漏洞 JSON、CycloneDX SBOM 和 `summary.json`。发现高危或严重记录时，`--fail-on-high` 保留报告并以状态码 2 退出。状态码 1 表示扫描未完成。报告按镜像组件与漏洞组合计数，供部署方结合上游公告评估可达性。原始报告包含镜像元数据，应存放在受控目录。 [报告格式](https://www.trivy.dev/docs/latest/guide/configuration/reporting/)
+脚本根据运行容器的镜像 ID 和平台读取本地镜像，要求所选 Compose 配置的服务均在运行。Docker 提供平台清单摘要时，脚本将它写入 `summary.json`。各镜像的原始漏洞 JSON 和 CycloneDX SBOM 使用同一份 Trivy 漏洞数据库快照生成。发现高危或严重记录时，`--fail-on-high` 保留报告并以状态码 2 退出。状态码 1 表示扫描未完成。报告按镜像组件与漏洞组合计数，供部署方结合上游公告评估可达性。原始报告包含镜像元数据，应存放在受控目录。 [Docker 平台清单](https://docs.docker.com/reference/api/engine/version-history/) · [报告格式](https://www.trivy.dev/docs/latest/guide/configuration/reporting/)
 
 2026 年 11 月 6 日对 `0.3.0-alpha.2` 的七个 `linux/amd64` 运行镜像完成扫描。Trivy 0.76.1 使用 2026-11-05 13:09 UTC 更新的漏洞库，并生成 CycloneDX 1.7。复扫中，三个 Python 镜像先前由构建工具 uv 触发的严重记录和 Console 包管理器触发的 10 条高危 npm 记录均已消失。Python 构建阶段使用包含修复的 uv 0.13.4，运行阶段仅复制锁定依赖的虚拟环境。Console 从运行文件系统中移除了 npm、Corepack 和 Yarn。 [uv 安全公告](https://github.com/astral-sh/uv/security/advisories/GHSA-hq85-5cpj-mr62)
 

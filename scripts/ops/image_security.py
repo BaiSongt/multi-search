@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+PLATFORM = re.compile(r"[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9._-]+)?")
 SEVERITIES = ("UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
@@ -29,7 +30,7 @@ def run(command: list[str], cwd: Path, *, capture: bool = False, env=None) -> st
     return result.stdout or ""
 
 
-def running_images(compose: list[str]) -> dict[str, list[str]]:
+def running_images(compose: list[str]) -> dict[tuple[str, str, str], list[str]]:
     expected = set(run([*compose, "config", "--services"], ROOT, capture=True).splitlines())
     containers = run([*compose, "ps", "--status", "running", "-q"], ROOT, capture=True).splitlines()
     if not expected or not containers:
@@ -41,7 +42,8 @@ def running_images(compose: list[str]) -> dict[str, list[str]]:
             "--type",
             "container",
             "--format",
-            '{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}|{{.State.Running}}',
+            '{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}|{{.State.Running}}'
+            '|{{json (index . "ImageManifestDescriptor")}}',
             *containers,
         ],
         ROOT,
@@ -50,23 +52,43 @@ def running_images(compose: list[str]) -> dict[str, list[str]]:
     images = defaultdict(set)
     services = set()
     for line in details.splitlines():
-        service, identifier, running = line.split("|")
+        service, identifier, running, descriptor_json = line.split("|", 3)
         if service not in expected:
             continue
         if running != "true" or not IMAGE_ID.fullmatch(identifier):
             raise ValueError(f"无法确认运行镜像：{service}")
-        images[identifier].add(service)
+        descriptor = json.loads(descriptor_json)
+        manifest = ""
+        if descriptor:
+            manifest = descriptor["digest"]
+            selected = descriptor["platform"]
+            platform = "/".join(
+                filter(None, (selected["os"], selected["architecture"], selected.get("variant")))
+            )
+            if not IMAGE_ID.fullmatch(manifest):
+                raise ValueError(f"无法确认运行镜像清单：{service}")
+        else:
+            platform = run(
+                ["docker", "image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", identifier],
+                ROOT,
+                capture=True,
+            ).strip()
+        if not PLATFORM.fullmatch(platform):
+            raise ValueError(f"无法确认运行镜像平台：{service}")
+        images[(identifier, platform, manifest)].add(service)
         services.add(service)
     if missing := expected - services:
         raise ValueError(f"所选配置的服务尚未启动：{', '.join(sorted(missing))}")
-    return {identifier: sorted(names) for identifier, names in sorted(images.items())}
+    return {target: sorted(names) for target, names in sorted(images.items())}
 
 
-def image_summary(report: dict, identifier: str) -> dict:
+def image_summary(report: dict, identifier: str, platform: str) -> dict:
     metadata = report["Metadata"]
     if report.get("ArtifactType") != "container_image" or metadata.get("ImageID") != identifier:
         raise ValueError(f"扫描报告未对应预期的本地镜像：{identifier}")
     config = metadata.get("ImageConfig", {})
+    if f"{config.get('os')}/{config.get('architecture')}" != "/".join(platform.split("/")[:2]):
+        raise ValueError(f"扫描报告的平台与运行镜像不一致：{identifier}")
     packages: Counter[str] = Counter()
     findings = dict.fromkeys(SEVERITIES, 0)
     fixed = dict.fromkeys(SEVERITIES, 0)
@@ -79,7 +101,6 @@ def image_summary(report: dict, identifier: str) -> dict:
             findings[severity] += 1
             fixed[severity] += bool(vulnerability.get("FixedVersion"))
     return {
-        "platform": f"{config.get('os', '?')}/{config.get('architecture', '?')}",
         "os": metadata.get("OS"),
         "packages_by_type": dict(packages),
         "findings_by_severity": findings,
@@ -126,9 +147,9 @@ def audit(args: argparse.Namespace) -> int:
         raise ValueError("Trivy 未报告漏洞数据库更新时间")
 
     reports = []
-    for identifier, services in images.items():
-        print(f"扫描 {', '.join(services)} · {identifier}", flush=True)
-        key = identifier.removeprefix("sha256:")
+    for index, ((identifier, platform, manifest), services) in enumerate(images.items(), start=1):
+        print(f"扫描 {', '.join(services)} · {platform} · {identifier}", flush=True)
+        key = f"{index:02d}-{identifier.removeprefix('sha256:')}"
         report = f"{key}.trivy.json"
         sbom = f"{key}.cdx.json"
         run(
@@ -137,6 +158,8 @@ def audit(args: argparse.Namespace) -> int:
                 "image",
                 "--image-src",
                 "docker",
+                "--platform",
+                platform,
                 "--scanners",
                 "vuln",
                 "--offline-scan",
@@ -155,7 +178,7 @@ def audit(args: argparse.Namespace) -> int:
             env=env,
         )
         details = image_summary(
-            json.loads((output / report).read_text(encoding="utf-8")), identifier
+            json.loads((output / report).read_text(encoding="utf-8")), identifier, platform
         )
         run(
             [*trivy, "convert", "--format", "cyclonedx", "--output", sbom, report],
@@ -168,6 +191,8 @@ def audit(args: argparse.Namespace) -> int:
         reports.append(
             {
                 "image_id": identifier,
+                "image_manifest_digest": manifest or None,
+                "platform": platform,
                 "services": services,
                 "vulnerability_report": report,
                 "sbom": sbom,
