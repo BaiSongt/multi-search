@@ -4,6 +4,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from .contracts import Mode, Scope, SearchRequest, Source
+from .dynamic_renderer import HEARTBEAT_KEY
 from .errors import ApiError
 from .identity import MachineIdentity
 from .job_contracts import FetchRequest, JobAccepted, JobKind, JobView
@@ -16,8 +17,12 @@ from .sessions import SessionIdentity
 
 
 async def worker_ready(redis: Redis, kind: JobKind) -> bool:
+    return await _heartbeat_ready(redis, f"multisearch:worker:{kind.value}")
+
+
+async def _heartbeat_ready(redis: Redis, key: str) -> bool:
     try:
-        return bool(await redis.exists(f"multisearch:worker:{kind.value}"))
+        return bool(await redis.exists(key))
     except (RedisError, OSError, TimeoutError):
         return False
 
@@ -49,6 +54,11 @@ class JobApplication:
             self.redis, kind
         )
 
+    async def available_dynamic_fetch(self) -> bool:
+        return bool(self.search.settings.dynamic_fetch_domains) and await _heartbeat_ready(
+            self.redis, HEARTBEAT_KEY
+        )
+
     async def _submit(
         self,
         kind: JobKind,
@@ -61,10 +71,14 @@ class JobApplication:
         session: bool = False,
         fingerprint_body: SearchRequest | None = None,
     ) -> JobAccepted:
-        ready = await self.available(kind)
+        dynamic = isinstance(body, FetchRequest) and body.extraction_mode == "dynamic"
+        ready = await self.available_dynamic_fetch() if dynamic else await self.available(kind)
         if not ready and body.idempotency_key is None:
             raise ApiError(503, "WORKER_UNAVAILABLE", "后台 Worker 暂不可用", retryable=True)
         excludes = {"request_id", "idempotency_key"}
+        if isinstance(body, FetchRequest) and not dynamic:
+            # 省略默认模式，保持已有静态任务的幂等指纹。
+            excludes.add("extraction_mode")
         job = await self.store.create(
             principal,
             kind,
@@ -96,8 +110,15 @@ class JobApplication:
             raise ApiError(403, "FORBIDDEN", "API Key 缺少 fetch 作用域")
         if body.network_scope != Scope.PUBLIC:
             raise ApiError(422, "SOURCE_UNAVAILABLE", "抓取仅支持公开网络")
+        authorized_hosts = None
+        if body.extraction_mode == "dynamic":
+            authorized_hosts = self.search.settings.dynamic_fetch_domains
+            if not authorized_hosts:
+                raise ApiError(422, "MODE_UNAVAILABLE", "当前部署未启用动态抓取")
         for url in body.targets():
-            validate_fetch_url(url, body.domain_allowlist, body.domain_denylist)
+            validate_fetch_url(
+                url, body.domain_allowlist, body.domain_denylist, authorized_hosts=authorized_hosts
+            )
         return await self._submit(
             JobKind.FETCH,
             _machine(identity),

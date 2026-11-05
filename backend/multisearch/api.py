@@ -15,6 +15,9 @@ async def capabilities(request: Request):
     document = request.app.state.search.capabilities()
     jobs = request.app.state.job_application
     document["fetch"] = "available" if await jobs.available(JobKind.FETCH) else "unavailable"
+    document["fetch_dynamic"] = (
+        "available" if await jobs.available_dynamic_fetch() else "unavailable"
+    )
     document["research"] = "available" if await jobs.available(JobKind.RESEARCH) else "unavailable"
     document["modes"]["deep"] = document["research"]
     if document["research"] == "available":

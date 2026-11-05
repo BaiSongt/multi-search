@@ -116,6 +116,7 @@ async def test_dns_rebinding_between_robots_and_page_is_blocked(network):
         ("http://one.example/unsafe", {}),
         ("https://two.example/blocked", {"domain_allowlist": ["one.example"]}),
         ("https://two.example/blocked", {"domain_denylist": ["two.example"]}),
+        ("https://sub.one.example/blocked", {"authorized_hosts": frozenset({"one.example"})}),
     ],
 )
 async def test_rejects_disallowed_redirect_before_dns(network, location, policy):
@@ -125,6 +126,27 @@ async def test_rejects_disallowed_redirect_before_dns(network, location, policy)
         await SafeFetcher().fetch("https://one.example", timeout_s=1, **policy)
     assert error.value.code == "FETCH_TARGET_BLOCKED"
     assert len(dns) == len(requests) == 2
+
+
+async def test_dynamic_fetch_requires_exact_https_and_retains_enforced_csp(network):
+    dns, requests, _, responses = network
+    options = {"timeout_s": 1, "authorized_hosts": frozenset({"one.example"})}
+    for blocked in ("http://one.example/", "https://sub.one.example/"):
+        with pytest.raises(FetchError, match="公网访问策略"):
+            await SafeFetcher().fetch(blocked, **options)
+    assert not dns and not requests
+    responses[("one.example", "/")] = httpx.Response(
+        200,
+        headers=[
+            ("Content-Type", "text/html"),
+            ("Content-Security-Policy", "script-src 'none'"),
+            ("Content-Security-Policy", "base-uri 'none'"),
+            ("Content-Security-Policy-Report-Only", "default-src 'none'"),
+        ],
+        text="<p>Text</p>",
+    )
+    result = await SafeFetcher().fetch("https://one.example/", **options)
+    assert result.content_security_policy == ("script-src 'none'", "base-uri 'none'")
 
 
 async def test_redirect_cycle_stops_and_robots_is_cached(network):

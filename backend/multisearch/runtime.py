@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .crawl_parser import CrawlParser
+from .dynamic_renderer import DynamicRenderer
 from .evidence import EvidenceBuilder
 from .image_attribution import ImageAttributionResolver
 from .image_source import PublicImageSourceResolver
@@ -19,14 +20,24 @@ from .vertical_providers import create_vertical_providers
 
 
 def build_evidence(
-    config: Settings, client: httpx.AsyncClient, fetch_metrics: FetchMetrics
+    config: Settings,
+    client: httpx.AsyncClient,
+    fetch_metrics: FetchMetrics,
+    *,
+    renderer: DynamicRenderer | None = None,
 ) -> EvidenceBuilder:
     parser = (
         CrawlParser(client, config.crawl4ai_url, config.crawl4ai_token)
         if config.crawl4ai_url
         else None
     )
-    return EvidenceBuilder(SafeFetcher(), parser, record_attempt=fetch_metrics.record)
+    return EvidenceBuilder(
+        SafeFetcher(),
+        parser,
+        renderer=renderer,
+        dynamic_hosts=config.dynamic_fetch_domains,
+        record_attempt=fetch_metrics.record,
+    )
 
 
 async def load_search_policies(search: SearchService, db: AsyncEngine, ops: OpsStore) -> None:

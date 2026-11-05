@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from .dynamic_renderer import HEARTBEAT_KEY, DynamicRenderer
 from .evidence import EvidenceBuilder
 from .identity import IdentityStore
 from .job_contracts import FetchRequest, JobError, JobKind, JobProgress, JobStatus
@@ -39,6 +40,7 @@ class Worker:
         self.store = store
         self.evidence = evidence
         self.handlers = {JobKind.FETCH: self.fetch}
+        self.dynamic_ready = False
 
     async def fetch(self, claim: Claim) -> JobOutcome:
         body = FetchRequest.model_validate(claim.payload)
@@ -83,6 +85,7 @@ class Worker:
                         network_scope=body.network_scope,
                         domain_allowlist=body.domain_allowlist,
                         domain_denylist=body.domain_denylist,
+                        extraction_mode=body.extraction_mode,
                     )
             except TimeoutError:
                 errors.append(
@@ -150,7 +153,9 @@ class Worker:
     async def run(self) -> None:
         while True:
             try:
-                claim = await self.store.claim(tuple(self.handlers))
+                claim = await self.store.claim(
+                    tuple(self.handlers), allow_dynamic=self.dynamic_ready
+                )
                 if claim is not None:
                     await self.execute(claim)
                     continue
@@ -161,12 +166,16 @@ class Worker:
 
 async def heartbeat(redis: Redis, worker: Worker) -> None:
     while True:
+        renderer = worker.evidence.renderer
+        worker.dynamic_ready = renderer is not None and await renderer.ready()
         try:
             async with worker.store.db.connect() as connection:
                 await connection.execute(text("SELECT 1"))
             async with redis.pipeline() as pipeline:
                 for kind in worker.handlers:
                     pipeline.set(f"multisearch:worker:{kind.value}", "ready", ex=10)
+                if worker.dynamic_ready:
+                    pipeline.set(HEARTBEAT_KEY, "ready", ex=10)
                 await pipeline.execute()
             await asyncio.to_thread(HEALTH_FILE.write_text, str(time()), encoding="ascii")
         except (RedisError, SQLAlchemyError, OSError, TimeoutError):
@@ -190,8 +199,11 @@ async def main() -> None:
         async with (
             httpx.AsyncClient(trust_env=False, follow_redirects=False) as client,
             FetchMetrics.connect(settings.redis_url) as fetch_metrics,
+            DynamicRenderer.connect(
+                settings.renderer_token if settings.enable_dynamic_fetch else None
+            ) as renderer,
         ):
-            evidence = build_evidence(settings, client, fetch_metrics)
+            evidence = build_evidence(settings, client, fetch_metrics, renderer=renderer)
             store = JobStore(db, settings.max_concurrent)
             worker = Worker(store, evidence)
             if settings.enable_research:

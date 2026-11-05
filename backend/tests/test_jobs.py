@@ -2,6 +2,8 @@ import asyncio
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -9,6 +11,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from multisearch.auth import require_machine
+from multisearch.dynamic_renderer import HEARTBEAT_KEY
 from multisearch.errors import install_errors
 from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
 from multisearch.identity import MachineIdentity
@@ -170,3 +173,48 @@ async def test_fetch_enforces_scope_network_and_worker_gate():
         assert private.status_code == 422
         pending = await client.post("/api/v1/fetch", json=body)
         assert pending.status_code == 503 and pending.json()["code"] == "WORKER_UNAVAILABLE"
+
+
+async def test_dynamic_fetch_requires_approved_hosts_and_its_own_worker_readiness():
+    app = FastAPI()
+    install_errors(app)
+    app.include_router(router)
+    identity = MachineIdentity(uuid4(), uuid4(), uuid4(), frozenset({"fetch"}))
+
+    async def auth():
+        return identity
+
+    app.dependency_overrides[require_machine] = auth
+    ready = {"multisearch:worker:fetch"}
+    redis = SimpleNamespace(exists=AsyncMock(side_effect=lambda key: key in ready))
+    store = SimpleNamespace(
+        create=AsyncMock(
+            return_value=SimpleNamespace(job_id=uuid4(), status=JobStatus.QUEUED, trace_id=None)
+        )
+    )
+    settings = SimpleNamespace(dynamic_fetch_domains=frozenset())
+    search = SimpleNamespace(settings=settings)
+    app.state.job_application = JobApplication(store, redis, search, enable_research=False)
+    static = {"url": "https://example.org"}
+    dynamic = {**static, "extraction_mode": "dynamic"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post("/api/v1/fetch", json=dynamic)
+        assert denied.status_code == 422 and denied.json()["code"] == "MODE_UNAVAILABLE"
+        settings.dynamic_fetch_domains = frozenset({"example.org"})
+        unauthorized = await client.post(
+            "/api/v1/fetch", json={**dynamic, "url": "https://sub.example.org/"}
+        )
+        assert (
+            unauthorized.status_code == 403
+            and unauthorized.json()["code"] == "FETCH_TARGET_BLOCKED"
+        )
+        no_renderer = await client.post("/api/v1/fetch", json=dynamic)
+        assert no_renderer.status_code == 503 and no_renderer.json()["code"] == "WORKER_UNAVAILABLE"
+        store.create.assert_not_called()
+
+        ready.add(HEARTBEAT_KEY)
+        assert (await client.post("/api/v1/fetch", json=dynamic)).status_code == 202
+        assert store.create.call_args.args[2]["extraction_mode"] == "dynamic"
+        for payload in (static, {**static, "extraction_mode": "static"}):
+            assert (await client.post("/api/v1/fetch", json=payload)).status_code == 202
+            assert "extraction_mode" not in store.create.call_args.args[2]

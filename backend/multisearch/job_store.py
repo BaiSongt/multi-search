@@ -244,12 +244,15 @@ class JobStore:
         """)
         )
 
-    async def claim(self, kinds: tuple[JobKind, ...]) -> Claim | None:
+    async def claim(
+        self, kinds: tuple[JobKind, ...], *, allow_dynamic: bool = False
+    ) -> Claim | None:
         async with self.db.begin() as connection:
             await self._recover(connection)
             cutoff = await connection.scalar(text("SELECT clock_timestamp()"))
         params = {
             "kinds": [kind.value for kind in kinds],
+            "allow_dynamic": allow_dynamic,
             "cutoff": cutoff,
             "after": None,
             "id": None,
@@ -262,6 +265,8 @@ class JobStore:
                     SELECT id, tenant_id, created_at FROM search_jobs
                     WHERE status = 'queued' AND deadline_at > now() AND kind = ANY(:kinds)
                         AND created_at <= :cutoff
+                        AND (:allow_dynamic OR kind <> 'fetch'
+                            OR payload->>'extraction_mode' IS DISTINCT FROM 'dynamic')
                         AND (CAST(:after AS TIMESTAMPTZ) IS NULL OR (created_at, id) > (:after, :id))
                     ORDER BY created_at, id LIMIT 64
                 """),

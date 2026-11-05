@@ -29,6 +29,7 @@ _SPECIAL_IPV4 = tuple(
     ip_network(value) for value in ("168.63.129.16/32", "192.0.0.0/24", "192.88.99.0/24")
 )
 _PAGE_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain", "application/pdf"})
+_RENDER_TYPES = frozenset({"text/html"})
 _ROBOTS_TYPES = frozenset({"text/plain"})
 _REDIRECTS = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
@@ -55,6 +56,7 @@ class FetchedPage:
     retrieved_at: datetime
     charset: str | None = None
     max_snippet: int | None = None
+    content_security_policy: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class _Response:
     charset: str | None = None
     body: bytes = b""
     max_snippet: int | None = None
+    content_security_policy: tuple[str, ...] = ()
 
 
 @dataclass
@@ -193,13 +196,24 @@ def _check_domains(target: _Target, allowlist: Sequence[str], denylist: Sequence
         raise _blocked()
 
 
+def _check_dynamic_hosts(target: _Target, authorized_hosts: frozenset[str] | None) -> None:
+    if authorized_hosts is not None and (
+        target.scheme != "https" or target.host not in authorized_hosts
+    ):
+        raise _blocked()
+
+
 def validate_fetch_url(
     url: str,
     domain_allowlist: Sequence[str] = (),
     domain_denylist: Sequence[str] = (),
+    *,
+    authorized_hosts: frozenset[str] | None = None,
 ) -> None:
     """在任务入队前拒绝明显不合规的地址；实际连接仍逐跳检查 DNS。"""
-    _check_domains(_target(url), domain_allowlist, domain_denylist)
+    target = _target(url)
+    _check_dynamic_hosts(target, authorized_hosts)
+    _check_domains(target, domain_allowlist, domain_denylist)
 
 
 async def _resolve(host: str, port: int) -> list[str]:
@@ -258,6 +272,7 @@ class SafeFetcher:
         network_scope: Scope | str = Scope.PUBLIC,
         domain_allowlist: Sequence[str] = (),
         domain_denylist: Sequence[str] = (),
+        authorized_hosts: frozenset[str] | None = None,
     ) -> FetchedPage:
         if network_scope != Scope.PUBLIC:
             raise _blocked()
@@ -265,6 +280,7 @@ class SafeFetcher:
             raise _budget_exhausted()
         timeout_s = min(timeout_s, _MAX_TIMEOUT_S)
         target = _target(url)
+        content_types = _RENDER_TYPES if authorized_hosts is not None else _PAGE_TYPES
         origin_url = target.url
         deadline = monotonic() + timeout_s
         seen: set[str] = set()
@@ -274,6 +290,7 @@ class SafeFetcher:
                     if target.url in seen:
                         break
                     seen.add(target.url)
+                    _check_dynamic_hosts(target, authorized_hosts)
                     _check_domains(target, domain_allowlist, domain_denylist)
                     lock = self._host_locks[hash(target.host) % len(self._host_locks)]
                     async with lock:
@@ -288,7 +305,7 @@ class SafeFetcher:
                         if wait > 0:
                             await asyncio.sleep(wait)
                         rules.ready_at = monotonic() + rules.delay
-                        response = await self._request(target, _PAGE_TYPES, self._max_body_bytes)
+                        response = await self._request(target, content_types, self._max_body_bytes)
                     if response.status not in _REDIRECTS:
                         return self._page(origin_url, target, response)
                     target = _redirect(target, response.location)
@@ -414,6 +431,7 @@ class SafeFetcher:
                 charset=mime.get_content_charset(),
                 body=bytes(body),
                 max_snippet=maximum,
+                content_security_policy=tuple(response.headers.get_list("content-security-policy")),
             )
 
     @staticmethod
@@ -434,4 +452,5 @@ class SafeFetcher:
             datetime.now(UTC),
             response.charset,
             response.max_snippet,
+            response.content_security_policy,
         )

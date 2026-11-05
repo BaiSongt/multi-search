@@ -1,0 +1,120 @@
+"""把已经获准获取的 HTML 交给断网渲染服务。"""
+
+import asyncio
+import json
+import re
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+
+import httpx
+
+from .safe_fetch import FetchError
+
+_SOCKET = "/run/multisearch-renderer/render.sock"
+_BASE = "http://renderer"
+_MAX_HTML_BYTES = 1024 * 1024
+_MAX_RESPONSE_BYTES = 6 * _MAX_HTML_BYTES
+_MAX_RENDER_SECONDS = 8.0
+_READY_SECONDS = 0.5
+_VERSION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,63}")
+HEARTBEAT_KEY = "multisearch:worker:fetch_dynamic"
+
+
+@dataclass(frozen=True)
+class RenderedHTML:
+    html: str
+    version: str
+
+
+class DynamicRenderer:
+    def __init__(self, client: httpx.AsyncClient, token: str):
+        if re.fullmatch(r"[\x21-\x7e]{32,256}", token) is None:
+            raise ValueError("渲染令牌需要 32–256 个可见 ASCII 字符")
+        self._client = client
+        self._headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
+
+    @classmethod
+    @asynccontextmanager
+    async def connect(cls, token: str | None):
+        if token is None:
+            yield None
+            return
+        transport = httpx.AsyncHTTPTransport(
+            uds=_SOCKET,
+            trust_env=False,
+            retries=0,
+            limits=httpx.Limits(max_connections=3, max_keepalive_connections=0),
+        )
+        async with httpx.AsyncClient(
+            transport=transport, trust_env=False, follow_redirects=False
+        ) as client:
+            yield cls(client, token)
+
+    async def ready(self) -> bool:
+        try:
+            async with (
+                asyncio.timeout(_READY_SECONDS),
+                self._client.stream(
+                    "GET", _BASE + "/health/ready", headers=self._headers, follow_redirects=False
+                ) as response,
+            ):
+                return response.status_code == 200
+        except (TimeoutError, httpx.HTTPError):
+            return False
+
+    async def render(
+        self, html: str, *, timeout_s: float, source_csp: str | None = None
+    ) -> RenderedHTML | None:
+        if not timeout_s > 0:
+            raise FetchError(504, "TIME_BUDGET_EXCEEDED", "动态正文提取时限已耗尽", retryable=True)
+        headers = {**self._headers, "Content-Type": "text/html; charset=utf-8"}
+        if source_csp is not None:
+            if re.fullmatch(r"[\x20-\x7e]{1,4096}", source_csp) is None:
+                return None
+            headers["X-MultiSearch-Source-CSP"] = source_csp
+        try:
+            data = html.encode("utf-8")
+            if not data or len(data) > _MAX_HTML_BYTES:
+                return None
+            async with (
+                asyncio.timeout(min(timeout_s, _MAX_RENDER_SECONDS)),
+                self._client.stream(
+                    "POST",
+                    _BASE + "/render",
+                    content=data,
+                    headers=headers,
+                    follow_redirects=False,
+                ) as response,
+            ):
+                if response.status_code == 504:
+                    raise TimeoutError
+                if (
+                    response.status_code != 200
+                    or response.headers.get("content-encoding", "identity").lower() != "identity"
+                    or response.headers.get("content-type", "").partition(";")[0].strip().lower()
+                    != "application/json"
+                ):
+                    return None
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
+                        return None
+                    body.extend(chunk)
+            payload = json.loads(body.decode("utf-8"))
+            if not isinstance(payload, dict) or payload.keys() != {"html", "version"}:
+                return None
+            rendered, version = payload["html"], payload["version"]
+            if (
+                not isinstance(rendered, str)
+                or not 0 < len(rendered.encode("utf-8")) <= _MAX_HTML_BYTES
+                or not isinstance(version, str)
+                or _VERSION.fullmatch(version) is None
+            ):
+                return None
+            return RenderedHTML(rendered, version)
+        except (TimeoutError, httpx.TimeoutException):
+            raise FetchError(
+                504, "TIME_BUDGET_EXCEEDED", "动态正文提取时限已耗尽", retryable=True
+            ) from None
+        except (httpx.HTTPError, ValueError, RecursionError):
+            return None

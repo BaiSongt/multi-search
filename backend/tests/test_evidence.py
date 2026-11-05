@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from unittest.mock import AsyncMock, Mock, call
@@ -9,6 +10,7 @@ import httpx
 import pytest
 
 from multisearch.crawl_parser import CrawlParser
+from multisearch.dynamic_renderer import RenderedHTML
 from multisearch.evidence import EvidenceBuilder
 from multisearch.pdf_parser import OCRPending
 from multisearch.safe_fetch import FetchedPage, FetchError
@@ -101,6 +103,82 @@ async def test_empty_or_script_only_page_never_produces_evidence():
     with pytest.raises(FetchError) as error:
         await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1)
     assert error.value.code == "FETCH_NO_EXCERPT"
+
+
+async def test_dynamic_evidence_uses_rendered_offsets_and_preserves_original_policy_and_metadata():
+    fetcher = FakeFetcher(
+        '<html><head><meta name="robots" content="max-snippet: 8"><title>Original title</title>'
+        "</head><body><main><p>Original text</p></main></body></html>",
+        max_snippet=10,
+    )
+    fetcher.page = replace(
+        fetcher.page, content_security_policy=("  base-uri 'none'  ", "object-src 'none'")
+    )
+    renderer = Mock(
+        render=AsyncMock(
+            return_value=RenderedHTML(
+                '<html><head><title>Forged title</title><meta name="robots" content="max-snippet: 20">'
+                "</head><body><main><h1>Generated</h1><p>Visible new text</p></main></body></html>",
+                "renderer.1",
+            )
+        )
+    )
+    hosts = frozenset({"origin.example"})
+    builder = EvidenceBuilder(fetcher, renderer=renderer, dynamic_hosts=hosts)
+    result = await builder.extract(ORIGIN, timeout_s=2, extraction_mode="dynamic")
+    assert result.locator.kind == "rendered_html_text" and result.locator.section == "Generated"
+    assert (
+        result.extraction_method == "browser_dom"
+        and result.extraction_version == "renderer.1+normalizer.1"
+    )
+    assert result.evidence_text == "Visible" and result.title == "Original title"
+    normalized = "Generated\nVisible new text"
+    assert (
+        normalized[result.locator.text_offset_start : result.locator.text_offset_end] == "Visible"
+    )
+    assert result.content_sha256 == sha256(normalized.encode()).hexdigest()
+    assert renderer.render.call_args.kwargs["source_csp"] == "base-uri 'none', object-src 'none'"
+    assert fetcher.options["authorized_hosts"] == hosts
+
+    renderer.render.return_value = RenderedHTML(fetcher.page.body.decode(), "renderer.1")
+    rendered_same = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    static = await builder.extract(ORIGIN, timeout_s=1)
+    assert rendered_same.content_sha256 == static.content_sha256
+    assert rendered_same.evidence_id != static.evidence_id
+
+
+async def test_dynamic_extraction_honors_original_and_rendered_robots_and_requires_renderer():
+    renderer = Mock(
+        render=AsyncMock(
+            return_value=RenderedHTML(
+                '<meta name="robots" content="nosnippet"><p>Private</p>', "renderer.1"
+            )
+        )
+    )
+    fetcher = FakeFetcher('<meta name="robots" content="nosnippet"><p>Private</p>')
+    builder = EvidenceBuilder(
+        fetcher, renderer=renderer, dynamic_hosts=frozenset({"origin.example"})
+    )
+    with pytest.raises(FetchError) as original:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert original.value.code == "FETCH_SITE_RESTRICTED"
+    renderer.render.assert_not_awaited()
+    builder.fetcher = FakeFetcher("<p>Public shell</p>")
+    with pytest.raises(FetchError) as rendered:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert rendered.value.code == "FETCH_SITE_RESTRICTED"
+
+    renderer.render.return_value = None
+    with pytest.raises(FetchError) as unavailable:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert unavailable.value.code == "FETCH_RENDER_UNAVAILABLE"
+
+    renderer.render.reset_mock()
+    builder.fetcher = FakeFetcher("<p>Café</p>", charset="windows-1252")
+    with pytest.raises(FetchError) as encoding:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert encoding.value.code == "FETCH_CONTENT_UNSUPPORTED"
+    renderer.render.assert_not_awaited()
 
 
 async def test_extract_observes_each_attempt_with_known_type_and_preserves_errors(caplog):

@@ -4,6 +4,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 STATIC_EXTRACTION_VERSION = "1"
+type ExtractionMode = Literal["static", "dynamic"]
 type FetchStatus = Literal["blocked", "cancelled", "completed", "failed", "ocr_pending", "timeout"]
 
 
@@ -13,7 +14,7 @@ class DocumentIdentifier(BaseModel):
 
 
 class EvidenceLocator(BaseModel):
-    kind: Literal["html_text", "plain_text", "pdf_text"]
+    kind: Literal["html_text", "rendered_html_text", "plain_text", "pdf_text"]
     section: str | None = None
     text_offset_start: int = Field(ge=0)
     text_offset_end: int = Field(gt=0)
@@ -39,7 +40,9 @@ class EvidenceRecord(BaseModel):
     evidence_text: str
     locator: EvidenceLocator
     content_sha256: str
-    extraction_method: Literal["static_html", "crawl4ai_static", "plain_text", "pypdf"]
+    extraction_method: Literal[
+        "static_html", "crawl4ai_static", "plain_text", "pypdf", "browser_dom"
+    ]
     extraction_version: str = STATIC_EXTRACTION_VERSION
     verification_status: Literal["content_extracted"] = "content_extracted"
     access_policy: Literal["metadata_and_excerpt"] = "metadata_and_excerpt"

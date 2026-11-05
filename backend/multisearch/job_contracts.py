@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from .contracts import CorrelationID, Domain, InputModel, Scope
+from .evidence_contracts import ExtractionMode
 
 
 class JobKind(StrEnum):
@@ -31,6 +32,7 @@ class FetchRequest(InputModel):
     urls: list[UrlInput] = Field(default_factory=list, max_length=20)
     max_latency_ms: int = Field(default=120_000, ge=1_000, le=900_000)
     max_pages: int = Field(default=20, ge=1, le=20)
+    extraction_mode: ExtractionMode = "static"
     network_scope: Scope = Scope.PUBLIC
     domain_allowlist: list[Domain] = Field(default_factory=list, max_length=30)
     domain_denylist: list[Domain] = Field(default_factory=list, max_length=30)

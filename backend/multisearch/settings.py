@@ -1,15 +1,40 @@
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
 from .deployment_policy import DeploymentPolicy, load_deployment_policy
+from .safe_fetch import FetchError, validate_fetch_url
+
+_DYNAMIC_DOMAIN = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
 
 
 def secret(name: str) -> str:
     if file := os.getenv(f"{name}_FILE"):
         return Path(file).read_text(encoding="utf-8").strip()
     return os.getenv(name, "")
+
+
+def _dynamic_fetch_domains() -> frozenset[str]:
+    value = os.getenv("MULTISEARCH_DYNAMIC_FETCH_DOMAINS", "").strip()
+    if not value:
+        return frozenset()
+    hosts = [host.strip() for host in value.split(",")]
+    if any(
+        not host.isascii() or len(host) > 253 or _DYNAMIC_DOMAIN.fullmatch(host.lower()) is None
+        for host in hosts
+    ):
+        raise ValueError("MULTISEARCH_DYNAMIC_FETCH_DOMAINS 需要逗号分隔的精确公网域名")
+    domains = frozenset(host.lower() for host in hosts)
+    try:
+        for host in domains:
+            validate_fetch_url(f"https://{host}/")
+    except FetchError:
+        raise ValueError("MULTISEARCH_DYNAMIC_FETCH_DOMAINS 需要逗号分隔的精确公网域名") from None
+    return domains
 
 
 @dataclass(frozen=True)
@@ -38,6 +63,9 @@ class Settings:
     research_input_per_million_tokens: str = ""
     research_output_per_million_tokens: str = ""
     deployment_policy: DeploymentPolicy = field(default_factory=DeploymentPolicy)
+    dynamic_fetch_domains: frozenset[str] = frozenset()
+    enable_dynamic_fetch: bool = False
+    renderer_token: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +97,11 @@ class Settings:
         crawl4ai_token = secret("CRAWL4AI_API_TOKEN")
         if crawl4ai_url and (crawl4ai_url != "http://crawl4ai:11235" or len(crawl4ai_token) < 32):
             raise ValueError("Crawl4AI 需要固定内部地址及专用令牌")
+        dynamic_domains = _dynamic_fetch_domains()
+        dynamic_enabled = (
+            bool(dynamic_domains)
+            and os.getenv("MULTISEARCH_ENABLE_DYNAMIC_FETCH", "false").lower() == "true"
+        )
         return cls(
             database_url=database_url,
             redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
@@ -99,4 +132,7 @@ class Settings:
                 "MULTISEARCH_RESEARCH_OUTPUT_PER_MILLION_TOKENS", ""
             ),
             deployment_policy=load_deployment_policy(os.getenv("MULTISEARCH_POLICY_FILE", "")),
+            dynamic_fetch_domains=dynamic_domains,
+            enable_dynamic_fetch=dynamic_enabled,
+            renderer_token=secret("MULTISEARCH_RENDERER_TOKEN") if dynamic_enabled else "",
         )

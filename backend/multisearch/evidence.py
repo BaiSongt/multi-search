@@ -1,25 +1,30 @@
+from __future__ import annotations
+
 import asyncio
 import codecs
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from time import monotonic
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from unicodedata import category, normalize
 
 from lxml import etree, html
 
 from .contracts import Scope
 from .crawl_parser import CRAWL4AI_VERSION, CrawlParser
-from .evidence_contracts import STATIC_EXTRACTION_VERSION, FetchStatus
+from .evidence_contracts import STATIC_EXTRACTION_VERSION, ExtractionMode, FetchStatus
 from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
 from .pdf_parser import PDF_EXTRACTION_VERSION, OCRPending, PdfParser
 from .safe_fetch import FetchedPage, FetchError, SafeFetcher, snippet_limit
 from .tracing import trace_event
+
+if TYPE_CHECKING:
+    from .dynamic_renderer import DynamicRenderer
 
 _MAX_EXCERPT = 512
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
@@ -75,6 +80,7 @@ _BLOCKED_FETCH_CODES = {
     "FETCH_TARGET_BLOCKED",
     "FETCH_ROBOTS_DENIED",
     "FETCH_ROBOTS_UNAVAILABLE",
+    "FETCH_RENDER_POLICY_UNSUPPORTED",
     "FETCH_SITE_RESTRICTED",
 }
 
@@ -159,8 +165,7 @@ def parse_static_html(page: FetchedPage) -> html.HtmlElement:
         raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文") from None
 
 
-def _html_page(page: FetchedPage) -> tuple[list[_Block], dict[str, str], int | None]:
-    document = parse_static_html(page)
+def _html_metadata(document: html.HtmlElement) -> tuple[dict[str, str], int | None]:
     directives: list[str] = []
     metadata: dict[str, str] = {}
     for meta in document.iter("meta"):
@@ -175,15 +180,19 @@ def _html_page(page: FetchedPage) -> tuple[list[_Block], dict[str, str], int | N
     title = document.find(".//title")
     if title is not None:
         metadata.setdefault("title", _clean(title.text_content())[:512])
+    return metadata, snippet_limit(directives)
+
+
+def _html_body(document: html.HtmlElement) -> list[_Block]:
     # 选择主区域，忽略导航和脚本；空主区域回退到正文。
     body = document.find("body")
     if body is None:
-        return [], metadata, snippet_limit(directives)
+        return []
     main = next((element for element in body.iter() if element.tag in {"main", "article"}), None)
     blocks = _html_blocks(main) if main is not None else []
     if not any(not block.heading for block in blocks):
         blocks = _html_blocks(body)
-    return blocks, metadata, snippet_limit(directives)
+    return blocks
 
 
 def _publication(value: str) -> datetime | None:
@@ -196,7 +205,7 @@ def _publication(value: str) -> datetime | None:
 
 def _content(
     blocks: list[_Block],
-    kind: Literal["html_text", "plain_text", "pdf_text"],
+    kind: Literal["html_text", "rendered_html_text", "plain_text", "pdf_text"],
     query: str | None,
     excerpt_limit: int,
     hints: tuple[str, ...],
@@ -243,11 +252,15 @@ class EvidenceBuilder:
         parser: CrawlParser | None = None,
         *,
         record_attempt: Callable[[str | None, FetchStatus], None] | None = None,
+        renderer: DynamicRenderer | None = None,
+        dynamic_hosts: frozenset[str] = frozenset(),
     ):
         self.fetcher = fetcher
         self.parser = parser
         self.pdf = PdfParser()
         self.record_attempt = record_attempt
+        self.renderer = renderer
+        self.dynamic_hosts = dynamic_hosts
 
     async def extract(
         self,
@@ -259,21 +272,28 @@ class EvidenceBuilder:
         network_scope: Scope | str = Scope.PUBLIC,
         domain_allowlist: Sequence[str] = (),
         domain_denylist: Sequence[str] = (),
+        extraction_mode: ExtractionMode = "static",
     ) -> EvidenceRecord:
         started = monotonic()
         deadline = started + timeout_s
         page = None
         status: FetchStatus = "failed"
         error_code = None
+        dynamic = extraction_mode == "dynamic"
         try:
+            if dynamic and (self.renderer is None or not self.dynamic_hosts):
+                raise FetchError(
+                    503, "FETCH_RENDER_UNAVAILABLE", "动态渲染暂不可用", retryable=True
+                )
             page = await self.fetcher.fetch(
                 url,
                 timeout_s=timeout_s,
                 network_scope=network_scope,
                 domain_allowlist=domain_allowlist,
                 domain_denylist=domain_denylist,
+                authorized_hosts=self.dynamic_hosts if dynamic else None,
             )
-            evidence = await self._extract_page(page, deadline, result_id, query)
+            evidence = await self._extract_page(page, deadline, result_id, query, dynamic=dynamic)
         except OCRPending as error:
             error_code = error.code
             status = "ocr_pending"
@@ -305,10 +325,19 @@ class EvidenceBuilder:
             )
 
     async def _extract_page(
-        self, page: FetchedPage, deadline: float, result_id: str | None, query: str | None
+        self,
+        page: FetchedPage,
+        deadline: float,
+        result_id: str | None,
+        query: str | None,
+        *,
+        dynamic: bool,
     ) -> EvidenceRecord:
         warnings: list[str] = []
         hints: tuple[str, ...] = ()
+        render_version = None
+        if dynamic and page.content_type != "text/html":
+            raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染仅支持 HTML")
         if page.content_type == "application/pdf":
             if page.max_snippet == 0:
                 raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文")
@@ -324,9 +353,21 @@ class EvidenceBuilder:
             if parsed_pdf.truncated:
                 warnings.append("pdf_page_or_text_limit_reached")
         elif page.content_type in {"text/html", "application/xhtml+xml"}:
-            blocks, metadata, meta_limit = _html_page(page)
+            document = parse_static_html(page)
+            metadata, meta_limit = _html_metadata(document)
             kind = "html_text"
-            if self.parser and any(not block.heading for block in blocks):
+            if dynamic:
+                document, render_version = await self._render_document(page, deadline)
+                _, rendered_limit = _html_metadata(document)
+                if rendered_limit is not None:
+                    meta_limit = (
+                        min(meta_limit, rendered_limit)
+                        if meta_limit is not None
+                        else rendered_limit
+                    )
+                kind = "rendered_html_text"
+            blocks = _html_body(document)
+            if not dynamic and self.parser and any(not block.heading for block in blocks):
                 raw_html = page.body.decode(_charset(page.charset) or "utf-8-sig", errors="replace")
                 parser_budget = min(4.5, (deadline - monotonic()) * 0.75)
                 parsed = await self.parser.select(raw_html, timeout_s=parser_budget)
@@ -349,7 +390,11 @@ class EvidenceBuilder:
         identity = f"{page.url}\n{text_sha}\n{locator.text_offset_start}:{locator.text_offset_end}"
         if locator.page_number is not None:
             identity += f"\npage:{locator.page_number}"
-        if locator.kind == "pdf_text":
+        if render_version is not None:
+            method = "browser_dom"
+            extraction_version = f"{render_version}+normalizer.{STATIC_EXTRACTION_VERSION}"
+            identity += f"\nrender:{extraction_version}"
+        elif locator.kind == "pdf_text":
             method, extraction_version = "pypdf", PDF_EXTRACTION_VERSION
         elif selected:
             method = "crawl4ai_static"
@@ -376,3 +421,35 @@ class EvidenceBuilder:
             extraction_version=extraction_version,
             warnings=warnings,
         )
+
+    async def _render_document(
+        self, page: FetchedPage, deadline: float
+    ) -> tuple[html.HtmlElement, str]:
+        assert self.renderer is not None
+        source_csp = ", ".join(
+            value
+            for header in page.content_security_policy
+            if (value := header.replace("\t", " ").strip())
+        )
+        if source_csp and (
+            len(source_csp) > 4096 or not source_csp.isascii() or not source_csp.isprintable()
+        ):
+            raise FetchError(
+                403, "FETCH_RENDER_POLICY_UNSUPPORTED", "无法安全保留来源页面的内容策略"
+            )
+        charset = _charset(page.charset) if page.charset else "utf-8-sig"
+        if charset not in {"ascii", "utf-8", "utf-8-sig"}:
+            raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染需要 UTF-8 或 ASCII HTML")
+        try:
+            raw_html = page.body.decode("ascii" if charset == "ascii" else "utf-8-sig")
+        except UnicodeDecodeError:
+            raise FetchError(
+                415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染需要有效的 UTF-8 HTML"
+            ) from None
+        rendered = await self.renderer.render(
+            raw_html, timeout_s=deadline - monotonic(), source_csp=source_csp or None
+        )
+        if rendered is None:
+            raise FetchError(503, "FETCH_RENDER_UNAVAILABLE", "动态渲染暂不可用", retryable=True)
+        snapshot = replace(page, body=rendered.html.encode("utf-8"), charset="utf-8")
+        return parse_static_html(snapshot), rendered.version
