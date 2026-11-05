@@ -160,3 +160,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 受控来源夹具通过真实 Unix socket 渲染内嵌脚本，校验正文字符偏移、SHA-256、逐跳地址授权、robots、原始及渲染后的摘录限制和来源 CSP。探针覆盖 1 MiB 请求上限、脚本超时后的恢复、外部请求与文件访问阻断。独立 PostgreSQL 验证 REST／MCP 幂等、静态 Worker 跳过动态任务、证据归档及跨租户拒绝。 [动态探针](operations.md#公网正文验收)
 - 动态配置八个实际运行镜像均生成 SBOM 并通过严重及高危漏洞扫描门禁。渲染镜像被识别为 openSUSE Tumbleweed `20261103`，SBOM 含 386 个组件。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
 - 动态预览覆盖内嵌脚本。依赖外部脚本或接口的动态站点、公网正文正向验证和人工 Top-10 仍待验收。
+
+### `0.3.0-alpha.9` 复验
+
+- 370 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 工作区回归通过。默认静态配置七个服务健康，动态模式保持按部署启用。控制台可显示和复制动态资源包指纹。
+- 独立动态 Compose 的八个服务健康。实际断网 Chromium 157 在原始 HTTPS 地址回放获准的同源 JavaScript 模块和 JSON GET，生成可定位正文。受控夹具验证了来源 CSP、禁止凭据和 Range 请求、按类型匹配及仅回放授权 URL。 [动态探针](operations.md#公网正文验收)
+- Worker 复用 DNS 固定、robots、主机授权和响应体限制。测试覆盖资源拒绝、重定向拒绝、256 KiB 单资源与 512 KiB 合计上限，以及页面和资源间最严格的摘录限制。资源内容变化会更新资源包指纹和证据 ID，即使正文相同。独立 PostgreSQL 复验 REST／MCP 幂等、证据归档、跨租户拒绝和单次计量通过。 [抓取接口](api-contracts.md#证据与任务)
+- 动态配置的八个实际运行镜像均生成 SBOM，并通过严重及高危漏洞扫描门禁。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
+- 同一版本的真实 RFC Editor HTML 探针因 Worker DNS 返回非公网地址而收到 `FETCH_TARGET_BLOCKED`。正向公网正文、跨源资源和人工 Top-10 仍待验收。
