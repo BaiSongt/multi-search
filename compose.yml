@@ -10,6 +10,7 @@ services:
       API_KEY_HASH_PEPPER_FILE: /run/secrets/api_key_hash_pepper
       MULTISEARCH_ENABLE_DDGS: ${MULTISEARCH_ENABLE_DDGS:-true}
       MULTISEARCH_ENABLE_IMAGE_SEARCH: ${MULTISEARCH_ENABLE_IMAGE_SEARCH:-true}
+      MULTISEARCH_MAX_CONCURRENT_REQUESTS: ${MULTISEARCH_MAX_CONCURRENT_REQUESTS:-20}
     secrets: [postgres_password, api_key_hash_pepper]
     ports:
       - "127.0.0.1:${MULTISEARCH_API_PORT:-8765}:8765"
@@ -97,11 +98,16 @@ services:
     secrets: [searxng_secret]
     networks: [search]
     read_only: true
-    tmpfs: [/tmp, "/var/cache/searxng:mode=1777"]
+    tmpfs: [/tmp, "/var/cache/searxng:uid=977,gid=977,mode=0700"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 384m
     pids_limit: 96
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
 
 networks:
   gateway:

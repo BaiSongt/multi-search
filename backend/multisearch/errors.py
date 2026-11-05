@@ -43,7 +43,8 @@ class SearchBodyLimit:
             chunk = await receive()
             if chunk["type"] == "http.disconnect":
                 return
-            if len(body) + len(chunk["body"]) > 32_768:
+            part = chunk.get("body", b"")
+            if len(body) + len(part) > 32_768:
                 error = ErrorBody(
                     request_id=scope["state"]["request_id"],
                     code="INVALID_REQUEST",
@@ -51,7 +52,7 @@ class SearchBodyLimit:
                 )
                 await JSONResponse(error.model_dump(exclude_none=True), 413)(scope, receive, send)
                 return
-            body.extend(chunk["body"])
+            body.extend(part)
             if not chunk.get("more_body", False):
                 break
 

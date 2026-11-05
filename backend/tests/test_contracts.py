@@ -2,7 +2,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from multisearch.auth import SearchKey
@@ -43,7 +43,7 @@ def test_mixed_search_contract():
     assert result.image_options.min_width == 1000
 
 
-def test_machine_permissions_and_validation_redaction():
+async def test_machine_permissions_and_validation_redaction():
     app = FastAPI()
     install_errors(app)
     key = MachineIdentity(uuid4(), uuid4(), uuid4(), frozenset({"search:text"}))
@@ -61,22 +61,27 @@ def test_machine_permissions_and_validation_redaction():
         identity.require_search(body.modalities)
         return {"tenant": identity.tenant_id}
 
-    client = TestClient(app)
+    async def chunks():
+        yield b"0" * 30_000
+        yield b"0" * 3000
+
     route = "/api/v1/search"
-    assert client.post(route, json={"query": "x"}).status_code == 401
-    headers = {"Authorization": "Bearer valid"}
-    invalid = client.post(route, json={"query": ["sensitive"]}, headers=headers)
-    assert invalid.status_code == 422
-    assert "sensitive" not in invalid.text
-    assert invalid.json()["request_id"] == invalid.headers["X-Request-ID"]
-    oversize = client.post(route, content=iter([b"0" * 30_000, b"0" * 3000]), headers=headers)
-    assert oversize.status_code == 413
-    assert oversize.json()["request_id"] == oversize.headers["X-Request-ID"]
-    response = client.post(route, json={"query": "x", "modalities": ["image"]}, headers=headers)
-    assert response.status_code == 403
-    assert client.post(route, json={"query": "x"}, headers=headers).json() == {
-        "tenant": str(key.tenant_id)
-    }
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        assert (await client.post(route, json={"query": "x"})).status_code == 401
+        headers = {"Authorization": "Bearer valid"}
+        invalid = await client.post(route, json={"query": ["sensitive"]}, headers=headers)
+        assert invalid.status_code == 422
+        assert "sensitive" not in invalid.text
+        assert invalid.json()["request_id"] == invalid.headers["X-Request-ID"]
+        oversize = await client.post(route, content=chunks(), headers=headers)
+        assert oversize.status_code == 413
+        assert oversize.json()["request_id"] == oversize.headers["X-Request-ID"]
+        forbidden = await client.post(
+            route, json={"query": "x", "modalities": ["image"]}, headers=headers
+        )
+        assert forbidden.status_code == 403
+        success = await client.post(route, json={"query": "x"}, headers=headers)
+        assert success.json() == {"tenant": str(key.tenant_id)}
     key.require_search([Modality.TEXT])
 
 

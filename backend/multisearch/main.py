@@ -2,14 +2,18 @@ from asyncio import timeout
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from .api import router
 from .errors import install_errors
 from .identity import IdentityStore
+from .providers import create_providers
+from .search import SearchService
 from .settings import Settings
 
 VERSION = (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
@@ -32,13 +36,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             config.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
         )
         try:
-            yield
+            async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+                app.state.search = SearchService(
+                    app.state.redis, create_providers(config, client), config
+                )
+                yield
         finally:
             await app.state.redis.aclose()
             await app.state.db.dispose()
 
     app = FastAPI(title="MultiSearch", version=VERSION, lifespan=lifespan)
     install_errors(app)
+    app.include_router(router)
 
     @app.get("/health/live")
     async def live():
