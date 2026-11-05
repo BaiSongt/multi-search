@@ -13,6 +13,7 @@ from .contracts import InputModel, Modality, Mode, Role, Source
 from .errors import ApiError
 from .policy import ProviderPolicy, effective_quota, lock_tenant, tenant_quota, validate_limits
 from .reporting import ReportScope
+from .sessions import lock_platform_members, require_platform_admin_after
 
 router = APIRouter(prefix="/api/v1")
 OPS = {Role.PLATFORM_ADMIN, Role.OPERATIONS_ADMIN}
@@ -274,7 +275,9 @@ async def update_tenant(tenant_id: UUID, body: TenantPatch, request: Request, ac
     if not body.enabled and tenant_id == actor.tenant_id:
         raise ApiError(409, "TENANT_STATE_CONFLICT", "不能停用当前登录所在的租户")
     async with request.app.state.db.begin() as connection:
+        await lock_platform_members(connection)
         await lock_tenant(connection, tenant_id)
+        await request.app.state.identity.sessions.assert_actor(connection, actor)
         old = await connection.scalar(
             text("SELECT enabled FROM tenants WHERE id = :id"), {"id": tenant_id}
         )
@@ -284,6 +287,8 @@ async def update_tenant(tenant_id: UUID, body: TenantPatch, request: Request, ac
             text("UPDATE tenants SET enabled = :enabled WHERE id = :id"),
             {"id": tenant_id, "enabled": body.enabled},
         )
+        if not body.enabled:
+            await require_platform_admin_after(connection)
         await _audit(
             connection,
             actor_id=actor.user_id,

@@ -3,6 +3,7 @@ import hmac
 import os
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import scrypt
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from .contracts import Role
 from .errors import ApiError
+from .policy import lock_tenant
 from .settings import secret
 
 _SESSION_FORMAT = re.compile(r"mss_([a-f0-9]{32})\.[A-Za-z0-9_-]{43}")
@@ -57,6 +59,65 @@ def _verify_password(password: str, stored: str) -> bool:
 
 def _invalid_session() -> ApiError:
     return ApiError(401, "AUTH_REQUIRED", "需要有效的登录会话")
+
+
+async def lock_platform_members(connection: AsyncConnection) -> None:
+    await connection.execute(text("SELECT pg_advisory_xact_lock(1498139728)"))
+
+
+async def has_platform_admin(connection: AsyncConnection) -> bool:
+    return bool(
+        await connection.scalar(
+            text("""
+        SELECT EXISTS (
+            SELECT 1 FROM memberships m JOIN users u ON m.user_id = u.id
+            JOIN tenants t ON t.id = m.tenant_id
+            WHERE m.role = 'platform_admin' AND u.password_hash IS NOT NULL
+                AND t.enabled AND u.enabled AND m.enabled
+        )
+    """)
+        )
+    )
+
+
+async def require_platform_admin_after(connection: AsyncConnection) -> None:
+    if not await has_platform_admin(connection):
+        raise ApiError(409, "LAST_ADMIN", "必须保留一名可登录的平台管理员")
+
+
+async def require_tenant_admin_after(connection: AsyncConnection, tenant_id: UUID) -> None:
+    active = await connection.scalar(
+        text("""
+            SELECT EXISTS (
+                SELECT 1 FROM memberships m JOIN users u ON m.user_id = u.id
+                WHERE m.tenant_id = :tenant_id AND m.enabled AND u.enabled
+                    AND m.role IN ('tenant_admin', 'platform_admin') AND u.password_hash IS NOT NULL
+            )
+        """),
+        {"tenant_id": tenant_id},
+    )
+    if not active:
+        raise ApiError(409, "LAST_ADMIN", "必须保留一名可登录的租户管理员")
+
+
+async def revoke_member_credentials(
+    connection: AsyncConnection, tenant_id: UUID, user_id: UUID
+) -> None:
+    identity = {"tenant_id": tenant_id, "user_id": user_id}
+    await connection.execute(
+        text("""
+            UPDATE browser_sessions SET revoked_at = now()
+            WHERE tenant_id = :tenant_id AND user_id = :user_id AND revoked_at IS NULL
+        """),
+        identity,
+    )
+    await connection.execute(
+        text("""
+            UPDATE api_keys SET revoked_at = now()
+            WHERE tenant_id = :tenant_id AND owner_id = :user_id AND revoked_at IS NULL
+        """),
+        identity,
+    )
 
 
 @dataclass(frozen=True)
@@ -110,23 +171,12 @@ class SessionStore:
             raise ValueError("邮箱格式无效")
         if not 12 <= len(password) <= 128:
             raise ValueError("密码需要 12 至 128 个字符")
-        password_hash = await asyncio.to_thread(_hash_password, password)
+        password_hash = await self.hash_password(password)
         async with self.db.begin() as connection:
-            if bootstrap:
-                # 引导仅创建首位平台管理员。串行化启动，避免副本重复引导。
-                await connection.execute(text("SELECT pg_advisory_xact_lock(1498139728)"))
-                present = await connection.scalar(
-                    text("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM memberships m JOIN users u ON m.user_id = u.id
-                        JOIN tenants t ON t.id = m.tenant_id
-                        WHERE m.role = 'platform_admin' AND u.password_hash IS NOT NULL
-                            AND t.enabled AND u.enabled AND m.enabled
-                    )
-                """)
-                )
-                if present:
-                    return False
+            # 引导与管理员角色变更串行化，避免副本重复引导或破坏最后管理员约束。
+            await lock_platform_members(connection)
+            if bootstrap and await has_platform_admin(connection):
+                return False
             tenant_id = await connection.scalar(
                 text("""
                     INSERT INTO tenants (id, slug) VALUES (:id, :tenant)
@@ -168,16 +218,17 @@ class SessionStore:
 
     async def disable(self, tenant: str, email: str) -> bool:
         async with self.db.begin() as connection:
+            await lock_platform_members(connection)
             params = {"tenant": tenant, "email": email}
-            disabled = (
+            member = (
                 (
                     await connection.execute(
                         text("""
-                    UPDATE memberships m SET enabled = FALSE
-                    FROM tenants t, users u
-                    WHERE m.tenant_id = t.id AND m.user_id = u.id AND m.enabled
-                        AND t.slug = :tenant AND u.email = :email
-                    RETURNING m.tenant_id, m.user_id
+                    SELECT m.tenant_id, m.user_id
+                    FROM memberships m
+                    JOIN tenants t ON m.tenant_id = t.id
+                    JOIN users u ON m.user_id = u.id
+                    WHERE m.enabled AND t.slug = :tenant AND u.email = :email
                 """),
                         params,
                     )
@@ -185,28 +236,44 @@ class SessionStore:
                 .mappings()
                 .one_or_none()
             )
-            if disabled is None:
+            if member is None:
                 return False
+            await lock_tenant(connection, member["tenant_id"])
+            identity = {"tenant_id": member["tenant_id"], "user_id": member["user_id"]}
+            await connection.execute(
+                text("""
+                UPDATE memberships SET enabled = FALSE WHERE tenant_id = :tenant_id AND user_id = :user_id
+                """),
+                identity,
+            )
+            # 本机部署操作员可在会话不可用时回收管理员；浏览器管理接口保护最后管理员。
+            await revoke_member_credentials(connection, member["tenant_id"], member["user_id"])
             await connection.execute(
                 text("""
                 INSERT INTO audit_events (tenant_id, actor_type, action, target_id)
                 VALUES (:tenant_id, 'local_operator', 'user.disable', :user_id)
             """),
-                dict(disabled),
+                identity,
             )
             return True
 
-    async def _password_matches(self, password: str, stored: str) -> bool:
+    async def _password_work[T](self, compute: Callable[..., T], *args) -> T:
         if self._password_workers.locked():
             raise ApiError(429, "RATE_LIMITED", "登录服务繁忙", retryable=True, retry_after_ms=1000)
         async with self._password_workers:
-            task = asyncio.create_task(asyncio.to_thread(_verify_password, password, stored))
+            task = asyncio.create_task(asyncio.to_thread(compute, *args))
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:
                 # 密码计算完成后再释放内存占用名额。
                 await task
                 raise
+
+    async def hash_password(self, password: str) -> str:
+        return await self._password_work(_hash_password, password)
+
+    async def check_password(self, password: str, stored: str) -> bool:
+        return await self._password_work(_verify_password, password, stored)
 
     async def login(self, tenant: str, email: str, password: str) -> tuple[str, SessionIdentity]:
         params = {"tenant": tenant, "email": email}
@@ -229,7 +296,7 @@ class SessionStore:
                 .one_or_none()
             )
         stored = credentials["password_hash"] if credentials is not None else _DUMMY_HASH
-        valid = await self._password_matches(password, stored)
+        valid = await self.check_password(password, stored)
         if not valid or credentials is None:
             raise ApiError(401, "AUTH_REQUIRED", "租户、邮箱或密码无效")
         async with self.db.begin() as connection:
