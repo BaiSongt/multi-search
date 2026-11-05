@@ -106,3 +106,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 ```
 
 从同一份原始基准报告生成离线评审模板，完成人工判读后可验证并计算 Top-10 有效率。 [评审流程](operations.md#性能与质量基线)
+
+### `0.3.0-alpha.2` 复验
+
+- 在最终 Compose 镜像上，用固定失败来源得到 REST 502，并验证幂等重放带相同来源诊断。PostgreSQL 记录一次用量和两次来源调用。真实学术研究与 MCP 共享任务复验也通过。
+- 100 条公网样本共 200 次请求，125 次返回成功，75 次文字检索失败均保留来源诊断。图片 L2 的 40 次聚合部分成功都保留了 SearXNG 候选。 [基线数据](operations.md#性能与质量基线)
+- Crossref 与 arXiv 的 12 条独立学术样本完成两种模式的 24 次请求，全部返回 HTTP 200。按候选标识符比对原始文献，L1 命中 4／12，L2 命中 6／12。四条直接 DOI 查询在两种模式中均未命中对应文献，精确标识符检索仍需修正。 [学术样本](../scripts/ops/academic_cases.jsonl)
+- 独立 PostgreSQL 中导入 40 份本地文档，验证 11 次本地查询与 4 次公网来源拒绝，覆盖有序上限、重导入、租户隔离以及 `offline` 和 `private`。本机端到端 P50 为 10 ms。 [本地索引探针](../scripts/probe_local_index.py)
+- 扫描七个实际运行镜像并生成 SBOM。移除构建工具后，已识别的 Python 和 npm 包未发现严重或高危记录，底层镜像的高危门禁仍未通过。 [镜像报告](security.md#运行镜像-sbom-与漏洞扫描)
