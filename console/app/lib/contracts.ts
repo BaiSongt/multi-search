@@ -144,7 +144,15 @@ export type Totals = {
 };
 
 export type UsageDay = Pick<Totals, "search_requests" | "errors" | "text_results_returned" | "image_results_returned"> & { day: string };
-export type Usage = { totals: Totals; quota: Record<string, number>; series: UsageDay[]; recent: RequestRow[]; window_days: number };
+export type Usage = {
+  totals: Totals;
+  quota: Record<string, number>;
+  series: UsageDay[];
+  recent: RequestRow[];
+  window_days: number;
+  mode_counts?: { mode: string; count: number }[];
+  failure_counts?: { code: string; count: number }[];
+};
 export type Overview = {
   totals: Totals;
   series: UsageDay[];

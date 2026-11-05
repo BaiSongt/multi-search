@@ -14,6 +14,15 @@ const statusTitles: Record<string, string> = {
   cancelled: "取消",
 };
 
+const modeTitles: Record<string, string> = {
+  auto: "自动",
+  local: "本地",
+  quick: "快速",
+  standard: "标准",
+  evidence: "证据检索",
+  deep: "深度研究",
+};
+
 const providerStatuses: Record<string, string> = {
   success: "成功",
   empty: "无结果",
@@ -254,6 +263,24 @@ export function UsageView({ overview = false }: { overview?: boolean }) {
         <Trend series={overview ? usage.series.slice(-7) : usage.series} />
         <section className="panel"><h2>有效额度上限</h2><QuotaSummary quota={usage.quota} /></section>
       </div>
+      {!overview && <div className="overview-grid">
+        <section className="panel" aria-labelledby="usage-modes">
+          <h2 id="usage-modes">模式分布</h2>
+          {!usage.mode_counts ? <Empty>模式统计暂不可用。</Empty> : usage.mode_counts.length === 0 ? <Empty>暂无模式记录。</Empty> : (
+            <dl>{usage.mode_counts.map(({ mode, count }) => (
+              <div key={mode} className="definition"><dt>{modeTitles[mode] ?? mode}</dt><dd>{formatNumber(count)} 次</dd></div>
+            ))}</dl>
+          )}
+        </section>
+        <section className="panel" aria-labelledby="usage-failures">
+          <h2 id="usage-failures">失败原因</h2>
+          {!usage.failure_counts ? <Empty>失败统计暂不可用。</Empty> : usage.failure_counts.length === 0 ? <Empty>暂无失败记录。</Empty> : (
+            <dl>{usage.failure_counts.map(({ code, count }) => (
+              <div key={code} className="definition"><dt><code>{code}</code></dt><dd>{formatNumber(count)} 次</dd></div>
+            ))}</dl>
+          )}
+        </section>
+      </div>}
       <form method="post" className="actions" onSubmit={setRequestFilter}>
         <input name="request_id" aria-label="按请求 ID 筛选最近调用" placeholder="请求 ID" />
         <select name="status" aria-label="按状态筛选最近调用">

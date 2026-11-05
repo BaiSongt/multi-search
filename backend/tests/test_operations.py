@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,7 @@ from multisearch.contracts import Modality, Mode, Role, SearchRequest, Source
 from multisearch.errors import ApiError, install_errors
 from multisearch.ops_api import router
 from multisearch.ops_store import OpsStore
+from multisearch.reporting import ReportScope, UsageReports
 from multisearch.routing_policy import (
     DEFAULT_ROUTING,
     RoutingRules,
@@ -142,6 +144,57 @@ async def test_request_trace_reuses_scoped_request_permissions(role):
                 path, params={"trace_id": trace_id, "tenant_id": str(foreign_tenant)}
             )
             assert cross_tenant.status_code == 403
+
+
+@pytest.mark.parametrize("role", [Role.DEVELOPER, Role.TENANT_ADMIN])
+async def test_usage_breakdown_has_bounded_dimensions_and_preserves_scope(role):
+    actor = _actor(role)
+    counts = [
+        {"mode": "standard", "failure": None, "count": 24},
+        {"mode": "quick", "failure": None, "count": 6},
+        {"mode": None, "failure": "REQUEST_INTERRUPTED", "count": 3},
+        {"mode": None, "failure": "OTHER_ERROR", "count": 1},
+    ]
+    connection = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: counts))
+        )
+    )
+
+    class Reports:
+        async def usage(self, scope):
+            return await UsageReports(None, 5)._breakdown(connection, scope)
+
+    app = _app(actor, None)
+    app.state.reports = Reports()
+    app.include_router(admin_router)
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://127.0.0.1") as client:
+        client.cookies.set(SESSION_COOKIE, "session-only")
+        response = await client.get("/api/v1/usage")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode_counts": [{"mode": "standard", "count": 24}, {"mode": "quick", "count": 6}],
+        "failure_counts": [
+            {"code": "REQUEST_INTERRUPTED", "count": 3},
+            {"code": "OTHER_ERROR", "count": 1},
+        ],
+    }
+    connection.execute.assert_awaited_once()
+    _, params = connection.execute.await_args.args
+    owner = actor.user_id if role == Role.DEVELOPER else None
+    assert {name: params[name] for name in ("tenant", "owner")} == ReportScope(
+        actor.tenant_id, owner
+    ).params()
+    start = params["start"]
+    assert start == datetime.now(UTC).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - timedelta(days=29)
+    assert params["modes"] == [mode.value for mode in Mode]
+    assert "REQUEST_INTERRUPTED" in params["failure_codes"]
+    assert "FETCH_TARGET_BLOCKED" in params["failure_codes"]
+    assert "NO_RESEARCH_RESULTS" in params["failure_codes"]
+    assert "REQUEST_CANCELLED" not in params["failure_codes"]
 
 
 @pytest.mark.parametrize("role", list(Role))

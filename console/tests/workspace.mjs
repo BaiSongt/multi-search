@@ -688,6 +688,43 @@ function traceFixture(actor, id, traceId, sql) {
   assert.equal(result.status, 0, "无法准备或清理请求追踪测试记录");
 }
 
+async function verifyUsageBreakdown(page, context, actor) {
+  const id = randomUUID();
+  const traceId = randomBytes(16).toString("hex");
+  traceFixture(actor, id, traceId, `${traceSeed}
+UPDATE usage_events SET created_at = now() - interval '2 days' WHERE id = :'usage_id'::UUID;
+INSERT INTO usage_events (
+  id, tenant_id, principal_kind, principal_id, user_id, request_id, trace_id,
+  mode, modalities, source_types, status, elapsed_ms, reservation_expires_at, created_at
+)
+SELECT gen_random_uuid(), tenant_id, principal_kind, principal_id, user_id, request_id || '-' || n, trace_id,
+  'quick', ARRAY['text'], ARRAY['web'], 'completed', 25, now(), now() - interval '1 day'
+FROM usage_events CROSS JOIN generate_series(1, 21) AS newer(n) WHERE id = :'usage_id'::UUID;
+`);
+  try {
+    await page.reload();
+    const modes = page.getByRole("region", { name: "模式分布" });
+    await modes.getByText("本地", { exact: true }).waitFor();
+    await modes.getByText("标准", { exact: true }).waitFor();
+    const failures = page.getByRole("region", { name: "失败原因" });
+    const unavailable = failures.locator(".definition").filter({ hasText: "PROVIDER_UNAVAILABLE" });
+    await unavailable.getByText("1 次", { exact: true }).waitFor();
+    const response = await context.request.get("/gateway/usage");
+    assert.equal(response.status(), 200);
+    const usage = await response.json();
+    assert.ok(usage.mode_counts.some(({ mode, count }) => mode === "local" && count >= 1));
+    assert.ok(usage.mode_counts.some(({ mode, count }) => mode === "quick" && count >= 21));
+    assert.ok(usage.failure_counts.some(({ code, count }) => code === "PROVIDER_UNAVAILABLE" && count === 1));
+    assert.equal(usage.recent.length, 20);
+    assert.ok(usage.recent.every((row) => row.id !== id));
+  } finally {
+    traceFixture(actor, id, traceId, `
+DELETE FROM usage_events WHERE tenant_id = :'tenant_id'::UUID
+  AND (id = :'usage_id'::UUID OR starts_with(request_id, :'request_id' || '-'));
+`);
+  }
+}
+
 const imageQualitySeed = `
 INSERT INTO image_observations (
   id, usage_id, tenant_id, source_page_url, original_url, rights_status, source_page_verified, retrieved_at, metadata
@@ -1108,6 +1145,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     await developerPage.goto("/console/usage");
     await waitForTitle(developerPage, "调用量与额度");
     await developerPage.getByRole("heading", { name: "有效额度上限" }).waitFor();
+    await verifyUsageBreakdown(developerPage, developer, developerSession);
     await developerPage.getByRole("button", { name: "切换浅色或深色主题" }).click();
     const theme = await developerPage.locator("html").getAttribute("data-theme");
     assert.ok(theme === "dark" || theme === "light");

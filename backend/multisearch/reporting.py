@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from .contracts import Mode
 from .errors import ApiError
 from .metering import ACTIVE_EXECUTION
 from .policy import effective_quota, tenant_quota
@@ -27,13 +28,55 @@ _RESOLVED_STATUS = """
     CASE WHEN status = 'running' AND reservation_expires_at <= now() THEN 'failed'
         ELSE status END
 """
+_RESOLVED_CODE = """
+    CASE WHEN status = 'running' AND reservation_expires_at <= now()
+         THEN 'REQUEST_INTERRUPTED' ELSE code END
+"""
 _REQUEST_COLUMNS = f"""
     id, request_id, trace_id, tenant_id, key_id, operation, mode, modalities, source_types,
     {_RESOLVED_STATUS} AS status,
-    CASE WHEN status = 'running' AND reservation_expires_at <= now()
-         THEN 'REQUEST_INTERRUPTED' ELSE code END AS code,
+    {_RESOLVED_CODE} AS code,
     elapsed_ms, cache_hit, text_results_returned, image_results_returned, created_at
 """
+_REPORTABLE_FAILURE_CODES = (
+    "CACHE_UNAVAILABLE",
+    "EVIDENCE_UNAVAILABLE",
+    "FETCH_BODY_TOO_LARGE",
+    "FETCH_CONTENT_UNSUPPORTED",
+    "FETCH_NO_EXCERPT",
+    "FETCH_NOT_FOUND",
+    "FETCH_PDF_ENCRYPTED",
+    "FETCH_PDF_INVALID",
+    "FETCH_PDF_LIMIT",
+    "FETCH_PDF_UNAVAILABLE",
+    "FETCH_RATE_LIMITED",
+    "FETCH_REDIRECT_INVALID",
+    "FETCH_REDIRECT_LIMIT",
+    "FETCH_RENDER_POLICY_UNSUPPORTED",
+    "FETCH_RENDER_UNAVAILABLE",
+    "FETCH_RESOURCE_CORS_DENIED",
+    "FETCH_RESOURCE_POLICY_UNSUPPORTED",
+    "FETCH_RESOURCE_REDIRECT",
+    "FETCH_ROBOTS_DENIED",
+    "FETCH_ROBOTS_UNAVAILABLE",
+    "FETCH_SITE_RESTRICTED",
+    "FETCH_TARGET_BLOCKED",
+    "FETCH_UNAVAILABLE",
+    "INTERNAL_ERROR",
+    "INVALID_REQUEST",
+    "JOB_FAILED",
+    "JOB_PRINCIPAL_INACTIVE",
+    "MODE_UNAVAILABLE",
+    "NO_RESEARCH_RESULTS",
+    "PROVIDER_UNAVAILABLE",
+    "RATE_LIMITED",
+    "RATE_LIMITER_UNAVAILABLE",
+    "REQUEST_INTERRUPTED",
+    "SOURCE_MODALITY_UNAVAILABLE",
+    "SOURCE_UNAVAILABLE",
+    "TIME_BUDGET_EXCEEDED",
+    "WORKER_INTERRUPTED",
+)
 _QUOTA_METRICS = {
     "requests": "COUNT(*) FILTER (WHERE created_at >= :day)",
     "search_requests": "COUNT(*) FILTER (WHERE created_at >= :day AND operation = 'search')",
@@ -122,6 +165,40 @@ class UsageReports:
         )
         return [dict(row) for row in result.mappings()]
 
+    async def _breakdown(self, connection: AsyncConnection, scope: ReportScope) -> dict:
+        result = await connection.execute(
+            text(f"""
+            WITH observed AS (
+                SELECT mode, {_RESOLVED_STATUS} AS status, {_RESOLVED_CODE} AS code
+                FROM usage_events WHERE {_SCOPE} AND created_at >= :start
+            ), classified AS (
+                SELECT mode, CASE WHEN status = 'failed' THEN CASE
+                    WHEN code = ANY(CAST(:failure_codes AS TEXT[])) THEN code ELSE 'OTHER_ERROR'
+                    END END AS failure
+                FROM observed
+            )
+            SELECT mode, failure, COUNT(*) AS count FROM classified
+            GROUP BY GROUPING SETS ((mode), (failure))
+            HAVING mode = ANY(CAST(:modes AS TEXT[])) OR failure IS NOT NULL
+            ORDER BY count DESC, mode ASC, failure ASC
+            """),
+            {
+                **scope.params(),
+                "start": _start(),
+                "modes": [mode.value for mode in Mode],
+                "failure_codes": list(_REPORTABLE_FAILURE_CODES),
+            },
+        )
+        counts = result.mappings().all()
+        return {
+            "mode_counts": [
+                {"mode": row["mode"], "count": row["count"]} for row in counts if row["mode"]
+            ],
+            "failure_counts": [
+                {"code": row["failure"], "count": row["count"]} for row in counts if row["failure"]
+            ],
+        }
+
     async def _requests(
         self,
         connection: AsyncConnection,
@@ -195,6 +272,7 @@ class UsageReports:
             return {
                 "totals": await self._totals(connection, scope),
                 "series": await self._series(connection, scope),
+                **(await self._breakdown(connection, scope)),
                 "quota": await tenant_quota(connection, scope.tenant, self.max_concurrent),
                 "recent": (await self._requests(connection, scope, 20))["items"],
                 "window_days": 30,
