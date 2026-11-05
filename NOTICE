@@ -3,8 +3,8 @@ MultiSearch
 本项目代码采用 Apache License 2.0，包含明确的专利许可条款。
 MultiSearch source code is licensed under Apache License 2.0, which includes an express patent grant.
 
-第三方组件保留上游许可证与版权声明。传递依赖版本见 backend/uv.lock、deploy/crawl4ai/uv.lock 和 console/package-lock.json。
-Third-party components retain their upstream licenses and copyright notices. The backend, Crawl4AI and Console lockfiles record transitive versions.
+第三方组件保留上游许可证与版权声明。传递依赖版本见 backend/uv.lock、deploy/crawl4ai/uv.lock、deploy/renderer/uv.lock 和 console/package-lock.json。
+Third-party components retain their upstream licenses and copyright notices. The backend, Crawl4AI, renderer and Console lockfiles record transitive versions.
 
 FastAPI — MIT — https://github.com/fastapi/fastapi/blob/master/LICENSE
 Pydantic — MIT — https://github.com/pydantic/pydantic/blob/main/LICENSE
@@ -25,6 +25,10 @@ Next.js — MIT — https://github.com/vercel/next.js/blob/canary/license.md
 React and React DOM — MIT — https://github.com/facebook/react/blob/main/LICENSE
 TypeScript — Apache-2.0 — https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt
 Playwright — Apache-2.0 — https://github.com/microsoft/playwright/blob/v1.58.2/LICENSE
+Playwright Python (renderer) — Apache-2.0 — https://github.com/microsoft/playwright-python/blob/v1.64.1/LICENSE
+Chromium (renderer) — BSD-3-Clause, LGPL-2.1-or-later and component-specific notices — https://chromium.googlesource.com/chromium/src/+/main/LICENSE
+openSUSE Chromium packaging and corresponding source — https://build.opensuse.org/package/show/network:chromium/chromium
+Moby seccomp profile — Apache-2.0 — https://github.com/moby/profiles/tree/seccomp/v0.2.4/seccomp
 PostgreSQL — PostgreSQL License — https://www.postgresql.org/about/licence/
 su-exec — MIT — https://github.com/ncopa/su-exec/blob/v0.3/LICENSE
 SearXNG — AGPL-3.0 — https://github.com/searxng/searxng/blob/cccbc9e15/LICENSE
@@ -32,6 +36,9 @@ Redis 8 — AGPL-3.0 option — https://redis.io/legal/licenses/
 
 SearXNG 与 Redis 由 Compose 从上游拉取并作为独立服务运行。发布这些镜像或修改版本时，应按所选许可履行源代码与通知义务。
 SearXNG and Redis are pulled upstream images running as independent services. Redis 8 is used under its AGPLv3 option. Distribution of images or modified versions carries the applicable source and notice obligations.
+
+deploy/renderer/seccomp.json 依据 Moby seccomp/v0.2.4 调整了套接字地址族及 Chromium 所需的命名空间规则。
+The renderer seccomp profile adapts Moby seccomp/v0.2.4 with socket-family limits and namespace rules for Chromium.
 
 检索内容与图片各自适用其权利人的授权条款。
 Search results and images are subject to their respective rights holders' terms.

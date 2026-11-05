@@ -11,6 +11,7 @@ for name in (
     "api_key_hash_pepper",
     "searxng_secret",
     "crawl4ai_api_token",
+    "renderer_token",
     "metrics_token",
 ):
     try:
