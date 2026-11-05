@@ -29,6 +29,8 @@ const providerReasons: Record<string, string> = {
   upstream_rate_limited: "上游限流",
   upstream_timeout: "上游超时",
   upstream_unavailable: "上游不可用",
+  local_provider_queue_timeout: "本地来源并发等待超时",
+  local_provider_rate_limited: "本地来源配额已满",
 };
 
 export function Metrics({ values }: { values: [string, number | null | undefined, string?][] }) {
@@ -168,12 +170,13 @@ function AdminRequestTrace({ row, queryCsrf }: { row: RequestRow; queryCsrf?: st
       {resource.pending && <Loading />}
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
       {runs && (runs.length ? (
-        <Table caption="来源调用记录" headers={["Provider", "状态", "耗时", "结果数", "原因"]}>
+        <Table caption="来源调用记录" headers={["Provider", "状态", "耗时", "尝试次数", "结果数", "原因"]}>
           {runs.map((run, ordinal) => (
             <tr key={ordinal}>
               <td>{run.provider_id}</td>
               <td>{providerStatuses[run.status] ?? run.status}</td>
               <td>{formatNumber(run.elapsed_ms)} ms</td>
+              <td>{formatNumber(run.attempts)}</td>
               <td>{formatNumber(run.count)}</td>
               <td>{run.reason_codes.length ? (
                 <ul>{run.reason_codes.map((code) => <li key={code}>{providerReasons[code] ?? "未知原因"} <code>{code}</code></li>)}</ul>

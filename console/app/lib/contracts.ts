@@ -128,6 +128,7 @@ export type RequestTrace = RequestRow & {
     status: string;
     elapsed_ms: number;
     count: number;
+    attempts?: number | null;
     reason_codes: string[];
   }[];
 };

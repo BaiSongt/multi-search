@@ -2,10 +2,13 @@
 
 import json
 import sys
+from typing import Literal
 from urllib.parse import urlsplit
 
 from ddgs.ddgs import DDGS
 from ddgs.exceptions import DDGSException, TimeoutException
+from primp import ConnectError, DNSError
+from primp import TimeoutError as RequestTimeout
 
 _RESULT_FIELDS = {"title", "href", "url", "body", "date", "image", "thumbnail", "width", "height"}
 _SEARCH_HOSTS = {"html.duckduckgo.com", "www.bing.com"}
@@ -18,14 +21,33 @@ class _FixedEndpoint:
         self.client = client
         self.status: int | None = None
         self.retry_after: str | None = None
+        self.transport_failure: Literal["upstream_timeout", "upstream_unavailable"] | None = None
 
     def request(self, method, url, *args, **kwargs):
+        self.status = None
+        self.retry_after = None
+        self.transport_failure = None
         parts = urlsplit(url)
         if parts.scheme != "https" or parts.netloc not in _SEARCH_HOSTS:
             raise DDGSException("Unexpected search endpoint")
-        response = self.client.request(method, url, *args, **kwargs, follow_redirects=False)
+        try:
+            response = self.client.request(method, url, *args, **kwargs, follow_redirects=False)
+        except RequestTimeout:
+            self.transport_failure = "upstream_timeout"
+            raise
+        except (ConnectError, DNSError):
+            self.transport_failure = "upstream_unavailable"
+            raise
         self.status = response.status_code
-        self.retry_after = response.headers.get("retry-after")
+        if self.status == 429:
+            retry_after = response.headers.get("retry-after")
+            if (
+                isinstance(retry_after, str)
+                and 0 < len(retry_after) <= 128
+                and retry_after.isascii()
+                and retry_after.isprintable()
+            ):
+                self.retry_after = retry_after
         if self.status != 200:
             raise DDGSException("Upstream rejected the request")
         return response
@@ -36,9 +58,11 @@ class _Search(DDGS):
 
     def _get_engines(self, category, backend):
         engines = super()._get_engines(category, backend)
-        for engine in engines:
-            self.endpoint = _FixedEndpoint(engine.http_client.client)
-            engine.http_client.client = self.endpoint
+        if len(engines) != 1:
+            raise DDGSException("Expected exactly one configured search engine")
+        (engine,) = engines
+        self.endpoint = _FixedEndpoint(engine.http_client.client)
+        engine.http_client.client = self.endpoint
         return engines
 
 
@@ -47,16 +71,21 @@ def _search(args: dict) -> dict:
     method = {"text": ddgs.text, "images": ddgs.images, "news": ddgs.news}[args.pop("method")]
     try:
         rows = method(**args)
-    except TimeoutException:
-        return {"status": "timeout"}
     except DDGSException as error:
         endpoint = ddgs.endpoint
-        if endpoint and endpoint.status == 429:
-            return {"status": "rate_limited", "retry_after": endpoint.retry_after}
-        if endpoint and endpoint.status in {408, 504}:
+        if endpoint is not None:
+            if endpoint.transport_failure:
+                return {"status": endpoint.transport_failure}
+            if endpoint.status == 429:
+                return {"status": "rate_limited", "retry_after": endpoint.retry_after}
+            if endpoint.status in {408, 504}:
+                return {"status": "upstream_timeout"}
+            if endpoint.status not in {None, 200}:
+                return {"status": "upstream_unavailable"}
+            if endpoint.status == 200 and str(error) == "No results found.":
+                return {"status": "success", "results": []}
+        if isinstance(error, TimeoutException):
             return {"status": "timeout"}
-        if endpoint and endpoint.status == 200 and str(error) == "No results found.":
-            return {"status": "success", "results": []}
         return {"status": "failed"}
     return {
         "status": "success",

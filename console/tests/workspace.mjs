@@ -673,9 +673,11 @@ INSERT INTO usage_events (
   'PROVIDER_UNAVAILABLE', 95, '{"query":"trace-redaction-fixture"}', now()
 );`;
 const traceRuns = `
-INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes)
+INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes, attempts)
 VALUES (:'usage_id'::UUID, 0, 'searxng', 'failed', 80, 0,
-  ARRAY['upstream_captcha', 'upstream_rate_limited']);`;
+  ARRAY['upstream_captcha', 'upstream_rate_limited'], 1),
+  (:'usage_id'::UUID, 1, 'ddgs', 'circuit_open', 0, 0, ARRAY['upstream_rate_limited'], 0),
+  (:'usage_id'::UUID, 2, 'legacy-fixture', 'failed', 1, 0, ARRAY[]::TEXT[], NULL);`;
 
 function traceFixture(actor, id, traceId, sql) {
   const result = spawnSync("docker", [
@@ -899,15 +901,23 @@ async function verifyRequestTrace(page, developer, developerSession, operations,
     const provider = dialog.getByRole("row").filter({ hasText: "searxng" });
     await provider.getByText("upstream_captcha", { exact: true }).waitFor();
     await provider.getByText("upstream_rate_limited", { exact: true }).waitFor();
+    await dialog.getByRole("columnheader", { name: "尝试次数" }).waitFor();
+    assert.equal(await provider.getByRole("cell").nth(3).textContent(), "1");
+    assert.equal(await dialog.getByRole("row").filter({ hasText: "ddgs" }).getByRole("cell").nth(3).textContent(), "0");
+    assert.equal(await dialog.getByRole("row").filter({ hasText: "legacy-fixture" }).getByRole("cell").nth(3).textContent(), "—");
     const response = await page.request.get(route);
     assert.equal(response.status(), 200);
     assert.equal(response.headers()["cache-control"], "no-store");
     const body = await response.text();
     assert.ok(!body.includes("trace-redaction-fixture"));
-    assert.deepEqual(JSON.parse(body).provider_runs, [{
-      provider_id: "searxng", status: "failed", elapsed_ms: 80, count: 0,
-      reason_codes: ["upstream_captcha", "upstream_rate_limited"],
-    }]);
+    assert.deepEqual(JSON.parse(body).provider_runs, [
+      { provider_id: "searxng", status: "failed", elapsed_ms: 80, count: 0,
+        reason_codes: ["upstream_captcha", "upstream_rate_limited"], attempts: 1 },
+      { provider_id: "ddgs", status: "circuit_open", elapsed_ms: 0, count: 0,
+        reason_codes: ["upstream_rate_limited"], attempts: 0 },
+      { provider_id: "legacy-fixture", status: "failed", elapsed_ms: 1, count: 0,
+        reason_codes: [], attempts: null },
+    ]);
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached" });
   } finally {

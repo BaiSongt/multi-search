@@ -190,6 +190,8 @@ class ProviderReason(StrEnum):
     UPSTREAM_RATE_LIMITED = "upstream_rate_limited"
     UPSTREAM_TIMEOUT = "upstream_timeout"
     UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+    LOCAL_PROVIDER_QUEUE_TIMEOUT = "local_provider_queue_timeout"
+    LOCAL_PROVIDER_RATE_LIMITED = "local_provider_rate_limited"
 
 
 class ProviderRun(BaseModel):
@@ -201,7 +203,7 @@ class ProviderRun(BaseModel):
     ]
     elapsed_ms: int
     count: int = 0
-    attempts: int = 1
+    attempts: int = Field(default=1, ge=0)
     reason_codes: list[ProviderReason] = Field(
         default_factory=list, exclude_if=lambda codes: not codes
     )

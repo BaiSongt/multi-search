@@ -13,7 +13,7 @@ from typing import Literal, Protocol
 import httpx
 
 from .contracts import Modality, ProviderReason, Scope, SearchRequest, SearchResult, Source
-from .pipeline import normalize
+from .pipeline import normalize, public_link
 from .settings import Settings
 
 _CATEGORIES = {
@@ -27,10 +27,15 @@ _DDGS_METHODS = {
     "news": ("news", "bing"),
 }
 _MAX_UPSTREAM_BYTES = 1024 * 1024
-_ENGINE_REASON_MARKERS = {
-    ProviderReason.UPSTREAM_CAPTCHA: ("captcha",),
-    ProviderReason.UPSTREAM_RATE_LIMITED: ("429", "rate limit", "too many requests"),
-    ProviderReason.UPSTREAM_TIMEOUT: ("timeout", "timed out"),
+_ENGINE_REASONS = {
+    "captcha": ProviderReason.UPSTREAM_CAPTCHA,
+    "too many requests": ProviderReason.UPSTREAM_RATE_LIMITED,
+    "rate limit": ProviderReason.UPSTREAM_RATE_LIMITED,
+    "rate limited": ProviderReason.UPSTREAM_RATE_LIMITED,
+    "429": ProviderReason.UPSTREAM_RATE_LIMITED,
+    "http 429": ProviderReason.UPSTREAM_RATE_LIMITED,
+    "timeout": ProviderReason.UPSTREAM_TIMEOUT,
+    "timed out": ProviderReason.UPSTREAM_TIMEOUT,
 }
 FailureStatus = Literal["failed", "timeout", "rate_limited"]
 LocaleFilter = Literal[
@@ -147,31 +152,24 @@ def _retry_after(header: object) -> float | None:
 
 def _engine_diagnostics(errors: list) -> tuple[FailureStatus, tuple[ProviderReason, ...]]:
     reasons: set[ProviderReason] = set()
-    common = set(_ENGINE_REASON_MARKERS) if errors else set()
     for error in errors:
         detail = (
-            error[1].casefold()
+            error[1].strip().casefold().removeprefix("suspended:").lstrip()
             if isinstance(error, (tuple, list)) and len(error) >= 2 and isinstance(error[1], str)
             else ""
         )
-        observed = {
-            reason
-            for reason, markers in _ENGINE_REASON_MARKERS.items()
-            if any(marker in detail for marker in markers)
-        }
-        common.intersection_update(observed)
-        reasons.update(observed or {ProviderReason.UPSTREAM_UNAVAILABLE})
+        reasons.add(_ENGINE_REASONS.get(detail, ProviderReason.UPSTREAM_UNAVAILABLE))
     status: FailureStatus = "failed"
-    if ProviderReason.UPSTREAM_TIMEOUT in common:
+    if reasons == {ProviderReason.UPSTREAM_TIMEOUT}:
         status = "timeout"
-    elif ProviderReason.UPSTREAM_RATE_LIMITED in common:
+    elif reasons == {ProviderReason.UPSTREAM_RATE_LIMITED}:
         status = "rate_limited"
     return status, tuple(reason for reason in ProviderReason if reason in reasons)
 
 
 class SearXNGProvider(PublicProvider):
     provider_id = "searxng"
-    cache_version = "2026.11.2-cccbc9e15"
+    cache_version = "2026.11.2-cccbc9e15-diagnostics2"
     capabilities = ProviderCapabilities(
         {
             Modality.TEXT: _SEARXNG_FILTERS,
@@ -194,7 +192,14 @@ class SearXNGProvider(PublicProvider):
     ) -> ProviderResult:
         self._validate(request, source, modality)
         category = _CATEGORIES[source, modality]
-        data = {"q": request.query, "categories": category, "format": "json", "safesearch": "1"}
+        # 上游 JSON 的引擎错误按界面语言翻译，单独固定诊断语言。
+        data = {
+            "q": request.query,
+            "categories": category,
+            "format": "json",
+            "safesearch": "1",
+            "locale": "en",
+        }
         language, region = _locale(request)
         if language:
             data["language"] = f"{language}-{region}" if region else request.language or language
@@ -261,6 +266,18 @@ class SearXNGProvider(PublicProvider):
         results, warnings = normalize(
             expected_rows, request, self.provider_id, source, modality, limit
         )
+        if rows and not results:
+            # 区分请求过滤后的空结果和上游没有提供本模态的有效候选。
+            links = (
+                (row.get("img_src") for row in expected_rows)
+                if modality == Modality.IMAGE
+                else (row.get("url") or row.get("href") for row in expected_rows)
+            )
+            if not any(public_link(link) for link in links):
+                raise ProviderFailure(
+                    failure_status,
+                    reason_codes=reason_codes or (ProviderReason.UPSTREAM_UNAVAILABLE,),
+                )
         mismatched_categories = len(expected_rows) != len(rows)
         if mismatched_categories:
             warnings.append("searxng:unexpected_result_category")
@@ -368,8 +385,16 @@ class DDGSProvider(PublicProvider):
         match payload.get("status"):
             case "timeout":
                 raise ProviderFailure("timeout")
+            case "upstream_timeout":
+                raise ProviderFailure("timeout", reason_codes=(ProviderReason.UPSTREAM_TIMEOUT,))
             case "rate_limited":
-                raise ProviderFailure("rate_limited", _retry_after(payload.get("retry_after")))
+                raise ProviderFailure(
+                    "rate_limited",
+                    _retry_after(payload.get("retry_after")),
+                    reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,),
+                )
+            case "upstream_unavailable":
+                raise ProviderFailure("failed", reason_codes=(ProviderReason.UPSTREAM_UNAVAILABLE,))
             case "success" if isinstance(payload.get("results"), list):
                 rows = payload["results"]
             case _:

@@ -14,6 +14,7 @@ from multisearch.contracts import (
     ImageSearchResult,
     Modality,
     Mode,
+    ProviderReason,
     SearchRequest,
     Source,
     TextSearchResult,
@@ -117,6 +118,67 @@ async def test_quick_falls_back_and_enforces_mode_caps():
     assert ddgs.calls[0][3] == 10
     assert "PARTIAL_RESULT" in result.warnings
     assert not search.redis.cache
+
+
+async def test_quick_allocates_full_time_to_usable_source_when_fallback_is_open():
+    ddgs = FakeProvider("ddgs")
+    searxng = FakeProvider("searxng")
+    search = service(ddgs, searxng)
+    search.states["searxng"].circuits[(Source.WEB, Modality.TEXT)].open_until = monotonic() + 10
+    result = await search.search(SearchRequest(query="clock", mode="quick"), "tenant", "test")
+    assert result.result_count == 1 and not result.partial
+    assert ddgs.calls[0][-1] > 3
+    assert not searxng.calls
+
+
+async def test_quick_falls_back_when_first_image_candidates_fail_requested_license():
+    class ImageProvider(FakeProvider):
+        pairs = frozenset({(Source.WEB, Modality.IMAGE)})
+
+        async def search(self, request, source, modality, limit, timeout_s):
+            self.calls.append((request, timeout_s))
+            url = f"https://example.org/{self.provider_id}.png"
+            return ProviderResult(
+                [
+                    ImageSearchResult(
+                        result_id=self.provider_id,
+                        title="image",
+                        url=url,
+                        canonical_url=url,
+                        source_type=source,
+                        provider_ids=[self.provider_id],
+                        retrieved_at=datetime.now(UTC),
+                        image=ImageAttribution(
+                            original_url=url,
+                            source_page_url=url,
+                            rights_status="verified_license"
+                            if self.provider_id == "searxng"
+                            else "unknown",
+                        ),
+                    )
+                ]
+            )
+
+    ddgs = ImageProvider("ddgs")
+    searxng = ImageProvider("searxng")
+    search = service(ddgs, searxng)
+    strict = await search.search(
+        SearchRequest(
+            query="image",
+            mode="quick",
+            modalities=["image"],
+            image_options={"license_policy": "verified_only"},
+            max_image_metadata_fetches=0,
+        ),
+        "tenant",
+        "strict",
+    )
+    assert [item.result_id for item in strict.results] == ["searxng"]
+    assert [run.provider_id for run in strict.provider_runs] == ["ddgs", "searxng"]
+    loose = await search.search(
+        SearchRequest(query="image", mode="quick", modalities=["image"]), "tenant", "loose"
+    )
+    assert [item.result_id for item in loose.results] == ["ddgs"] and len(searxng.calls) == 1
 
 
 async def test_failed_search_reports_provider_runs_without_recounting_replays():
@@ -666,14 +728,19 @@ async def test_timeout_cancels_adapter_and_keeps_already_completed_standard_resu
 
 async def test_upstream_retry_after_prevents_calls_during_cooldown():
     async def rate_limited():
-        raise ProviderFailure("rate_limited", retry_after=30)
+        raise ProviderFailure(
+            "rate_limited", retry_after=30, reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,)
+        )
 
     provider = FakeProvider("ddgs", handler=rate_limited)
     search = service(provider)
-    for query in ("one", "two"):
+    for query, expected_attempts in (("one", 1), ("two", 0)):
         with pytest.raises(ApiError) as failure:
             await search.search(SearchRequest(query=query), "tenant", query)
         assert failure.value.code == "PROVIDER_UNAVAILABLE"
+        assert 25_000 < failure.value.retry_after_ms <= 30_000
+        (run,) = failure.value.provider_runs
+        assert run.attempts == expected_attempts and run.reason_codes == ["upstream_rate_limited"]
     assert len(provider.calls) == 1
     assert search.provider_status()[0]["status"] == "circuit_open"
 
@@ -703,3 +770,85 @@ async def test_repeated_failures_open_circuit_and_probe_after_cooldown():
     recovered = await search.search(SearchRequest(query="five"), "tenant", "recovered")
     assert recovered.result_count == 1
     assert search.provider_status()[0]["status"] == "healthy"
+
+
+async def test_circuit_keeps_trigger_reason_despite_late_success():
+    provider = FakeProvider("ddgs")
+    search = service(provider)
+    started, resume = asyncio.Event(), asyncio.Event()
+
+    async def slow():
+        started.set()
+        await resume.wait()
+
+    async def blocked():
+        raise ProviderFailure("failed", reason_codes=(ProviderReason.UPSTREAM_CAPTCHA,))
+
+    provider.handler = slow
+    task = asyncio.create_task(search.search(SearchRequest(query="slow"), "tenant", "late"))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        provider.handler = blocked
+        for query in ("one", "two", "three"):
+            with pytest.raises(ApiError):
+                await search.search(SearchRequest(query=query), "tenant", query)
+        resume.set()
+        assert (await task).result_count == 1
+        with pytest.raises(ApiError) as failure:
+            await search.search(SearchRequest(query="skip"), "tenant", "skip")
+        (run,) = failure.value.provider_runs
+        assert (run.status, run.attempts, run.reason_codes) == (
+            "circuit_open",
+            0,
+            ["upstream_captcha"],
+        )
+        assert 0 < failure.value.retry_after_ms <= 15_000
+        assert len(provider.calls) == 4
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_local_slot_wait_is_distinct_from_upstream_timeout():
+    provider = FakeProvider("ddgs")
+    search = service(provider)
+    state = search.states["ddgs"]
+    state.slots = asyncio.Semaphore(0)
+    pair = (Source.WEB, Modality.TEXT)
+    _, run = await search._run_provider(
+        provider, SearchRequest(query="wait"), pair, 1, monotonic() + 0.05
+    )
+    assert (run.status, run.attempts, run.reason_codes) == (
+        "timeout",
+        0,
+        ["local_provider_queue_timeout"],
+    )
+    assert state.circuits[pair].failures == 0 and not provider.calls
+
+
+async def test_provider_retry_sleep_leaves_slot_available():
+    first_attempt = asyncio.Event()
+
+    async def throttle():
+        first_attempt.set()
+        raise ProviderFailure("rate_limited")
+
+    provider = FakeProvider("ddgs", handler=throttle)
+    search = service(provider)
+    search.states["ddgs"].slots = asyncio.Semaphore(1)
+    pair = (Source.WEB, Modality.TEXT)
+    initial = asyncio.create_task(
+        search._run_provider(provider, SearchRequest(query="retry"), pair, 1, monotonic() + 1)
+    )
+    try:
+        await asyncio.wait_for(first_attempt.wait(), 1)
+        provider.handler = None
+        _, prompt = await search._run_provider(
+            provider, SearchRequest(query="prompt"), pair, 1, monotonic() + 0.08
+        )
+        _, retried = await initial
+        assert (prompt.status, prompt.attempts) == ("success", 1)
+        assert (retried.status, retried.attempts) == ("success", 2)
+    finally:
+        initial.cancel()
+        await asyncio.gather(initial, return_exceptions=True)

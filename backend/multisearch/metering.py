@@ -31,12 +31,13 @@ ACTIVE_EXECUTION = """
     )
 """
 _INSERT_PROVIDER_RUNS = """
-    INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes)
-    SELECT usage.id, run.ordinal, run.provider_id, run.status, run.elapsed_ms, run.count, run.reason_codes
+    INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes, attempts)
+    SELECT usage.id, run.ordinal, run.provider_id, run.status, run.elapsed_ms, run.count,
+        run.reason_codes, run.attempts
     FROM {source} AS usage
     CROSS JOIN jsonb_to_recordset(CAST(:runs AS JSONB)) AS run(
         ordinal INTEGER, provider_id TEXT, status TEXT, elapsed_ms INTEGER, count INTEGER,
-        reason_codes TEXT[]
+        reason_codes TEXT[], attempts INTEGER
     )
 """
 
@@ -216,7 +217,9 @@ def _provider_runs_json(runs: list[ProviderRun]) -> str:
             {
                 "ordinal": index,
                 "reason_codes": [reason.value for reason in run.reason_codes],
-                **run.model_dump(include={"provider_id", "status", "elapsed_ms", "count"}),
+                **run.model_dump(
+                    include={"provider_id", "status", "elapsed_ms", "count", "attempts"}
+                ),
             }
             for index, run in enumerate(runs)
         ]

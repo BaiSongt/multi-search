@@ -171,6 +171,7 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
         "trace_id": trace_id,
         "http_status": status,
         "code": data.get("code"),
+        "retry_after_ms": data.get("retry_after_ms"),
         "partial": bool(data.get("partial")),
         "wall_ms": round((monotonic() - started) * 1000, 3),
         "provider_runs": len(runs),
@@ -273,11 +274,18 @@ def summaries(rows: list[dict], review: dict, publication_decisions: dict | None
         runs = sum(row["provider_runs"] for row in records)
         provider_statuses = defaultdict(Counter)
         provider_reason_counts = defaultdict(Counter)
+        attempted_reasons = defaultdict(Counter)
+        skipped_reasons = defaultdict(Counter)
         for row in records:
             for run in row.get("provider_outcomes", []):
                 provider_statuses[run["provider_id"]][run["status"]] += 1
                 if reasons := run.get("reason_codes"):
                     provider_reason_counts[run["provider_id"]].update(reasons)
+                    attempts = run.get("attempts")
+                    if type(attempts) is int and attempts == 0:
+                        skipped_reasons[run["provider_id"]].update(reasons)
+                    elif type(attempts) is int and attempts > 0:
+                        attempted_reasons[run["provider_id"]].update(reasons)
         result[group] = {
             "requests": len(records),
             "http_statuses": dict(Counter(row["http_status"] for row in records)),
@@ -290,6 +298,8 @@ def summaries(rows: list[dict], review: dict, publication_decisions: dict | None
             ),
             "provider_statuses": dict(provider_statuses),
             "provider_reason_counts": dict(provider_reason_counts),
+            "provider_attempted_reason_counts": dict(attempted_reasons),
+            "provider_skipped_reason_counts": dict(skipped_reasons),
             "upstream_failures_without_runs": sum(
                 row["code"] in {"PROVIDER_UNAVAILABLE", "TIME_BUDGET_EXCEEDED"}
                 and not row["provider_runs"]

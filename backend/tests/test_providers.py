@@ -48,6 +48,7 @@ async def test_searxng_uses_image_category_and_preserves_attribution():
             "categories": ["images"],
             "format": ["json"],
             "language": ["zh-HK"],
+            "locale": ["en"],
             "safesearch": ["1"],
         }
         return httpx.Response(
@@ -141,6 +142,18 @@ async def test_searxng_uses_image_category_and_preserves_attribution():
             None,
             (ProviderReason.UPSTREAM_RATE_LIMITED,),
         ),
+        (
+            httpx.Response(
+                200,
+                json={
+                    "results": [],
+                    "unresponsive_engines": [["brave", "internal error at port 4290"]],
+                },
+            ),
+            "failed",
+            None,
+            (ProviderReason.UPSTREAM_UNAVAILABLE,),
+        ),
     ],
 )
 async def test_searxng_bounded_upstream_errors(response, status, retry_after, reason_codes):
@@ -198,7 +211,59 @@ async def test_searxng_reports_mixed_engine_reasons_without_raw_details(has_cand
                 await provider.search(*args)
             assert failure.value.status == "failed"
             reason_codes = failure.value.reason_codes
-    assert reason_codes == tuple(ProviderReason)
+    assert reason_codes == (
+        ProviderReason.UPSTREAM_CAPTCHA,
+        ProviderReason.UPSTREAM_RATE_LIMITED,
+        ProviderReason.UPSTREAM_TIMEOUT,
+        ProviderReason.UPSTREAM_UNAVAILABLE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "engine_errors", "reasons"),
+    [
+        (
+            {"category": "images", "url": "https://example.org/image"},
+            [["brave", "Suspended: CAPTCHA"]],
+            (ProviderReason.UPSTREAM_CAPTCHA,),
+        ),
+        (
+            {"category": "general", "url": "http://127.0.0.1/"},
+            [],
+            (ProviderReason.UPSTREAM_UNAVAILABLE,),
+        ),
+    ],
+)
+async def test_searxng_cannot_count_invalid_candidates_as_available(row, engine_errors, reasons):
+    def upstream(_request):
+        return httpx.Response(200, json={"results": [row], "unresponsive_engines": engine_errors})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        provider = SearXNGProvider("http://searxng", client)
+        with pytest.raises(ProviderFailure, match="^failed$") as failure:
+            await provider.search(SearchRequest(query="Moon"), Source.WEB, Modality.TEXT, 10, 1)
+    assert failure.value.reason_codes == reasons
+
+
+@pytest.mark.parametrize("engine_errors", [[], [["brave", "Suspended: CAPTCHA"]]])
+async def test_searxng_preserves_empty_results_caused_by_request_filters(engine_errors):
+    def upstream(_request):
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"category": "general", "url": "https://example.org/result"}],
+                "unresponsive_engines": engine_errors,
+            },
+        )
+
+    request = SearchRequest(query="Moon", domain_allowlist=["example.net"])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        result = await SearXNGProvider("http://searxng", client).search(
+            request, Source.WEB, Modality.TEXT, 10, 1
+        )
+    assert result.results == []
+    assert result.partial is bool(engine_errors)
+    assert result.reason_codes == ((ProviderReason.UPSTREAM_CAPTCHA,) if engine_errors else ())
 
 
 def test_provider_run_serializes_only_present_sanitized_reasons():

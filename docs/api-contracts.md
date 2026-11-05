@@ -52,9 +52,11 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 ### 结果与错误
 
-`results` 按 `kind` 区分 `text` 与 `image`，图片详见 [图片归属契约](image-attribution.md)。重复来源合并时 `provider_ids` 保留各 Provider。Provider 级详情在 `provider_runs` 返回。上游部分失败时结合 `partial`、`warnings`、`provider_runs` 判断覆盖范围。文字摘要为发现线索，证据状态为 `unverified`。
+`results` 按 `kind` 区分 `text` 与 `image`，图片详见 [图片归属契约](image-attribution.md)。重复来源合并时 `provider_ids` 保留各 Provider。Provider 级详情在 `provider_runs` 返回。上游部分失败时结合 `partial`、`warnings`、`provider_runs` 判断覆盖范围。快速模式只为当前可调度的来源预留时限。严格图片许可检索会在首源缺少符合要求的候选时继续检查可用候补。文字摘要为发现线索，证据状态为 `unverified`。
 
 错误对象包含 `request_id`、`code`、`message`、`retryable`，适用时含 `retry_after_ms`。响应头 `X-Request-ID` 可用于关联当前请求。典型状态如下。
+
+`provider_runs.attempts=0` 表示没有发起来源调用。熔断跳过时的 `reason_codes` 可沿用之前触发熔断的诊断。本地并发等待和来源限额分别记录为 `local_provider_queue_timeout` 和 `local_provider_rate_limited`。所有失败来源均处于可估计的冷却时，`PROVIDER_UNAVAILABLE` 以最早可恢复来源的时间给出 `retry_after_ms`，REST 同时返回 `Retry-After`。
 
 响应头 `X-Trace-ID` 由服务端生成，与脱敏运行日志中的追踪标识对应。
 
@@ -111,7 +113,7 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 - 创建密钥时可提交最多 32 项的 `ip_allowlist`。支持 IPv4、IPv6 单地址或主机位为零的 CIDR。单地址分别规范为 `/32` 或 `/128`，重复的规范条目会被拒绝。省略或传空列表表示不限 IP。列表、创建和轮换响应返回规范化白名单，轮换继承原白名单。REST 与 MCP 对不匹配或无法验证的地址返回 `401 AUTH_REQUIRED`。 [可信代理与网关](deployment.md#api-key-的-ip-白名单)
 - `GET /api/v1/usage` 返回最近 30 个 UTC 自然日的计量、趋势和当前租户配额。开发者仅能查看自己的用量，具备权限的角色可查看本租户用量。
 - `/api/v1/admin/` 提供总览、Provider、脱敏请求、租户和审计。平台管理员可创建租户、修改租户配额与 Provider 策略。运维、审计及租户管理员按各自权限读取。
-- 平台管理员与运维可通过 `GET /api/v1/admin/requests/{id}` 读取脱敏请求及已存的来源运行记录。运维仅能读取所在租户，跨租户 ID 与不存在的 ID 均返回 404。列表支持来源、模式、模态、租户、状态、时间与追踪 ID 筛选，租户筛选按角色授权。
+- 平台管理员与运维可通过 `GET /api/v1/admin/requests/{id}` 读取脱敏请求及已存的来源运行记录。追踪返回实际尝试次数，早期记录的 `attempts` 为 `null`。运维仅能读取所在租户，跨租户 ID 与不存在的 ID 均返回 404。列表支持来源、模式、模态、租户、状态、时间与追踪 ID 筛选，租户筛选按角色授权。
 - `GET /api/v1/admin/settings/query-retention` 返回查询原文保留设置和最近十次变更，`tenant_id` 缺省时使用当前租户。平台管理员可选择目标租户，运维仅能读取当前租户。默认 `retention_hours=0`、`version=0`。
 - 平台管理员通过 `PATCH /api/v1/admin/settings/query-retention` 提交 `tenant_id`、整数 `retention_hours`（0 至 24）、`expected_version` 和 `confirm: true`。版本冲突返回 `409 SETTINGS_VERSION_CONFLICT`。实质变更写入 `settings.query_retention.update` 并使旧版本的原文立即不可查看。
 - 平台管理员通过 `POST /api/v1/admin/requests/{id}/query` 提交记录所属 `tenant_id` 和 `confirm: true`。请求需要有效会话、Origin 和 CSRF。成功返回 `query` 与 `expires_at`，并写入 `request.query.reveal`。原文缺失、到期、版本失效或与租户不符时返回 `404 RETAINED_QUERY_NOT_FOUND`。原文响应使用 `Cache-Control: no-store`。

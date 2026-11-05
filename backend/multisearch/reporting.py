@@ -177,7 +177,7 @@ class UsageReports:
                     SELECT {_REQUEST_COLUMNS}, COALESCE((
                         SELECT jsonb_agg(jsonb_build_object(
                             'provider_id', p.provider_id, 'status', p.status, 'elapsed_ms', p.elapsed_ms,
-                            'count', p.count, 'reason_codes', p.reason_codes
+                            'count', p.count, 'reason_codes', p.reason_codes, 'attempts', p.attempts
                         ) ORDER BY p.ordinal)
                         FROM provider_runs p WHERE p.usage_id = usage_events.id
                     ), '[]'::JSONB) AS provider_runs

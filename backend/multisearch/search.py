@@ -3,6 +3,7 @@ import json
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
+from math import ceil
 from random import uniform
 from time import monotonic
 from typing import TYPE_CHECKING, Literal
@@ -16,6 +17,7 @@ from .contracts import (
     ImageSearchResult,
     Modality,
     Mode,
+    ProviderReason,
     ProviderRun,
     Scope,
     SearchBudget,
@@ -79,8 +81,13 @@ class Circuit:
     failures: int = 0
     open_until: float = 0
     probing: bool = False
+    generation: int = 0
+    failure_reasons: tuple[ProviderReason, ...] = ()
     last_status: RunStatus | None = None
     last_elapsed_ms: int | None = None
+
+    def available(self, now: float, retry_until: float) -> bool:
+        return not self.probing and max(self.open_until, retry_until) <= now
 
     def health(self, now: float, retry_until: float) -> str:
         if max(self.open_until, retry_until) > now:
@@ -100,6 +107,7 @@ class ProviderState:
     )
     attempt_starts: deque[float] = field(default_factory=deque)
     retry_until: float = 0
+    retry_reasons: tuple[ProviderReason, ...] = ()
     last_status: RunStatus | None = None
     last_elapsed_ms: int | None = None
 
@@ -110,6 +118,12 @@ class ProviderState:
             return False
         self.attempt_starts.append(now)
         return True
+
+    def cooldown_reasons(self, circuit: Circuit, now: float) -> tuple[ProviderReason, ...]:
+        reasons = circuit.failure_reasons if circuit.open_until or circuit.probing else ()
+        if self.retry_until > now:
+            return tuple(sorted(set(reasons + self.retry_reasons)))
+        return reasons
 
 
 @dataclass
@@ -489,52 +503,73 @@ class SearchService:
         deadline: float,
         *,
         is_probe: bool,
-    ) -> tuple[ProviderResult, RunStatus, int]:
+    ) -> tuple[ProviderResult, RunStatus, int, float]:
         attempts = 0
+        upstream_seconds = 0.0
         result = ProviderResult([])
         status: RunStatus = "timeout"
         circuit = state.circuits[pair]
         try:
-            async with asyncio.timeout(deadline - monotonic()), state.slots:
+            async with asyncio.timeout(deadline - monotonic()):
                 for index in range(2):
-                    now = monotonic()
-                    remaining = deadline - now
-                    if remaining <= 0:
-                        break
-                    if max(circuit.open_until, state.retry_until) > now or (
-                        circuit.probing and not is_probe
-                    ):
-                        return result, "circuit_open" if not attempts else status, attempts
-                    policy = self.provider_policies[provider.provider_id]
-                    if not policy.enabled:
-                        return result, "circuit_open", attempts
-                    if not state.admit_attempt(now, policy.requests_per_minute):
-                        return result, "rate_limited", attempts
-                    attempts += 1
-                    try:
-                        candidate = await provider.search(request, *pair, limit, remaining)
-                    except ProviderFailure as error:
-                        status, retry_after = error.status, error.retry_after
-                        result.reason_codes = tuple(
-                            sorted(set(result.reason_codes + error.reason_codes))
-                        )
-                        if status == "rate_limited" and retry_after:
-                            state.retry_until = max(state.retry_until, monotonic() + retry_after)
-                    else:
-                        result = replace(
-                            candidate,
-                            reason_codes=tuple(
-                                sorted(set(result.reason_codes + candidate.reason_codes))
-                            ),
-                        )
-                        status = (
-                            "partial"
-                            if result.partial
-                            else "success"
-                            if result.results
-                            else "empty"
-                        )
-                        return result, status, attempts
+                    async with state.slots:
+                        now = monotonic()
+                        remaining = deadline - now
+                        if remaining <= 0:
+                            break
+                        if max(circuit.open_until, state.retry_until) > now or (
+                            circuit.probing and not is_probe
+                        ):
+                            if not attempts:
+                                result.reason_codes = state.cooldown_reasons(circuit, now)
+                                status = "circuit_open"
+                            return result, status, attempts, upstream_seconds
+                        policy = self.provider_policies[provider.provider_id]
+                        if not policy.enabled:
+                            return result, "circuit_open", attempts, upstream_seconds
+                        if not state.admit_attempt(now, policy.requests_per_minute):
+                            result.reason_codes = tuple(
+                                sorted(
+                                    set(
+                                        (
+                                            *result.reason_codes,
+                                            ProviderReason.LOCAL_PROVIDER_RATE_LIMITED,
+                                        )
+                                    )
+                                )
+                            )
+                            return result, "rate_limited", attempts, upstream_seconds
+                        attempts += 1
+                        try:
+                            candidate = await provider.search(request, *pair, limit, remaining)
+                        except ProviderFailure as error:
+                            status, retry_after = error.status, error.retry_after
+                            result.reason_codes = tuple(
+                                sorted(set(result.reason_codes + error.reason_codes))
+                            )
+                            if status == "rate_limited" and retry_after:
+                                retry_until = monotonic() + retry_after
+                                if retry_until >= state.retry_until:
+                                    state.retry_until = retry_until
+                                    state.retry_reasons = error.reason_codes
+                        else:
+                            result = replace(
+                                candidate,
+                                reason_codes=tuple(
+                                    sorted(set(result.reason_codes + candidate.reason_codes))
+                                ),
+                            )
+                            status = (
+                                "partial"
+                                if result.partial
+                                else "success"
+                                if result.results
+                                else "empty"
+                            )
+                        finally:
+                            upstream_seconds += monotonic() - now
+                        if status in _SUCCESS:
+                            return result, status, attempts, upstream_seconds
                     if index or status not in {"timeout", "rate_limited"}:
                         break
                     delay = max(uniform(0.1, 0.25), retry_after or 0)
@@ -543,10 +578,12 @@ class SearchService:
                     await asyncio.sleep(delay)
         except TimeoutError:
             status = "timeout"
+            if not attempts:
+                result.reason_codes = (ProviderReason.LOCAL_PROVIDER_QUEUE_TIMEOUT,)
         except Exception:
             # 适配器的异常信息可能包含完整 URL 或查询。
             status = "failed"
-        return result, status, attempts
+        return result, status, attempts, upstream_seconds
 
     async def _run_provider(
         self,
@@ -559,13 +596,16 @@ class SearchService:
         started = monotonic()
         state = self.states[provider.provider_id]
         circuit = state.circuits[pair]
-        if max(circuit.open_until, state.retry_until) > started or circuit.probing:
-            result, status, attempts = ProviderResult([]), "circuit_open", 0
+        generation = circuit.generation
+        upstream_seconds = 0.0
+        is_probe = bool(circuit.open_until)
+        if not circuit.available(started, state.retry_until):
+            result = ProviderResult([], reason_codes=state.cooldown_reasons(circuit, started))
+            status, attempts = "circuit_open", 0
         else:
-            is_probe = bool(circuit.open_until)
             circuit.probing = is_probe
             try:
-                result, status, attempts = await self._attempt(
+                result, status, attempts, upstream_seconds = await self._attempt(
                     provider,
                     state,
                     request,
@@ -577,19 +617,26 @@ class SearchService:
             finally:
                 if is_probe:
                     circuit.probing = False
-            # 调用方自设的很短时限不足以判断上游是否故障。
-            observed = attempts and (status != "timeout" or monotonic() - started >= 1)
-            # 聚合来源仍交付候选时，部分引擎失败不应触发整个来源熔断。
-            delivered = status in {"success", "empty"} or (status == "partial" and result.results)
-            if observed and delivered:
+        now = monotonic()
+        elapsed_ms = int((now - started) * 1000)
+        # 等待本地并发槽的时间不计入判断上游是否超时的采样。
+        observed = attempts > 0 and (status != "timeout" or upstream_seconds >= 1)
+        # 熔断开启或恢复前发出的迟到响应不能覆盖新状态。
+        if observed and generation == circuit.generation:
+            if status in _SUCCESS:
+                if circuit.open_until:
+                    circuit.generation += 1
                 circuit.failures = 0
                 circuit.open_until = 0
-            elif observed:
+                circuit.failure_reasons = ()
+            elif ProviderReason.LOCAL_PROVIDER_RATE_LIMITED not in result.reason_codes:
                 circuit.failures += 1
+                circuit.failure_reasons = tuple(
+                    sorted(set(circuit.failure_reasons + result.reason_codes))
+                )
                 if circuit.failures >= 3 or is_probe:
-                    circuit.open_until = monotonic() + 15
-        elapsed_ms = int((monotonic() - started) * 1000)
-        if attempts and (status != "timeout" or elapsed_ms >= 1000):
+                    circuit.open_until = now + 15
+                    circuit.generation += 1
             state.last_status = status
             state.last_elapsed_ms = elapsed_ms
             circuit.last_status = status
@@ -622,6 +669,7 @@ class SearchService:
         deadline: float,
         rules: RoutingRules,
         identifier: AcademicIdentifier | None,
+        permitted_rights: set[str] | None,
     ) -> list[tuple[ProviderResult, ProviderRun]]:
         preferred = ("ddgs", "searxng") if mode == Mode.QUICK else ("searxng", "ddgs")
         eligible = [
@@ -652,16 +700,43 @@ class SearchService:
             now = monotonic()
             if now >= deadline:
                 break
-            remaining_providers = len(eligible) - index
-            # 快速模式为每个候补来源预留可执行的时间。
-            provider_deadline = now + (deadline - now) / remaining_providers
+            remaining_providers = sum(
+                self.states[item.provider_id]
+                .circuits[pair]
+                .available(now, self.states[item.provider_id].retry_until)
+                for item in eligible[index:]
+            )
+            # 只为当前可以调度的候补来源预留时间。
+            provider_deadline = now + (deadline - now) / max(1, remaining_providers)
             result, run = await self._run_provider(
                 provider, request, pair, limit, provider_deadline
             )
             runs.append((result, run))
-            if result.results:
+            if any(
+                permitted_rights is None
+                or (
+                    isinstance(item, ImageSearchResult)
+                    and item.image.rights_status in permitted_rights
+                )
+                for item in result.results
+            ):
                 break
         return runs
+
+    def _retry_after_ms(self, runs: list[ProviderRun]) -> int | None:
+        now = monotonic()
+        retry_at = []
+        for run in runs:
+            state = self.states.get(run.provider_id)
+            if state is None:
+                return None
+            cooldown = max(
+                state.circuits[(run.source_type, run.modality)].open_until, state.retry_until
+            )
+            if cooldown <= now:
+                return None
+            retry_at.append(cooldown)
+        return ceil((min(retry_at) - now) * 1000) if retry_at else None
 
     async def _run_local_index(
         self,
@@ -726,7 +801,11 @@ class SearchService:
         partial = bool(warnings)
         strict = request.image_options and request.image_options.license_policy != "any_with_status"
         provider_request = request
+        permitted = None
         if strict:
+            permitted = {"verified_license"}
+            if request.image_options.license_policy == "declared_only":
+                permitted.add("declared_unverified")
             provider_request = request.model_copy(
                 update={
                     "image_options": request.image_options.model_copy(
@@ -751,6 +830,7 @@ class SearchService:
                 provider_deadline,
                 routing.policy,
                 identifier,
+                permitted if pair[1] == Modality.IMAGE else None,
             )
             for pair in requested
             if pair in supported and pair[0] != Source.LOCAL
@@ -774,6 +854,7 @@ class SearchService:
                 "PROVIDER_UNAVAILABLE",
                 "当前没有可用的检索来源",
                 retryable=True,
+                retry_after_ms=self._retry_after_ms(runs),
                 provider_runs=runs,
             )
         for result, run in records:
@@ -813,10 +894,7 @@ class SearchService:
             if any(not resolved.image.source_page_verified for resolved, _ in outcomes):
                 warnings.append("IMAGE_ATTRIBUTION_INCOMPLETE")
                 partial = True
-        if strict:
-            permitted = {"verified_license"}
-            if request.image_options.license_policy == "declared_only":
-                permitted.add("declared_unverified")
+        if permitted is not None:
             candidates = [
                 result
                 for result in candidates

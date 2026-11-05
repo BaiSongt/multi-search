@@ -168,6 +168,12 @@ def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):
         "count": 0,
         "reason_codes": ["upstream_rate_limited", "upstream_captcha"],
     }
+    skipped = {
+        **run,
+        "status": "circuit_open",
+        "attempts": 0,
+        "reason_codes": ["upstream_rate_limited"],
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -179,7 +185,8 @@ def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):
                 json.dumps(
                     {
                         "code": "PROVIDER_UNAVAILABLE",
-                        "provider_runs": [run],
+                        "retry_after_ms": 2000,
+                        "provider_runs": [run, skipped],
                     }
                 ).encode()
             )
@@ -231,15 +238,20 @@ def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):
     report = json.loads(output.read_bytes())
     assert report["samples"][0]["source_type"] == "academic"
     assert report["samples"][0]["trace_id"] == "a" * 32
-    assert report["samples"][0]["provider_outcomes"] == [run]
+    assert report["samples"][0]["provider_outcomes"] == [run, skipped]
+    assert report["samples"][0]["retry_after_ms"] == 2000
     summary = report["summary"]["quick:text"]
-    assert summary["provider_rate_limited_ratio"] == 1
+    assert summary["provider_rate_limited_ratio"] == 0.5
     assert summary["provider_reason_counts"] == {
+        "searxng": {"upstream_rate_limited": 2, "upstream_captcha": 1}
+    }
+    assert summary["provider_attempted_reason_counts"] == {
         "searxng": {
             "upstream_rate_limited": 1,
             "upstream_captcha": 1,
         }
     }
+    assert summary["provider_skipped_reason_counts"] == {"searxng": {"upstream_rate_limited": 1}}
     assert summary["upstream_failures_without_runs"] == 0
 
 
