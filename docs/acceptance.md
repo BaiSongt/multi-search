@@ -121,3 +121,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 学术基准的四个 DOI 和三个 arXiv ID 在 L1、L2 中均排在第一，包含旧式 ID 和明确指定的 `v2`。12 条样本的原始文献前十命中从 L1 4／12、L2 6／12 提升到 11／12、12／12。OpenAlex 另用一条真实 DOI 验证单文献接口。 [学术复核命令](operations.md#性能与质量基线)
 - 十次公网诊断样本中，四次图片检索成功，六次文字检索返回 502。按追踪 ID 确认真实失败的验证码与限流原因码已写入 PostgreSQL。完整公网质量与人工 Top-10 门禁仍待复验。
 - 升级前备份可恢复到 `0008_trace_and_cost`。派生 PostgreSQL 镜像使用原数据卷启动，保留 575 条既有用量记录并完成 `0009_provider_reasons`。独立 PostgreSQL 队列复验覆盖四租户 20 并发、吊销、租约恢复和取消。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
+
+### `0.3.0-alpha.4` 复验
+
+- 307 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 工作区回归通过。七个 Compose 服务健康，七个实际运行镜像的严重及高危扫描门禁通过。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
+- 扫描 PDF 的 Worker 夹具在实际 Alpine 容器内执行隔离解析，返回 `partial`、OCR 待处理序号和空证据。Wolfi Crawl4AI 拒绝无凭据解析请求，使用专用凭据成功提取 HTML。 [接口契约](api-contracts.md#证据与任务)
+- Chromium 使用持久化来源诊断验证追踪 ID 和学术来源筛选、验证码／限流明细、普通开发者拒绝与运维跨租户 404。 [管理接口](api-contracts.md#管理面)
+- 独立 Compose 从自定义 YAML 加载快速模式 2500 ms／5 条预算、来源优先级和图片过滤。主 Compose 的四租户 20 并发队列和 REST／MCP 研究探针通过。 [部署配置](deployment.md#部署策略基线)
+- 公网冒烟分别返回 3 条文字和 3 条图片候选，均为部分成功。三次 Mock 并发测量的 P95 为 232.004、217.194 和 197.888 ms，本轮仍未稳定达到 200 ms 的设计目标。 [性能基线](operations.md#性能与质量基线)
