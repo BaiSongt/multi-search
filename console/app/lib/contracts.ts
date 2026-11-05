@@ -273,6 +273,7 @@ type ResultBase = {
   url: string | null;
   source_type: string;
   provider_ids: string[];
+  published_at: string | null;
   retrieved_at: string;
   snippet: string | null;
   warnings: string[];

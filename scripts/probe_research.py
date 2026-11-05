@@ -1,6 +1,8 @@
-"""在启用公开学术来源和研究 Worker 的 Compose API 容器内运行端到端验收。"""
+"""在启用研究 Worker 的 Compose API 容器内运行 REST 与 MCP 端到端验收。"""
 
+import argparse
 import asyncio
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import httpx
@@ -11,25 +13,46 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from multisearch.identity import IdentityStore
+from multisearch.local_index import LocalDocument, LocalIndex
 from multisearch.settings import Settings, secret
 
 BASE = "http://127.0.0.1:8765"
 TERMINAL = {"completed", "partial", "failed", "cancelled"}
 
 
-async def main():
+async def main(*, local_date_window: bool):
     config = Settings.from_env()
     db = create_async_engine(config.database_url, hide_parameters=True)
     store = IdentityStore(db, config.key_pepper)
     keys = []
+    tenants = [f"research-probe-{uuid4().hex[:12]}" for _ in range(2)]
+    indexed = False
     try:
-        for _ in range(2):
-            tenant = f"research-probe-{uuid4().hex[:12]}"
+        for tenant in tenants:
             keys.append(
                 await store.issue(
                     tenant, f"{tenant}@example.invalid", ["research", "search:text"], 1
                 )
             )
+        if local_date_window:
+            dates = {
+                "before": "2026-03-01T07:59:59+08:00",
+                "start": "2026-03-01T08:00:00+08:00",
+                "end": "2026-04-01T07:59:59+08:00",
+                "after": "2026-04-01T08:00:00+08:00",
+                "unknown": None,
+            }
+            documents = [
+                LocalDocument(
+                    id=label,
+                    title=f"Datewindow {label}",
+                    text="Datewindow research probe.",
+                    published_at=datetime.fromisoformat(value) if value else None,
+                )
+                for label, value in dates.items()
+            ]
+            assert await LocalIndex(db).import_documents(tenants[0], documents) == len(documents)
+            indexed = True
         headers = {"Authorization": "Bearer " + keys[0]}
         async with (
             httpx.AsyncClient(base_url=BASE, headers=headers, trust_env=False, timeout=20) as api,
@@ -46,6 +69,15 @@ async def main():
                 "max_latency_ms": 40_000,
                 "idempotency_key": f"research-{uuid4().hex[:12]}",
             }
+            if local_date_window:
+                payload.update(
+                    query="datewindow",
+                    source_types=["local"],
+                    network_scope="offline",
+                    max_pages=0,
+                    max_search_rounds=1,
+                    time_range={"from": "2026-03-01", "to": "2026-03-31"},
+                )
             first = await api.post("/api/v1/research", json=payload)
             assert first.status_code == 202 and first.headers.get("X-Trace-ID")
             accepted = first.json()
@@ -78,6 +110,12 @@ async def main():
             assert state["status"] in {"completed", "partial"}, state.get("error")
             assert state["trace_id"] == accepted["trace_id"] and state["request_id"]
             assert state["result"]["results"] and state["result"]["usage"]["pages_charged"] <= 1
+            if local_date_window:
+                assert state["status"] == "completed"
+                results = state["result"]["results"]
+                assert {row["title"] for row in results} == {"Datewindow start", "Datewindow end"}
+                assert all(row["source_type"] == "local" for row in results)
+                assert state["result"]["usage"]["pages_charged"] == 0
             mcp_state = await client.call_tool("get_search_job", {"job_id": accepted["job_id"]})
             assert (
                 not mcp_state.is_error and mcp_state.structured_content["status"] == state["status"]
@@ -114,6 +152,12 @@ async def main():
                 )
                 > 0
             )
+            if local_date_window:
+                stored = await connection.scalar(
+                    text("SELECT payload FROM search_jobs WHERE id = :id"), {"id": job_id}
+                )
+                assert stored == {}, "完成任务应清除原始请求负载"
+                print("研究日期范围通过：保留 UTC 首尾日，排除范围外和无发布日期的文档")
         print(
             f"REST 与 MCP 共用研究任务：{state['status']}，"
             f"{len(state['result']['results'])} 条候选，"
@@ -122,8 +166,21 @@ async def main():
     finally:
         for key in keys:
             await store.revoke(UUID(hex=key[4:].split(".", 1)[0]))
+        if indexed:
+            async with db.begin() as connection:
+                await connection.execute(
+                    text("""
+                        DELETE FROM local_documents
+                        WHERE tenant_id = (SELECT id FROM tenants WHERE slug = :slug)
+                    """),
+                    {"slug": tenants[0]},
+                )
         await db.dispose()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--local-date-window", action="store_true", help="验收本地研究的 UTC 日期范围"
+    )
+    asyncio.run(main(local_date_window=parser.parse_args().local_date_window))

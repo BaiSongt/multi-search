@@ -93,6 +93,8 @@ function searchBody(fields: FormData, imageOnly: boolean) {
   const imageType = fields.get("image_type");
   const language = fields.get("language");
   const region = fields.get("region");
+  const dateFrom = fields.get("date_from");
+  const dateTo = fields.get("date_to");
   const latency = fields.get("max_latency_ms");
   const pages = fields.get("max_pages");
   const rounds = fields.get("max_search_rounds");
@@ -106,6 +108,7 @@ function searchBody(fields: FormData, imageOnly: boolean) {
     max_results: Number(fields.get("max_results") || "10"),
     ...(language ? { language } : {}),
     ...(region ? { region } : {}),
+    ...(dateFrom && dateTo ? { time_range: { from: dateFrom, to: dateTo } } : {}),
     ...(latency ? { max_latency_ms: Number(latency) } : {}),
     ...(pages && !offlineResearch ? { max_pages: Number(pages) } : {}),
     ...(rounds ? { max_search_rounds: Number(rounds) } : {}),
@@ -176,6 +179,11 @@ function ResultCards({ results, showImage, label = "搜索结果" }: { results: 
           ) : (
             <>
               <p className="muted">{result.snippet ?? "暂无摘要"}</p>
+              {result.source_type === "news" && <dl>
+                <dt>发布日期</dt><dd>{result.published_at
+                  ? <time dateTime={result.published_at}>{dateTime(result.published_at)}</time> : "未知"}</dd>
+                <dt>检索时间</dt><dd><time dateTime={result.retrieved_at}>{dateTime(result.retrieved_at)}</time></dd>
+              </dl>}
               {result.evidence_status === "ocr_pending" && <p className="badge warning">等待 OCR</p>}
               <ExternalLink href={result.url}>查看来源</ExternalLink>
             </>
@@ -191,6 +199,8 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
   const [modality, setModality] = useState<ModalityChoice>(imageOnly ? "image" : "text");
   const [mode, setMode] = useState("auto");
   const [source, setSource] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [draft, setDraft] = useState<ReturnType<typeof searchBody>>();
   const [request, setRequest] = useState<ReturnType<typeof searchBody>>();
   const [response, setResponse] = useState<SearchResponse>();
@@ -274,6 +284,10 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
             </select>
           </label>
           <label>最多结果<input type="number" name="max_results" defaultValue={10} required min={1} max={30} /></label>
+          <label>发布日期起点（UTC）<input name="date_from" type="date" value={dateFrom} max={dateTo || undefined}
+            required={Boolean(dateTo)} onChange={(event) => setDateFrom(event.target.value)} /></label>
+          <label>发布日期终点（UTC）<input name="date_to" type="date" value={dateTo} min={dateFrom || undefined}
+            required={Boolean(dateFrom)} onChange={(event) => setDateTo(event.target.value)} /></label>
         </div>
         {deep && <p className="muted">深度研究使用当前会话提交后台任务。{offlineResearch ? "本地研究只读取离线索引。" : "研究范围为公共网络。"}</p>}
         {modality !== "text" && (

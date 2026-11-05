@@ -173,12 +173,19 @@ async def test_iterative_rounds_refund_unspent_reservations_and_deduplicate_evid
             _response(Mode.EVIDENCE, [clone, alternative], [syndicated, source_b], attempted=2),
         ],
     )
-    request = _request(max_search_rounds=3, max_pages=3, max_results=3)
+    request = _request(
+        max_search_rounds=3,
+        max_pages=3,
+        max_results=3,
+        time_range={"from": "2026-03-01", "to": "2026-03-31"},
+    )
     claim = replace(_claim(request), request_id="client-research-id")
+    assert claim.payload["time_range"] == {"start": "2026-03-01", "end": "2026-03-31"}
     outcome = await ResearchOrchestrator(search, store).run(claim)
     assert outcome.status == JobStatus.COMPLETED
     assert [call[0].mode for call in search.calls] == [Mode.STANDARD, Mode.EVIDENCE, Mode.EVIDENCE]
     assert [call[0].max_pages for call in search.calls] == [0, 3, 2]
+    assert all(call[0].time_range == request.time_range for call in search.calls)
     assert all(call[1] == str(claim.tenant_id) for call in search.calls)
     assert [call[2] for call in search.calls] == [f"client-research-id.{n}" for n in range(1, 4)]
     result = ResearchResult.model_validate(outcome.result)

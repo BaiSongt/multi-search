@@ -42,7 +42,7 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 私网与离线检索只接受已启用的 `source_types=["local"]`，请求直接进入当前租户的本地索引。未启用或混入公网来源时返回 `SOURCE_UNAVAILABLE`，请求内容不会送往公网。
 
-`language` 和 `region` 按上游能力尽力处理。`time_range` 使用 `{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}`，保留已知发布日期在范围内的候选。`domain_allowlist` 和 `domain_denylist` 用于过滤结果来源域名。请求的域名字段不会授予访问内网的权限。
+`language` 和 `region` 按上游能力尽力处理。`time_range` 使用 `{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}`，按 UTC 日期比较，含起止两天。仅保留来源时间字段已知且位于范围内的候选，新闻使用发布日期。深度研究的各轮检索沿用提交时的日期范围。Playground 的新闻卡片分别显示发布日期和检索时间。`domain_allowlist` 和 `domain_denylist` 用于过滤结果来源域名。请求的域名字段不会授予访问内网的权限。
 
 `cache_policy=use` 默认读取可用缓存。`refresh` 重新搜索并更新可缓存响应，`bypass` 直接检索且跳过缓存写入。`local` 只支持 `use`，未命中时以部分结果返回 `LOCAL_CACHE_MISS`。缓存按租户隔离，按查询、有效路由参数和 Provider 组合区分。命中时 `cache_hit=true`，返回当前调用的请求标识。完整结果缓存期限为文字一小时、图片半小时、新闻十分钟，新闻优先于图片和普通文字。正常空结果缓存 30 秒，上游部分失败的响应跳过缓存。
 

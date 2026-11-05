@@ -121,21 +121,26 @@ async function unknownImage(page) {
 
 async function evidenceResult(page) {
   const origin = "https://example.org/evidence";
+  const published = "2026-10-21T10:00:00Z";
+  const retrieved = "2026-11-05T00:00:00Z";
   await page.route("**/gateway/capabilities", (route) => route.fulfill({ json: {
     modes: { auto: "available", evidence: "available" },
-    source_types: { web: "available" },
+    source_types: { news: "available" },
     modalities: { text: "available" },
     network_scopes: { public: "available" },
-    combinations: [{ source_type: "web", modality: "text" }],
+    combinations: [{ source_type: "news", modality: "text" }],
     limits: { modes: { evidence: { max_latency_ms: 45000, max_results: 10 } }, max_image_metadata_fetches: 0 },
   } }));
   await page.route("**/gateway/playground", async (route) => {
-    assert.equal(route.request().postDataJSON().mode, "evidence");
+    const body = route.request().postDataJSON();
+    assert.equal(body.mode, "evidence");
+    assert.deepEqual(body.source_types, ["news"]);
+    assert.deepEqual(body.time_range, { from: "2026-10-01", to: "2026-10-31" });
     await route.fulfill({ json: {
       request_id: "evidence-fixture", mode_executed: "evidence", partial: true, elapsed_ms: 100,
       result_count: 1, warnings: ["OCR_PENDING"], cache_hit: false, results: [{
         kind: "text", result_id: "scanned-fixture", title: "扫描版示例", url: "https://example.org/scanned.pdf",
-        source_type: "web", provider_ids: ["fixture"], retrieved_at: "2026-11-05T00:00:00Z",
+        source_type: "news", provider_ids: ["fixture"], published_at: published, retrieved_at: retrieved,
         snippet: null, warnings: ["OCR_PENDING"], evidence_status: "ocr_pending",
       }],
       evidence_records: [{
@@ -151,8 +156,18 @@ async function evidenceResult(page) {
   await page.goto("/console/playground");
   await page.getByLabel("关键词").fill("证据定位测试");
   await page.getByLabel("搜索深度").selectOption("evidence");
+  const dateFrom = page.getByLabel("发布日期起点（UTC）");
+  const dateTo = page.getByLabel("发布日期终点（UTC）");
+  await dateFrom.fill("2026-10-01");
+  assert.ok(await dateTo.evaluate((input) => input.validity.valueMissing));
+  await dateTo.fill("2026-09-30");
+  assert.ok(await dateTo.evaluate((input) => input.validity.rangeUnderflow));
+  await dateTo.fill("2026-10-31");
   await page.getByRole("button", { name: "搜索", exact: true }).click();
-  await page.getByRole("article").filter({ hasText: "扫描版示例" }).getByText("等待 OCR", { exact: true }).waitFor();
+  const result = page.getByRole("article").filter({ hasText: "扫描版示例" });
+  await result.getByText("等待 OCR", { exact: true }).waitFor();
+  assert.equal(await result.locator('dt:text-is("发布日期") + dd time').getAttribute("datetime"), published);
+  assert.equal(await result.locator('dt:text-is("检索时间") + dd time').getAttribute("datetime"), retrieved);
   await page.getByRole("button", { name: "证据详情" }).click();
   const dialog = page.getByRole("dialog", { name: "可定位证据" });
   await dialog.getByText("用于核对的证据摘录。").waitFor();

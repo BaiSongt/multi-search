@@ -861,7 +861,8 @@ class ResearchOrchestrator:
         return True
 
     async def run(self, claim: Claim) -> JobOutcome:
-        body = SearchRequest.model_validate(claim.payload)
+        # 持久化请求使用模型字段名，接受历史记录中的 start/end。
+        body = SearchRequest.model_validate(claim.payload, by_alias=True, by_name=True)
         budget = research_budget(body)
         plans = decompose(body, budget.max_search_rounds)
         state = _restore(claim, budget, plans)
