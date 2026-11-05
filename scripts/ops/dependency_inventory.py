@@ -7,17 +7,25 @@ from pathlib import Path
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
-PYTHON_LOCKS = ("backend/uv.lock", "deploy/crawl4ai/uv.lock")
+PYTHON_LOCKS = ("backend/uv.lock", "deploy/crawl4ai/uv.lock", "deploy/renderer/uv.lock")
 NPM_LOCK = "console/package-lock.json"
 IMAGE_FILES = (
     "compose.yml",
+    "compose.dynamic.yml",
     "backend/Dockerfile",
     "console/Dockerfile",
     "deploy/crawl4ai/Dockerfile",
     "deploy/postgres/Dockerfile",
+    "deploy/renderer/Dockerfile",
 )
-IMAGE_LINE = re.compile(r"^\s*(?:FROM\s+|image:\s*)(\S+)\s*", re.MULTILINE)
-IMAGE_REF = re.compile(r"(?P<name>\S+):(?P<tag>[^:@/]+)@sha256:(?P<digest>[a-f0-9]{64})")
+COMPOSE_IMAGE = re.compile(r"^[ \t]*image:[ \t]*(\S+)", re.MULTILINE)
+DOCKER_FROM = re.compile(
+    r"^[ \t]*FROM[ \t]+(?:--platform=\S+[ \t]+)?(\S+)(?:[ \t]+AS[ \t]+(\S+))?",
+    re.IGNORECASE | re.MULTILINE,
+)
+IMAGE_REF = re.compile(
+    r"(?P<name>(?:[^/\s]+/)*[^:@/\s]+)(?::(?P<tag>[^:@/\s]+))?@sha256:(?P<digest>[a-f0-9]{64})"
+)
 
 
 def python_components() -> list[dict]:
@@ -69,7 +77,17 @@ def image_components() -> list[dict]:
     components = []
     for filename in IMAGE_FILES:
         contents = (ROOT / filename).read_text(encoding="utf-8")
-        for image in IMAGE_LINE.findall(contents):
+        if filename.endswith("Dockerfile"):
+            aliases = {"scratch"}
+            images = []
+            for image, alias in DOCKER_FROM.findall(contents):
+                if image.casefold() not in aliases:
+                    images.append(image)
+                if alias:
+                    aliases.add(alias.casefold())
+        else:
+            images = [image.strip("\"'") for image in COMPOSE_IMAGE.findall(contents)]
+        for image in images:
             match = IMAGE_REF.fullmatch(image)
             if match is None:
                 raise ValueError(f"{filename} contains an unpinned image reference: {image}")
@@ -77,7 +95,7 @@ def image_components() -> list[dict]:
                 {
                     "type": "container",
                     "name": match["name"],
-                    "version": match["tag"],
+                    "version": match["tag"] or f"sha256:{match['digest']}",
                     "bom-ref": f"image:{image}",
                     "hashes": [{"alg": "SHA-256", "content": match["digest"]}],
                     "properties": [{"name": "multisearch:manifest", "value": filename}],

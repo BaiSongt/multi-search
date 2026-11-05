@@ -94,6 +94,17 @@ docker compose --profile fetch ps
 
 Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心跳。Crawl4AI 只在独立内部网络接受 Worker 传入的已验证 HTML，使用令牌鉴权。公开 URL 由 SafeFetcher 逐跳检查并固定目标 IP，遵守 robots 和摘录限制。解析器不接收 URL，且无需浏览器或公网访问。API 的同步 L3 默认使用静态提取。如需让同步 L3 使用隔离解析器，在启用 `fetch` 配置时设置 `CRAWL4AI_BASE_URL=http://crawl4ai:11235`。
 
+### 可选动态 HTML 渲染
+
+动态模式用于公开 HTML 内嵌脚本生成正文的场景。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。每个允许的重定向域名也需单独列入。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。
+
+```sh
+python scripts/init-secrets.py
+docker compose -f compose.yml -f compose.dynamic.yml --profile dynamic up -d --build --wait
+```
+
+Worker 通过 Unix socket 向断网 Chromium 容器传递已授权的 HTML。浏览器仅加载该响应，阻断其他资源请求。来源 CSP、原始和渲染后的 robots 摘录限制继续生效。动态镜像面向 Linux x86-64，构建使用 Docker BuildKit。宿主 Linux 需允许非特权用户命名空间，渲染器在启动时确认 Chromium 的命名空间和 Seccomp-BPF 沙箱。渲染器健康检查失败时，动态能力保持不可用。静态 L3 与动态 `fetch` 分别通过各自入口使用。 [抓取接口](api-contracts.md#证据与任务)
+
 PDF 需要匹配 MIME 和文件签名，输入上限为 1 MiB。每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。当前镜像提取 PDF 文本层，将需要 OCR 的图像型 PDF 标记为待处理。部署方可通过 OCR 契约接入获准的引擎。
 
 ## 深度研究与指标

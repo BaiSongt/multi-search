@@ -112,6 +112,8 @@ def audit(args: argparse.Namespace) -> int:
     compose = ["docker", "compose"]
     if args.project:
         compose.extend(("--project-name", args.project))
+    for file in args.compose_file:
+        compose.extend(("--file", file))
     for profile in args.profile:
         compose.extend(("--profile", profile))
     images = running_images(compose)
@@ -216,6 +218,7 @@ def audit(args: argparse.Namespace) -> int:
         "started_at": started,
         "completed_at": datetime.now(UTC).isoformat(),
         "compose_project": args.project,
+        "compose_files": args.compose_file,
         "compose_profiles": args.profile,
         "scanner": {"name": "Trivy", **version},
         "high_or_critical_findings": high_findings,
@@ -234,6 +237,7 @@ def audit(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", help="Compose 项目名称")
+    parser.add_argument("--compose-file", action="append", default=[], help="Compose 文件，可重复")
     parser.add_argument(
         "--profile", action="append", default=[], help="启用的 Compose 配置，可重复"
     )

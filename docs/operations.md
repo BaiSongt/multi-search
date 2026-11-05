@@ -93,6 +93,13 @@ docker compose --profile fetch exec -T multisearch-worker python - \
 
 HTML 默认要求 Crawl4AI 提供提取提示。可用 `--method static_html` 单独验收静态解析。探针会签发并吊销临时抓取 Key，经 REST 入队和重放，校验可定位正文、证据读取以及 PostgreSQL 中的单次用量与追踪。无正文、抓取失败或解析方法不符时返回非零状态。Worker DNS 返回非公网地址时输出策略拒绝诊断。
 
+启用动态配置后，可用 `--method browser_dom` 验收允许保留摘录、含内嵌脚本的公开测试 URL，域名须事先加入部署清单。受控回归可使用下面的探针。它使用同一隔离渲染器和临时 PostgreSQL，仅替换来源 DNS 和 HTTP 响应，覆盖来源 CSP、robots、子请求阻断、时限、证据定位和任务幂等。
+
+```sh
+docker compose -f compose.yml -f compose.dynamic.yml --profile dynamic \
+  exec -T multisearch-worker python - < scripts/probe_dynamic_fetch.py
+```
+
 ## 性能与质量基线
 
 样本包含通用知识、开发文档、新闻、照片和插画各 20 条，另有 20 条故障场景供回归设计。这些是整理好的评审候选。Top-10 有效率需要人工检查相关性、可访问性和内容匹配。 [检索样本](../scripts/ops/benchmark_cases.jsonl) · [异常场景](../scripts/ops/fault_cases.json)

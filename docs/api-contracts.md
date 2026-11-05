@@ -82,6 +82,10 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 
 `POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。
 
+`POST /api/v1/fetch` 与 MCP `web_fetch` 接受 `extraction_mode`，默认 `static`。设置 `dynamic` 时，仅对部署允许的 HTTPS 域名执行隔离渲染，重定向逐跳应用同一授权。`GET /api/v1/capabilities` 的 `fetch_dynamic` 表示配置和渲染 Worker 就绪状态。部署未授权动态抓取时返回 `MODE_UNAVAILABLE`，已授权但暂时无可用 Worker 时返回 `WORKER_UNAVAILABLE`。同一幂等标识从静态模式改为动态模式会产生冲突。
+
+动态证据使用 `extraction_method=browser_dom`、`locator.kind=rendered_html_text`。偏移和 SHA-256 基于规范化的渲染正文，`extraction_version` 记录 Chromium 和规范化器版本。标题、DOI 和发布日期使用原始响应的元数据。动态抓取适用于通过页面内嵌脚本生成内容的 UTF-8 或 ASCII HTML。依赖外部脚本或接口的页面可能返回 `FETCH_NO_EXCERPT`。来源摘录限制、实际渲染失败与时限耗尽分别作为任务错误或逐页诊断返回。
+
 抓取任务遇到图像型 PDF 时会进入 `partial` 终态，并在 `result.ocr_pending` 中返回待 OCR 的原始 URL 序号，从 0 开始。这些条目消耗抓取尝试预算，已提取页数仅统计实际生成证据的条目。当前 OCR 由外部授权适配器扩展。
 
 `POST /api/v1/research` 使用 SearchRequest，接受 `auto` 或 `deep`。同一请求也可通过 `POST /api/v1/search` 并设置 `mode=deep` 提交。REST 与 MCP 共享任务与幂等标识。研究启动只扣一次，结果记录轮次、来源、证据、页数和模型计量。恢复时保留已预留的预算，执行中断不会令预算重新计数。未知的模型用量保持未知。

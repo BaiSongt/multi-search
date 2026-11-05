@@ -27,7 +27,7 @@ docker compose exec -T multisearch-api python -m multisearch.keys issue --tenant
 
 ## 依赖清单和扫描记录
 
-以下命令生成 CycloneDX 1.6 JSON。清单涵盖 API、独立解析器和 Console 锁文件的 Python 与 npm 版本，以及 Compose 和 Dockerfile 的固定镜像摘要。元数据标记为构建前清单，包含锁文件的开发项和条件依赖。生产交付还需按实际镜像层生成 SBOM，并验证所有传递依赖的许可证与运行环境漏洞。 [CycloneDX 1.6](https://cyclonedx.org/docs/1.6/json/)
+以下命令生成 CycloneDX 1.6 JSON。清单涵盖 API、独立解析器、隔离渲染器和 Console 锁文件的 Python 与 npm 版本，以及 Compose 和 Dockerfile 的固定镜像摘要。元数据标记为构建前清单，包含锁文件的开发项和条件依赖。生产交付还需按实际镜像层生成 SBOM，并验证所有传递依赖的许可证与运行环境漏洞。 [CycloneDX 1.6](https://cyclonedx.org/docs/1.6/json/)
 
 ```sh
 python scripts/ops/dependency_inventory.py > multisearch-dependencies.cdx.json
@@ -53,6 +53,8 @@ npm audit --package-lock-only --ignore-scripts --registry=https://registry.npmjs
 ```sh
 python scripts/ops/image_security.py --profile research --output .secrets/ops/image-security-2026-11-06 --fail-on-high
 ```
+
+扫描动态配置时按启动顺序添加 `--compose-file compose.yml --compose-file compose.dynamic.yml --profile dynamic`，以包含隔离 Chromium 镜像。
 
 脚本根据运行容器的镜像 ID 和平台读取本地镜像，要求所选 Compose 配置的服务均在运行。Docker 提供平台清单摘要时，脚本将它写入 `summary.json`。各镜像的原始漏洞 JSON 和 CycloneDX SBOM 使用同一份 Trivy 漏洞数据库快照生成。发现高危或严重记录时，`--fail-on-high` 保留报告并以状态码 2 退出。状态码 1 表示扫描未完成。报告按镜像组件与漏洞组合计数，供部署方结合上游公告评估可达性。原始报告包含镜像元数据，应存放在受控目录。 [Docker 平台清单](https://docs.docker.com/reference/api/engine/version-history/) · [报告格式](https://www.trivy.dev/docs/latest/guide/configuration/reporting/)
 

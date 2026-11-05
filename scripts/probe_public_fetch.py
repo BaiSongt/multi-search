@@ -21,6 +21,7 @@ LOCATORS = {
     "static_html": "html_text",
     "crawl4ai_static": "html_text",
     "pypdf": "pdf_text",
+    "browser_dom": "rendered_html_text",
 }
 
 
@@ -93,6 +94,8 @@ async def fetch_evidence(
         "max_latency_ms": 25_000,
         "idempotency_key": f"public-fetch-{uuid4().hex[:12]}",
     }
+    if method == "browser_dom":
+        payload["extraction_mode"] = "dynamic"
     response = await api.post("/api/v1/fetch", json=payload)
     if response.status_code != 202:
         raise SystemExit(f"抓取任务入队失败，HTTP {response.status_code}")
