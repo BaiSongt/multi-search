@@ -11,9 +11,16 @@ from xml.etree import ElementTree
 
 import httpx
 
-from .contracts import Modality, Scope, SearchRequest, Source, TextSearchResult
+from .contracts import Modality, SearchRequest, Source, TextSearchResult
 from .pipeline import _id, _matches_domain, _publication_date, _text, canonical_url, public_link
-from .providers import Provider, ProviderFailure, ProviderResult, _retry_after
+from .providers import (
+    Provider,
+    ProviderCapabilities,
+    ProviderFailure,
+    ProviderFilters,
+    ProviderResult,
+    _retry_after,
+)
 
 _MAX_UPSTREAM_BYTES = 2 * 1024 * 1024
 _MAX_RESULTS = 30
@@ -156,12 +163,27 @@ class _VerticalProvider:
     spacing_seconds = 0.0
     cache_version = "1"
     identifier_kind: AcademicIdentifierKind | None = None
+    date_field: Literal["published_at", "submitted_at", "created_at"] = "published_at"
+    requires_api_key = False
     provider_id: str
     endpoint: str
 
     def __init__(self, client: httpx.AsyncClient, token: str = ""):
         self.client = client
         self.pairs = frozenset({(self.source, Modality.TEXT)})
+        self.capabilities = ProviderCapabilities(
+            {
+                Modality.TEXT: ProviderFilters(
+                    date_range="upstream_and_metadata_postfilter",
+                    date_field=self.date_field,
+                    exact_identifier_date_range=(
+                        "metadata_postfilter" if self.identifier_kind else None
+                    ),
+                )
+            },
+            requires_api_key=self.requires_api_key,
+            upstream_concurrency=1 if self.spacing_seconds else None,
+        )
         self.headers = {
             "Accept": self.accept,
             "Accept-Encoding": "identity",
@@ -254,7 +276,10 @@ class _VerticalProvider:
         limit: int,
         timeout_s: float,
     ) -> ProviderResult:
-        if request.network_scope != Scope.PUBLIC or (source, modality) not in self.pairs:
+        if (
+            request.network_scope != self.capabilities.network_scope
+            or (source, modality) not in self.pairs
+        ):
             raise ProviderFailure("failed")
         limit = max(1, min(_MAX_RESULTS, limit))
         identifier = academic_identifier(request.query) if source == Source.ACADEMIC else None
@@ -466,6 +491,7 @@ class ArxivProvider(_VerticalProvider):
     spacing_seconds = 3.0
     cache_version = "2"
     identifier_kind = "arxiv"
+    date_field = "submitted_at"
 
     def _target(self, request, limit, identifier):
         if identifier:
@@ -536,6 +562,8 @@ class GitHubProvider(_VerticalProvider):
     endpoint = "https://api.github.com/search/repositories"
     accept = "application/vnd.github+json"
     spacing_seconds = 2.0
+    date_field = "created_at"
+    requires_api_key = True
 
     def __init__(self, client: httpx.AsyncClient, token: str):
         if not token:

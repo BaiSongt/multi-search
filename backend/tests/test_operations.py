@@ -144,6 +144,46 @@ async def test_request_trace_reuses_scoped_request_permissions(role):
             assert cross_tenant.status_code == 403
 
 
+@pytest.mark.parametrize("role", list(Role))
+async def test_provider_and_quota_reports_enforce_their_distinct_scopes(role):
+    actor = _actor(role)
+    tenant_id = uuid4()
+    calls = []
+
+    class Reports:
+        async def providers(self, tenant):
+            calls.append(("providers", tenant))
+            return {"sample": {"runs": 3}}
+
+        async def quota_usage(self, tenant, limit, cursor):
+            calls.append(("quota_usage", tenant, limit, cursor))
+            return {"keys": {"items": [{"key_mask": "msk_abcd…1234"}], "next_cursor": None}}
+
+    app = _app(actor, None)
+    app.state.reports = Reports()
+    app.state.search.provider_status = lambda: [{"provider_id": "sample"}]
+    app.include_router(admin_router)
+    quota_path = f"/api/v1/admin/tenants/{tenant_id}/quota-usage"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://127.0.0.1") as client:
+        assert (
+            await client.get(quota_path, headers={"Authorization": "Bearer search-key"})
+        ).status_code == 401
+        client.cookies.set(SESSION_COOKIE, "session-only")
+        providers = await client.get("/api/v1/admin/providers")
+        quota = await client.get(quota_path, params={"limit": 1, "cursor": "test-cursor"})
+        if role == Role.PLATFORM_ADMIN:
+            assert providers.status_code == quota.status_code == 200
+            assert providers.json()["providers"][0]["usage"] == {"runs": 3}
+            assert quota.json()["keys"]["items"] == [{"key_mask": "msk_abcd…1234"}]
+            assert calls == [("providers", None), ("quota_usage", tenant_id, 1, "test-cursor")]
+        elif role == Role.OPERATIONS_ADMIN:
+            assert providers.status_code == 200 and quota.status_code == 403
+            assert calls == [("providers", actor.tenant_id)]
+        else:
+            assert providers.status_code == quota.status_code == 403
+            assert not calls
+
+
 @pytest.mark.parametrize("role", [Role.DEVELOPER, Role.AUDITOR, Role.OPERATIONS_ADMIN])
 async def test_team_permissions_are_enforced_before_queries(role, monkeypatch):
     monkeypatch.delenv("MULTISEARCH_PUBLIC_CONSOLE_URL", raising=False)

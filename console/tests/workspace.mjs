@@ -480,6 +480,14 @@ async function verifyRequestTrace(page, developer, developerSession, operations,
     assert.equal(own.status(), 200);
     assert.deepEqual((await own.json()).provider_runs, []);
 
+    const ownProviders = await operations.request.get("/gateway/admin/providers");
+    const platformProviders = await page.request.get("/gateway/admin/providers");
+    assert.equal(ownProviders.status(), 200);
+    assert.equal(platformProviders.status(), 200);
+    const searxng = (response) => response.providers.find((provider) => provider.provider_id === "searxng").usage;
+    assert.equal(searxng(await ownProviders.json()).runs, 0);
+    assert.ok(searxng(await platformProviders.json()).runs >= 1);
+
     await page.goto("/admin/requests");
     await page.getByLabel("追踪 ID", { exact: true }).fill(traceId.toUpperCase());
     await page.getByRole("combobox", { name: /^来源/ }).selectOption("academic");
@@ -514,6 +522,49 @@ async function verifyRequestTrace(page, developer, developerSession, operations,
     traceFixture(developerSession, id, traceId, cleanup);
     traceFixture(operationsSession, ownId, ownTrace, cleanup);
   }
+}
+
+async function verifyQuotaUsage(page, developer, operations, developerAccount, tenantId) {
+  const path = `/gateway/admin/tenants/${tenantId}/quota-usage`;
+  assert.equal((await developer.request.get(path)).status(), 403);
+  assert.equal((await operations.request.get(path)).status(), 403);
+  assert.equal((await page.request.get(`/gateway/admin/tenants/${randomUUID()}/quota-usage`)).status(), 404);
+  const keyResponse = await developer.request.get("/gateway/keys");
+  assert.equal(keyResponse.status(), 200);
+  const { keys } = await keyResponse.json();
+  assert.equal(keys.length, 2);
+
+  const response = await page.request.get(path, { params: { limit: 1 } });
+  assert.equal(response.status(), 200);
+  assert.equal(response.headers()["cache-control"], "no-store");
+  const report = await response.json();
+  assert.ok(report.usage.requests >= 3);
+  assert.ok(report.usage.search_requests >= 3);
+  assert.ok(report.keys.next_cursor);
+  assert.equal(report.keys.items.length, 1);
+  const cursorPayload = Buffer.from(report.keys.next_cursor, "base64url").toString("utf8");
+  for (const key of keys) assert.ok(!cursorPayload.includes(key.id));
+
+  const next = await page.request.get(path, { params: { limit: 1, cursor: report.keys.next_cursor } });
+  assert.equal(next.status(), 200);
+  const nextReport = await next.json();
+  assert.equal(nextReport.keys.next_cursor, null);
+  const rows = [...report.keys.items, ...nextReport.keys.items];
+  assert.deepEqual(rows.map((row) => row.key_mask).sort(), keys.map(({ prefix, suffix }) => `${prefix}…${suffix}`).sort());
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row).sort(), ["key_mask", "quota", "usage"]);
+    assert.equal(row.usage.search_requests, 1);
+    assert.equal(row.usage.active_executions, 0);
+  }
+
+  await page.goto("/admin/quotas");
+  await page.getByLabel("筛选租户").fill(developerAccount.tenant);
+  await page.getByRole("button", { name: "查看用量" }).click();
+  const dialog = page.getByRole("dialog", { name: `${developerAccount.tenant} 的额度用量` });
+  await dialog.getByRole("heading", { name: "租户合计" }).waitFor();
+  for (const row of rows) await dialog.getByText(row.key_mask, { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "detached" });
 }
 
 test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 120_000 }, async () => {
@@ -617,8 +668,15 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
 
     assert.deepEqual((await (await admin.request.get("/gateway/keys")).json()).keys, []);
     await adminPage.goto("/admin/providers");
-    await adminPage.getByRole("region", { name: "Provider 状态和运行指标" }).waitFor();
+    const providers = adminPage.getByRole("region", { name: "Provider 状态和运行指标" });
+    const searxng = providers.getByRole("row").filter({ hasText: "searxng" });
+    await searxng.getByText("能力详情", { exact: true }).click();
+    await searxng.getByText("适配器分页", { exact: true }).waitFor();
+    if (await searxng.getByText(/^web \/ image ·/).count()) {
+      await searxng.getByText("候选图片过滤", { exact: true }).waitFor();
+    }
     await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession);
+    await verifyQuotaUsage(adminPage, developer, operations, developerAccount, developerSession.tenant_id);
     await adminPage.goto("/admin/tenants");
     await adminPage.getByRole("button", { name: "新建租户" }).click();
     const tenant = `browser-${randomBytes(6).toString("hex")}`;

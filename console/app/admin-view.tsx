@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
+import { ProviderCapabilities } from "./provider-capabilities";
 import { callApi } from "./lib/api";
-import { quotaLabels, type Audit, type Overview, type Page, type Provider, type RequestRow, type Tenant } from "./lib/contracts";
+import { quotaLabels, type Audit, type Overview, type Page, type Provider, type RequestRow, type Tenant, type TenantQuotaUsage } from "./lib/contracts";
 import { CopyId, dateTime, Dialog, Empty, Failure, formatNumber, Loading, Pagination, Table, usePagination, useResource } from "./ui";
 import { Metrics, QuotaSummary, RequestTable, resourceMetrics, Trend } from "./usage-view";
 
@@ -155,15 +156,21 @@ export function ProvidersView({ canEdit, csrf }: { canEdit: boolean; csrf: strin
       {resource.pending && <Loading />}
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
       {rows?.length === 0 && <Empty>没有符合条件的 Provider。</Empty>}
+      {Boolean(rows?.length) && (
+        <p className="muted">已存运行指标统计{canEdit ? "所有租户" : "本租户"}。当前健康状态和 RPM 上限以单进程为单位。</p>
+      )}
       {rows && rows.length > 0 && (
         <Table caption="Provider 状态和运行指标" headers={["Provider", "状态", "来源与模态", "最近耗时", "P50 / P95", "运行 / 错误 / 限流", "优先级 / RPM", ...(canEdit ? ["操作"] : [])]}>
           {rows.map((provider) => (
             <tr key={provider.provider_id}>
               <td><CopyId value={provider.provider_id} /></td>
               <td><span className={`badge ${provider.status === "healthy" && provider.enabled ? "positive" : "warning"}`}>{provider.enabled ? provider.status : "停用"}</span></td>
-              <td>{provider.pair_health.map((pair) => (
-                <div key={`${pair.source_type}/${pair.modality}`}>{pair.source_type} / {pair.modality} · {pair.status}</div>
-              ))}</td>
+              <td>
+                {provider.pair_health.map((pair) => (
+                  <div key={`${pair.source_type}/${pair.modality}`}>{pair.source_type} / {pair.modality} · {pair.status}</div>
+                ))}
+                <ProviderCapabilities provider={provider} />
+              </td>
               <td>{formatNumber(provider.last_elapsed_ms)}{provider.last_elapsed_ms == null ? "" : " ms"}</td>
               <td>{formatNumber(provider.usage.p50_ms)} / {formatNumber(provider.usage.p95_ms)} ms</td>
               <td>{provider.usage.runs} / {provider.usage.errors} / {provider.usage.rate_limited}</td>
@@ -245,6 +252,7 @@ export function RequestsView({ showTenant }: { showTenant: boolean }) {
 export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: boolean }) {
   const [filter, setFilter] = useState("");
   const [editing, setEditing] = useState<Tenant>();
+  const [usageTenant, setUsageTenant] = useState<Tenant>();
   const [creating, setCreating] = useState(false);
   const pager = usePagination();
   const query = new URLSearchParams({ limit: "20" });
@@ -263,7 +271,7 @@ export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: b
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
       {rows?.length === 0 && <Empty>没有符合条件的租户。</Empty>}
       {rows && rows.length > 0 && (
-        <Table caption={quotas ? "租户用量与额度" : "租户列表"} headers={["租户", "状态", "请求数", ...(quotas ? ["额度上限"] : []), "操作"]}>
+        <Table caption={quotas ? "租户用量与额度" : "租户列表"} headers={["租户", "状态", "近 30 天请求数", ...(quotas ? ["额度上限"] : []), "操作"]}>
           {rows.map((tenant) => (
             <tr key={tenant.id}>
               <td><strong>{tenant.slug}</strong><br /><CopyId value={tenant.id} /></td>
@@ -273,6 +281,7 @@ export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: b
               <td>
                 <div className="actions">
                   {!quotas && <Link className="button" href={`/admin/tenants/${encodeURIComponent(tenant.id)}`}>成员与邀请</Link>}
+                  {quotas && <button type="button" onClick={() => setUsageTenant(tenant)}>查看用量</button>}
                   <button type="button" onClick={() => setEditing(tenant)}>{quotas ? "编辑额度" : "编辑状态"}</button>
                 </div>
               </td>
@@ -281,6 +290,7 @@ export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: b
         </Table>
       )}
       {resource.data && <Pagination next={resource.data.next_cursor} pager={pager} />}
+      {usageTenant && <TenantQuotaUsageDialog tenant={usageTenant} close={() => setUsageTenant(undefined)} />}
       {creating && <CreateTenant csrf={csrf} close={() => setCreating(false)} created={(tenant) => {
         setFilter(tenant.slug);
         pager.reset();
@@ -301,6 +311,56 @@ export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: b
         />
       )}
     </>
+  );
+}
+
+function TenantQuotaUsageDialog({ tenant, close }: { tenant: Tenant; close: () => void }) {
+  const pager = usePagination();
+  const query = new URLSearchParams({ limit: "20" });
+  if (pager.cursor) query.set("cursor", pager.cursor);
+  const resource = useResource<TenantQuotaUsage>(`admin/tenants/${encodeURIComponent(tenant.id)}/quota-usage?${query}`);
+  const report = resource.data;
+  return (
+    <Dialog title={`${tenant.slug} 的额度用量`} close={close}>
+      {resource.pending && <Loading />}
+      {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
+      {report && (
+        <div className="stack quota-usage-report">
+          <div className="actions">
+            <span className="muted">统计日期 {report.day.slice(0, 10)} UTC · 更新于 {dateTime(report.observed_at)}（{Intl.DateTimeFormat().resolvedOptions().timeZone}）</span>
+            <button type="button" onClick={resource.reload} disabled={resource.pending}>刷新用量</button>
+          </div>
+          <h3>租户合计</h3>
+          <p className="muted">包括 API 密钥与 Console 会话产生的用量。</p>
+          <Metrics values={[
+            ["总请求", report.usage.requests, "次"],
+            ["搜索请求", report.usage.search_requests, "次"],
+            ["图片请求", report.usage.image_requests, "次"],
+            ["图片结果", report.usage.image_results_returned, "项"],
+            ["抓取请求", report.usage.fetch_requests, "次"],
+            ["抓取页数", report.usage.pages_fetched, "页"],
+            ["当前并发", report.usage.active_executions, "个"],
+          ]} />
+          <QuotaSummary quota={report.quota} />
+          {report.keys.items.length === 0 ? <Empty>此页没有密钥。</Empty> : (
+            <Table caption="按密钥统计" headers={["密钥", "每日请求 / 额度", "搜索请求", "图片请求 / 结果", "抓取请求 / 页数", "当前并发 / 上限", "有效额度"]}>
+              {report.keys.items.map(({ key_mask, usage, quota }, index) => (
+                <tr key={`${key_mask}-${index}`}>
+                  <td><code>{key_mask}</code></td>
+                  <td>{formatNumber(usage.requests)} / {formatNumber(quota.requests_per_day)}</td>
+                  <td>{formatNumber(usage.search_requests)}</td>
+                  <td>{formatNumber(usage.image_requests)} / {formatNumber(usage.image_results_returned)}</td>
+                  <td>{formatNumber(usage.fetch_requests)} / {formatNumber(usage.pages_fetched)}</td>
+                  <td>{formatNumber(usage.active_executions)} / {formatNumber(quota.concurrency)}</td>
+                  <td><details><summary>全部额度</summary><QuotaSummary quota={quota} /></details></td>
+                </tr>
+              ))}
+            </Table>
+          )}
+          <Pagination next={report.keys.next_cursor} pager={pager} />
+        </div>
+      )}
+    </Dialog>
   );
 }
 

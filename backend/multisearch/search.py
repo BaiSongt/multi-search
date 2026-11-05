@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections import Counter, deque
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from hashlib import sha256
 from random import uniform
 from time import monotonic
@@ -31,7 +31,7 @@ from .image_attribution import ImageAttributionResolver
 from .image_source import PublicImageSourceResolver
 from .pdf_parser import OCRPending
 from .pipeline import fuse, select_results
-from .providers import Provider, ProviderFailure, ProviderResult
+from .providers import Provider, ProviderCapabilities, ProviderFailure, ProviderResult
 from .routing_policy import (
     DEFAULT_ROUTING,
     RoutingRules,
@@ -270,6 +270,14 @@ class SearchService:
         providers = []
         for provider_id, state in self.states.items():
             policy = self.provider_policies[provider_id]
+            profile = getattr(self.providers[provider_id], "capabilities", None)
+            if not isinstance(profile, ProviderCapabilities):
+                profile = None
+            upstream_limit = None
+            if profile:
+                upstream_limit = min(
+                    _PROVIDER_CONCURRENT, profile.upstream_concurrency or _PROVIDER_CONCURRENT
+                )
             pair_health = [
                 {
                     "source_type": source,
@@ -277,6 +285,11 @@ class SearchService:
                     "status": circuit.health(now, state.retry_until),
                     "last_status": circuit.last_status,
                     "last_elapsed_ms": circuit.last_elapsed_ms,
+                    "filters": (
+                        asdict(filters)
+                        if profile and (filters := profile.filters.get(kind))
+                        else None
+                    ),
                 }
                 for (source, kind), circuit in sorted(state.circuits.items())
             ]
@@ -296,7 +309,15 @@ class SearchService:
                     "requests_per_minute": policy.requests_per_minute,
                     "last_status": state.last_status,
                     "last_elapsed_ms": state.last_elapsed_ms,
-                    "network_scope": Scope.PUBLIC,
+                    "network_scope": profile.network_scope if profile else Scope.PUBLIC,
+                    "capabilities": {
+                        "source_types": sorted({source for source, _ in state.circuits}),
+                        "modalities": sorted({kind for _, kind in state.circuits}),
+                        "supports_pagination": profile.supports_pagination if profile else None,
+                        "requires_api_key": profile.requires_api_key if profile else None,
+                        "max_concurrent_requests": _PROVIDER_CONCURRENT,
+                        "max_upstream_concurrent_requests": upstream_limit,
+                    },
                     "combinations": [
                         {"source_type": source, "modality": kind}
                         for source, kind in sorted(state.circuits)

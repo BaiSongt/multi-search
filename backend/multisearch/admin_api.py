@@ -109,7 +109,8 @@ async def overview(request: Request, actor: SessionUser):
 @router.get("/admin/providers")
 async def providers(request: Request, actor: SessionUser):
     _require(actor.role, OPS)
-    metrics = await request.app.state.reports.providers()
+    tenant = None if actor.role == Role.PLATFORM_ADMIN else actor.tenant_id
+    metrics = await request.app.state.reports.providers(tenant)
     return {
         "providers": [
             {
@@ -318,6 +319,18 @@ async def update_tenant(tenant_id: UUID, body: TenantPatch, request: Request, ac
             after={"enabled": body.enabled},
         )
     return {"id": tenant_id, "enabled": body.enabled}
+
+
+@router.get("/admin/tenants/{tenant_id}/quota-usage")
+async def quota_usage(
+    tenant_id: UUID,
+    request: Request,
+    actor: SessionUser,
+    limit: PageSize = 20,
+    cursor: Cursor = None,
+):
+    _require(actor.role, {Role.PLATFORM_ADMIN})
+    return await request.app.state.reports.quota_usage(tenant_id, limit, cursor)
 
 
 @router.patch("/admin/tenants/{tenant_id}/quota")

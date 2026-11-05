@@ -171,6 +171,7 @@ dd { margin: 0; }
 details > summary { cursor: pointer; color: var(--accent); }
 details > summary + * { margin-top: 6px; }
 dialog { max-height: 90dvh; width: min(540px, calc(100vw - 22px)); padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+dialog:has(.quota-usage-report) { width: min(1040px, calc(100vw - 22px)); }
 dialog::backdrop { background: #10172575; }
 .dialog-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--line); }
 .dialog-body { padding: 10px; }

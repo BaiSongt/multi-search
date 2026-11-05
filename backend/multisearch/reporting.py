@@ -7,7 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from .errors import ApiError
-from .policy import tenant_quota
+from .metering import ACTIVE_EXECUTION
+from .policy import effective_quota, tenant_quota
 
 _SCOPE = """
     (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant)
@@ -32,6 +33,18 @@ _REQUEST_COLUMNS = f"""
          THEN 'REQUEST_INTERRUPTED' ELSE code END AS code,
     elapsed_ms, cache_hit, text_results_returned, image_results_returned, created_at
 """
+_QUOTA_METRICS = {
+    "requests": "COUNT(*) FILTER (WHERE created_at >= :day)",
+    "search_requests": "COUNT(*) FILTER (WHERE created_at >= :day AND operation = 'search')",
+    "image_requests": "COUNT(*) FILTER (WHERE created_at >= :day AND 'image' = ANY(modalities))",
+    "image_results_returned": "COALESCE(SUM(image_results_returned) FILTER (WHERE created_at >= :day), 0)",
+    "fetch_requests": "COUNT(*) FILTER (WHERE created_at >= :day AND operation = 'fetch')",
+    "pages_fetched": "COALESCE(SUM(pages_fetched) FILTER (WHERE created_at >= :day), 0)",
+    "active_executions": f"COUNT(*) FILTER (WHERE {ACTIVE_EXECUTION})",
+}
+_QUOTA_METRIC_SELECT = ", ".join(
+    f"{expression} AS {name}" for name, expression in _QUOTA_METRICS.items()
+)
 
 
 @dataclass(frozen=True)
@@ -216,20 +229,96 @@ class UsageReports:
                 "active_jobs": active_jobs,
             }
 
-    async def providers(self) -> dict[str, dict]:
+    async def providers(self, tenant_id: UUID | None) -> dict[str, dict]:
         async with self.db.connect() as connection:
             result = await connection.execute(
                 text("""
-                SELECT provider_id, COUNT(*) AS runs,
-                    COUNT(*) FILTER (WHERE status NOT IN ('success','empty')) AS errors,
-                    COUNT(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
-                    percentile_cont(0.5) WITHIN GROUP (ORDER BY elapsed_ms) AS p50_ms,
-                    percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed_ms) AS p95_ms
-                FROM provider_runs WHERE created_at >= :start GROUP BY provider_id
+                SELECT p.provider_id, COUNT(*) AS runs,
+                    COUNT(*) FILTER (WHERE p.status NOT IN ('success','empty')) AS errors,
+                    COUNT(*) FILTER (WHERE p.status = 'rate_limited') AS rate_limited,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY p.elapsed_ms) AS p50_ms,
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY p.elapsed_ms) AS p95_ms
+                FROM provider_runs p JOIN usage_events u ON p.usage_id = u.id
+                WHERE p.created_at >= :start AND (CAST(:tenant AS UUID) IS NULL OR u.tenant_id = :tenant)
+                GROUP BY p.provider_id
             """),
-                {"start": _start()},
+                {"start": _start(), "tenant": tenant_id},
             )
             return {row["provider_id"]: dict(row) for row in result.mappings()}
+
+    async def quota_usage(self, tenant_id: UUID, limit: int, cursor: str | None) -> dict:
+        now = datetime.now(UTC)
+        day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        after, identifier = _read_cursor(cursor)
+        async with self.db.connect() as connection:
+            result = await connection.execute(
+                text(f"""
+                WITH key_page AS MATERIALIZED (
+                    SELECT id, prefix, suffix, limits, created_at, fingerprint AS cursor_id
+                    FROM api_keys
+                    CROSS JOIN LATERAL (SELECT CAST(left(encode(sha256(uuid_send(id)), 'hex'), 32) AS UUID) AS fingerprint) masked
+                    WHERE tenant_id = :tenant
+                        AND (CAST(:after AS TIMESTAMPTZ) IS NULL OR (created_at, fingerprint) < (:after, :id))
+                    ORDER BY created_at DESC, fingerprint DESC LIMIT :limit
+                ), observed AS MATERIALIZED (
+                    SELECT GROUPING(key_id) AS all_keys, key_id, {_QUOTA_METRIC_SELECT}
+                    FROM usage_events WHERE tenant_id = :tenant AND (created_at >= :day OR status = 'running')
+                    GROUP BY GROUPING SETS ((), (key_id))
+                )
+                SELECT COALESCE(q.quota, '{{}}'::JSONB) AS quota,
+                    (SELECT to_jsonb(o) - 'all_keys' - 'key_id' FROM observed o WHERE o.all_keys = 1) AS usage,
+                    COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                        'key_mask', k.prefix || '…' || k.suffix,
+                        'created_at', k.created_at, 'cursor_id', k.cursor_id, 'limits', k.limits,
+                        'usage', to_jsonb(o) - 'all_keys' - 'key_id'
+                    ) ORDER BY k.created_at DESC, k.cursor_id DESC)
+                    FROM key_page k LEFT JOIN observed o ON o.all_keys = 0 AND o.key_id = k.id), '[]'::JSONB) AS keys
+                FROM tenants t LEFT JOIN quota_policies q ON q.tenant_id = t.id
+                WHERE t.id = :tenant
+                """),
+                {
+                    "tenant": tenant_id,
+                    "day": day,
+                    "now": now,
+                    "after": after,
+                    "id": identifier,
+                    "limit": limit + 1,
+                },
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                raise ApiError(404, "TENANT_NOT_FOUND", "租户不存在")
+
+        quota = effective_quota(row["quota"], self.max_concurrent)
+        keys = row["keys"]
+        boundary = keys[limit - 1] if len(keys) > limit else None
+        return {
+            "day": day,
+            "observed_at": now,
+            "quota": quota,
+            "usage": row["usage"],
+            "keys": {
+                "items": [
+                    {
+                        "key_mask": key["key_mask"],
+                        "usage": key["usage"] or dict.fromkeys(_QUOTA_METRICS, 0),
+                        "quota": {
+                            name: min(cap, key["limits"].get(name, cap))
+                            for name, cap in quota.items()
+                        },
+                    }
+                    for key in keys[:limit]
+                ],
+                "next_cursor": _cursor(
+                    {
+                        "created_at": datetime.fromisoformat(boundary["created_at"]),
+                        "id": boundary["cursor_id"],
+                    }
+                )
+                if boundary
+                else None,
+            },
+        }
 
     async def images(
         self,

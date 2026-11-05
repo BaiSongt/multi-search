@@ -3,7 +3,8 @@ import json
 import math
 import os
 import sys
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -32,6 +33,48 @@ _ENGINE_REASON_MARKERS = {
     ProviderReason.UPSTREAM_TIMEOUT: ("timeout", "timed out"),
 }
 FailureStatus = Literal["failed", "timeout", "rate_limited"]
+LocaleFilter = Literal[
+    "unsupported", "upstream_best_effort", "upstream_requires_language", "upstream_requires_region"
+]
+DateFilter = Literal["metadata_postfilter", "upstream_and_metadata_postfilter"]
+
+
+@dataclass(frozen=True)
+class ImageFilterCapabilities:
+    upstream: tuple[str, ...] = ()
+    candidate_postfilter: tuple[str, ...] = (
+        "min_width",
+        "min_height",
+        "orientation",
+        "source_page_required",
+    )
+    platform_postfilter: tuple[str, ...] = ("license_policy",)
+    unsupported: tuple[str, ...] = ("image_type",)
+
+
+@dataclass(frozen=True)
+class ProviderFilters:
+    language: LocaleFilter = "unsupported"
+    region: LocaleFilter = "unsupported"
+    date_range: DateFilter = "metadata_postfilter"
+    date_field: Literal["published_at", "submitted_at", "created_at"] = "published_at"
+    exact_identifier_date_range: DateFilter | None = None
+    image_options: ImageFilterCapabilities | None = None
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    filters: Mapping[Modality, ProviderFilters]
+    network_scope: Scope = Scope.PUBLIC
+    requires_api_key: bool = False
+    supports_pagination: bool = False
+    upstream_concurrency: int | None = None
+
+
+_IMAGE_FILTERS = ImageFilterCapabilities()
+_SEARXNG_FILTERS = ProviderFilters(
+    language="upstream_best_effort", region="upstream_requires_language"
+)
 
 
 @dataclass
@@ -129,6 +172,12 @@ def _engine_diagnostics(errors: list) -> tuple[FailureStatus, tuple[ProviderReas
 class SearXNGProvider(PublicProvider):
     provider_id = "searxng"
     cache_version = "2026.11.2-cccbc9e15"
+    capabilities = ProviderCapabilities(
+        {
+            Modality.TEXT: _SEARXNG_FILTERS,
+            Modality.IMAGE: replace(_SEARXNG_FILTERS, image_options=_IMAGE_FILTERS),
+        }
+    )
 
     def __init__(self, base_url: str, client: httpx.AsyncClient, enable_images: bool = True):
         super().__init__(enable_images)
@@ -238,6 +287,14 @@ class SearXNGProvider(PublicProvider):
 class DDGSProvider(PublicProvider):
     provider_id = "ddgs"
     cache_version = "9.16.1-ddg-bing"
+    capabilities = ProviderCapabilities(
+        {
+            Modality.TEXT: ProviderFilters(
+                language="upstream_requires_region", region="upstream_best_effort"
+            ),
+            Modality.IMAGE: ProviderFilters(image_options=_IMAGE_FILTERS),
+        }
+    )
 
     async def search(
         self,

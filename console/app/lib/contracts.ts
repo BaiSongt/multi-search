@@ -153,6 +153,22 @@ export type Overview = {
   active_jobs: number | null;
 };
 
+type ProviderLocaleFilter = "unsupported" | "upstream_best_effort" | "upstream_requires_language" | "upstream_requires_region";
+type ProviderDateFilter = "metadata_postfilter" | "upstream_and_metadata_postfilter";
+export type ProviderFilters = {
+  language: ProviderLocaleFilter;
+  region: ProviderLocaleFilter;
+  date_range: ProviderDateFilter;
+  date_field: "published_at" | "submitted_at" | "created_at";
+  exact_identifier_date_range: ProviderDateFilter | null;
+  image_options: {
+    upstream: string[];
+    candidate_postfilter: string[];
+    platform_postfilter: string[];
+    unsupported: string[];
+  } | null;
+};
+
 export type Provider = {
   provider_id: string;
   enabled: boolean;
@@ -162,11 +178,37 @@ export type Provider = {
   last_status: string | null;
   last_elapsed_ms: number | null;
   network_scope: string;
-  pair_health: { source_type: string; modality: string; status: string; last_elapsed_ms: number | null }[];
+  pair_health: { source_type: string; modality: string; status: string; last_elapsed_ms: number | null; filters?: ProviderFilters | null }[];
+  capabilities?: {
+    source_types: string[];
+    modalities: string[];
+    supports_pagination: boolean | null;
+    requires_api_key: boolean | null;
+    max_concurrent_requests: number;
+    max_upstream_concurrent_requests: number | null;
+  };
   usage: { runs: number; errors: number; rate_limited: number; p50_ms: number | null; p95_ms: number | null };
 };
 
 export type Tenant = { id: string; slug: string; enabled: boolean; quota: Record<string, number>; search_requests: number };
+
+type QuotaUsageCounts = {
+  requests: number;
+  search_requests: number;
+  image_requests: number;
+  image_results_returned: number;
+  fetch_requests: number;
+  pages_fetched: number;
+  active_executions: number;
+};
+
+export type TenantQuotaUsage = {
+  day: string;
+  observed_at: string;
+  quota: Record<string, number>;
+  usage: QuotaUsageCounts;
+  keys: Page<{ key_mask: string; usage: QuotaUsageCounts; quota: Record<string, number> }>;
+};
 export type Audit = { id: string; tenant_id: string; actor_type: string; actor_id: string | null; action: string; target_id: string | null; details: unknown; occurred_at: string };
 export type Page<T> = { items: T[]; next_cursor: string | null };
 
