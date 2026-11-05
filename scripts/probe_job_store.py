@@ -18,6 +18,7 @@ from multisearch.identity import IdentityStore
 from multisearch.job_contracts import JobKind, JobStatus
 from multisearch.job_store import JobOutcome, JobStore
 from multisearch.metering import SearchPrincipal, UsageMeter
+from multisearch.policy import lock_tenant
 from multisearch.settings import Settings
 from multisearch.worker import Worker
 
@@ -182,6 +183,52 @@ async def exercise_concurrency(db, pepper: str):
     assert stopped.status == JobStatus.FAILED and stopped.error.code == "JOB_PRINCIPAL_INACTIVE"
 
 
+async def exercise_admission_snapshot(db, pepper: str):
+    identity = IdentityStore(db, pepper)
+    tenant = "meter-lock-probe"
+    raw = await identity.issue(tenant, f"{tenant}@example.invalid", ["search:text"], 1)
+    key = await identity.authenticate(raw)
+    principal = SearchPrincipal(key.tenant_id, key.owner_id, key.key_id, "key")
+    meter = UsageMeter(db, 20)
+    body = SearchRequest(query="synthetic lock snapshot fixture")
+    pending = None
+    try:
+        async with db.begin() as connection:
+            await lock_tenant(connection, key.tenant_id)
+            pending = asyncio.create_task(
+                meter.reserve(principal, body, Mode.QUICK, uuid4().hex, 30_000)
+            )
+            async with asyncio.timeout(5):
+                while not await connection.scalar(  # noqa: ASYNC110 - 查询 PostgreSQL 进程间锁状态。
+                    text("""
+                    SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                        AND NOT granted AND database = (
+                            SELECT oid FROM pg_database WHERE datname = current_database()
+                        ))
+                """)
+                ):
+                    await asyncio.sleep(0.01)
+            await connection.execute(
+                text("UPDATE api_keys SET expires_at = statement_timestamp() WHERE id = :key"),
+                {"key": key.key_id},
+            )
+        try:
+            await asyncio.wait_for(pending, 5)
+        except ApiError as error:
+            assert error.status == 401 and error.code == "AUTH_REQUIRED"
+        else:
+            raise AssertionError("等待租户锁时过期的 Key 被错误接纳")
+        async with db.connect() as connection:
+            assert not await connection.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM usage_events WHERE key_id = :key)"),
+                {"key": key.key_id},
+            )
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
 async def main():
     settings = Settings.from_env()
     name = "multisearch_job_probe_" + uuid4().hex[:16]
@@ -206,8 +253,10 @@ async def main():
         )
         await exercise(scratch, settings.key_pepper)
         await exercise_concurrency(scratch, settings.key_pepper)
+        await exercise_admission_snapshot(scratch, settings.key_pepper)
         print("通过独立 PostgreSQL 的队列幂等、租户隔离、租约恢复、旧 Worker 隔离、取消与证据计量")
         print("通过四租户 20 并发队列、同步请求与任务共享并发额度、撤销后阻止领取")
+        print("通过租户锁等待期间 Key 过期，身份复核后拒绝且不计量")
     finally:
         await scratch.dispose()
         try:

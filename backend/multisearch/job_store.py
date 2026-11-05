@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from uuid import UUID, uuid4
@@ -91,8 +91,7 @@ class JobStore:
         fingerprint = sha256(fingerprint_input.encode()).hexdigest()
         async with self.db.begin() as connection:
             await lock_tenant(connection, principal.tenant_id)
-            now = (await connection.scalar(text("SELECT clock_timestamp()"))).astimezone(UTC)
-            await assert_principal(connection, principal, now)
+            now = await assert_principal(connection, principal)
             params = {
                 "tenant": principal.tenant_id,
                 "owner": principal.user_id,
@@ -306,12 +305,11 @@ class JobStore:
         )
         if row is None:
             return None
-        now = (await connection.scalar(text("SELECT clock_timestamp()"))).astimezone(UTC)
         principal = SearchPrincipal(
             tenant_id, row["owner_id"], row["principal_id"], row["principal_kind"], row["limits"]
         )
         try:
-            await assert_principal(connection, principal, now)
+            now = await assert_principal(connection, principal)
         except ApiError:
             await connection.execute(
                 text("""

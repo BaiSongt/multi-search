@@ -1,6 +1,7 @@
 import json
 import logging
-from asyncio import CancelledError, create_task, shield, sleep
+from asyncio import CancelledError, Lock, create_task, shield, sleep
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from .contracts import Modality, Mode, ProviderRun, SearchRequest, SearchResponse
 from .errors import ApiError
 from .evidence_store import save_search_metadata
-from .policy import lock_tenant, tenant_quota
+from .policy import effective_quota, lock_tenant
 from .tracing import trace_id
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,15 @@ ACTIVE_EXECUTION = """
             SELECT 1 FROM search_jobs j WHERE j.id = usage_events.id
                 AND j.status IN ('running','cancelling') AND j.lease_expires_at > :now
         ))
+    )
+"""
+_INSERT_PROVIDER_RUNS = """
+    INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes)
+    SELECT usage.id, run.ordinal, run.provider_id, run.status, run.elapsed_ms, run.count, run.reason_codes
+    FROM {source} AS usage
+    CROSS JOIN jsonb_to_recordset(CAST(:runs AS JSONB)) AS run(
+        ordinal INTEGER, provider_id TEXT, status TEXT, elapsed_ms INTEGER, count INTEGER,
+        reason_codes TEXT[]
     )
 """
 
@@ -44,6 +54,12 @@ class Admission:
     event_id: UUID
     idempotent: bool
     replay: dict | None = None
+
+
+@dataclass
+class _AdmissionGate:
+    lock: Lock = field(default_factory=Lock)
+    users: int = 0
 
 
 def _request_hash(body: SearchRequest) -> str:
@@ -82,42 +98,40 @@ def _quota_checks(
     return checks
 
 
-async def assert_principal(
-    connection: AsyncConnection, principal: SearchPrincipal, now: datetime
-) -> None:
+async def assert_principal(connection: AsyncConnection, principal: SearchPrincipal) -> datetime:
     params = {
         "tenant": principal.tenant_id,
         "user_id": principal.user_id,
         "key_id": principal.principal_id if principal.kind == "key" else None,
-        "now": now,
     }
     if principal.kind == "key":
-        valid = await connection.scalar(
-            text("""
+        active = """
             SELECT k.id FROM api_keys k
             JOIN tenants t ON t.id = k.tenant_id
             JOIN users u ON u.id = k.owner_id
             JOIN memberships m ON (m.tenant_id, m.user_id) = (k.tenant_id, k.owner_id)
             WHERE k.tenant_id = :tenant AND k.id = :key_id AND k.owner_id = :user_id
-              AND k.revoked_at IS NULL AND coalesce(k.rotation_expires_at, k.expires_at) > :now
+              AND k.revoked_at IS NULL
+              AND coalesce(k.rotation_expires_at, k.expires_at) > statement_timestamp()
               AND t.enabled AND u.enabled AND m.enabled
-        """),
-            params,
-        )
-        if valid is None:
-            raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
+        """
     else:
-        active = await connection.scalar(
-            text("""
+        active = """
             SELECT m.user_id FROM memberships m
             JOIN tenants t ON t.id = m.tenant_id JOIN users u ON u.id = m.user_id
             WHERE m.tenant_id = :tenant AND m.user_id = :user_id AND m.enabled
               AND t.enabled AND u.enabled
-        """),
-            params,
+        """
+    row = (
+        await connection.execute(
+            text(f"SELECT statement_timestamp() AS now, EXISTS ({active}) AS active"), params
         )
-        if active is None:
-            raise ApiError(403, "FORBIDDEN", "租户或账户已停用")
+    ).one()
+    if not row.active:
+        if principal.kind == "key":
+            raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
+        raise ApiError(403, "FORBIDDEN", "租户或账户已停用")
+    return row.now.astimezone(UTC)
 
 
 async def enforce_quota(
@@ -137,7 +151,6 @@ async def enforce_quota(
         "now": now,
     }
     params["mode"] = mode.value
-    quota = await tenant_quota(connection, principal.tenant_id, max_concurrent)
     checks = _quota_checks(modalities, mode, now, include_concurrency=include_concurrency)
     columns = []
     for index, (condition, _) in enumerate(checks.values()):
@@ -150,7 +163,8 @@ async def enforce_quota(
         (
             await connection.execute(
                 text(f"""
-        SELECT {", ".join(columns)} FROM usage_events
+        SELECT (SELECT quota FROM quota_policies WHERE tenant_id = :tenant) AS overrides,
+            {", ".join(columns)} FROM usage_events
         WHERE tenant_id = :tenant AND (
             created_at >= :month OR (status = 'running' AND reservation_expires_at > :now)
         )
@@ -161,6 +175,7 @@ async def enforce_quota(
         .mappings()
         .one()
     )
+    quota = effective_quota(counts["overrides"] or {}, max_concurrent)
     for index, (name, (_, until)) in enumerate(checks.items()):
         key_limit = principal.limits.get(name)
         if counts[f"t{index}"] >= quota[name] or (
@@ -189,19 +204,21 @@ async def save_provider_runs(
     if not runs:
         return
     await connection.execute(
-        text("""
-        INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes)
-        VALUES (:usage_id, :ordinal, :provider_id, :status, :elapsed_ms, :count, :reason_codes)
-    """),
+        text(_INSERT_PROVIDER_RUNS.format(source="(SELECT CAST(:usage_id AS UUID) AS id)")),
+        {"usage_id": usage_id, "runs": _provider_runs_json(runs)},
+    )
+
+
+def _provider_runs_json(runs: list[ProviderRun]) -> str:
+    return json.dumps(
         [
             {
-                "usage_id": usage_id,
                 "ordinal": index,
                 "reason_codes": [reason.value for reason in run.reason_codes],
                 **run.model_dump(include={"provider_id", "status", "elapsed_ms", "count"}),
             }
             for index, run in enumerate(runs)
-        ],
+        ]
     )
 
 
@@ -211,13 +228,13 @@ async def has_concurrency_slot(
     now: datetime,
     max_concurrent: int,
 ) -> bool:
-    quota = await tenant_quota(connection, principal.tenant_id, max_concurrent)
     key_limit = principal.limits.get("concurrency")
     result = (
         (
             await connection.execute(
                 text(f"""
-        SELECT count(*) AS tenant_count,
+        SELECT (SELECT quota FROM quota_policies WHERE tenant_id = :tenant) AS overrides,
+            count(*) AS tenant_count,
             count(*) FILTER (WHERE key_id = CAST(:key_id AS UUID)) AS key_count
         FROM usage_events WHERE tenant_id = :tenant AND ({ACTIVE_EXECUTION})
     """),
@@ -231,6 +248,7 @@ async def has_concurrency_slot(
         .mappings()
         .one()
     )
+    quota = effective_quota(result["overrides"] or {}, max_concurrent)
     return result["tenant_count"] < quota["concurrency"] and (
         key_limit is None or result["key_count"] < key_limit
     )
@@ -240,6 +258,21 @@ class UsageMeter:
     def __init__(self, db: AsyncEngine, max_concurrent: int):
         self.db = db
         self.max_concurrent = max_concurrent
+        self._admission_gates: dict[UUID, _AdmissionGate] = {}
+
+    @asynccontextmanager
+    async def _tenant_admission(self, tenant_id: UUID) -> AsyncIterator[AsyncConnection]:
+        gate = self._admission_gates.setdefault(tenant_id, _AdmissionGate())
+        gate.users += 1
+        try:
+            # 本进程的同租户等待者先排队，再占用数据库连接。
+            async with gate.lock, self.db.begin() as connection:
+                await lock_tenant(connection, tenant_id)
+                yield connection
+        finally:
+            gate.users -= 1
+            if not gate.users:
+                del self._admission_gates[tenant_id]
 
     async def purge_expired_replays(self) -> None:
         async with self.db.begin() as connection:
@@ -293,12 +326,9 @@ class UsageMeter:
             "modalities": [value.value for value in body.modalities],
             "source_types": [value.value for value in body.source_types],
         }
-        async with self.db.begin() as connection:
-            # 同租户的额度检查和入账使用同一事务锁，多 API 实例也不会超扣。
-            await lock_tenant(connection, principal.tenant_id)
-            now = (await connection.scalar(text("SELECT clock_timestamp()"))).astimezone(UTC)
+        async with self._tenant_admission(principal.tenant_id) as connection:
+            now = await assert_principal(connection, principal)
             params["now"] = now
-            await assert_principal(connection, principal, now)
             if idem is not None:
                 await connection.execute(
                     text("""
@@ -346,6 +376,10 @@ class UsageMeter:
             event_id = uuid4()
             await connection.execute(
                 text("""
+                WITH last_used AS (
+                    UPDATE api_keys SET last_used_at = :now
+                    WHERE id = :key_id AND tenant_id = :tenant
+                )
                 INSERT INTO usage_events (
                     id, tenant_id, principal_kind, principal_id, user_id, key_id, request_id, trace_id,
                     idempotency_key, idempotency_until, request_hash, mode, modalities, source_types,
@@ -364,13 +398,6 @@ class UsageMeter:
                     "lease": now + timedelta(milliseconds=max_latency_ms + 5000),
                 },
             )
-            if principal.kind == "key":
-                await connection.execute(
-                    text("""
-                    UPDATE api_keys SET last_used_at = :now WHERE id = :key_id AND tenant_id = :tenant
-                """),
-                    params,
-                )
             return Admission(event_id, bool(idem))
 
     async def finish(
@@ -401,14 +428,19 @@ class UsageMeter:
             }
         async with self.db.begin() as connection:
             results = response.results if response else []
+            runs = response.provider_runs if response else error.provider_runs if error else []
+            insert_runs = _INSERT_PROVIDER_RUNS.format(source="finished")
             updated = await connection.scalar(
-                text("""
-                UPDATE usage_events SET status = :status, code = :code, elapsed_ms = :elapsed_ms,
-                    cache_hit = :cache_hit, text_results_returned = :text_count,
-                    image_results_returned = :image_count, image_sources_present = :source_count,
-                    pages_fetched = :pages, llm_tokens = :tokens, replay_payload = CAST(:replay AS JSONB)
-                WHERE id = :id AND status = 'running'
-                RETURNING id
+                text(f"""
+                WITH finished AS (
+                    UPDATE usage_events SET status = :status, code = :code, elapsed_ms = :elapsed_ms,
+                        cache_hit = :cache_hit, text_results_returned = :text_count,
+                        image_results_returned = :image_count, image_sources_present = :source_count,
+                        pages_fetched = :pages, llm_tokens = :tokens, replay_payload = CAST(:replay AS JSONB)
+                    WHERE id = :id AND status = 'running'
+                    RETURNING id
+                ), recorded AS ({insert_runs})
+                SELECT id FROM finished
             """),
                 {
                     "id": admission.event_id,
@@ -425,13 +457,11 @@ class UsageMeter:
                     "pages": response.budget.pages_fetched if response else 0,
                     "tokens": response.budget.llm_tokens if response else 0,
                     "replay": json.dumps(replay, ensure_ascii=False) if replay else None,
+                    "runs": _provider_runs_json(runs),
                 },
             )
             if updated is not None and response is not None:
-                await save_provider_runs(connection, admission.event_id, response.provider_runs)
                 await save_search_metadata(connection, admission.event_id, response)
-            elif updated is not None and error is not None:
-                await save_provider_runs(connection, admission.event_id, error.provider_runs)
 
     async def cancel(self, admission: Admission) -> None:
         await shield(
