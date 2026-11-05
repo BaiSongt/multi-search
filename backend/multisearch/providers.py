@@ -1,0 +1,295 @@
+import asyncio
+import json
+import math
+import os
+import sys
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from typing import Literal, Protocol
+
+import httpx
+
+from .contracts import Modality, Scope, SearchRequest, SearchResult, Source
+from .pipeline import normalize
+from .settings import Settings
+
+_CATEGORIES = {
+    (Source.WEB, Modality.TEXT): "general",
+    (Source.WEB, Modality.IMAGE): "images",
+    (Source.NEWS, Modality.TEXT): "news",
+}
+_DDGS_METHODS = {
+    "general": ("text", "duckduckgo"),
+    "images": ("images", "bing"),
+    "news": ("news", "bing"),
+}
+_MAX_UPSTREAM_BYTES = 1024 * 1024
+FailureStatus = Literal["failed", "timeout", "rate_limited"]
+
+
+@dataclass
+class ProviderResult:
+    results: list[SearchResult]
+    warnings: list[str] = field(default_factory=list)
+    partial: bool = False
+
+
+class ProviderFailure(Exception):
+    def __init__(self, status: FailureStatus, retry_after: float | None = None):
+        self.status = status
+        self.retry_after = retry_after
+        super().__init__(status)
+
+
+class Provider(Protocol):
+    provider_id: str
+    pairs: frozenset[tuple[Source, Modality]]
+
+    async def search(
+        self,
+        request: SearchRequest,
+        source: Source,
+        modality: Modality,
+        limit: int,
+        timeout_s: float,
+    ) -> ProviderResult: ...
+
+
+class PublicProvider:
+    def __init__(self, enable_images: bool = True):
+        self.pairs = frozenset(
+            pair for pair in _CATEGORIES if enable_images or pair[1] == Modality.TEXT
+        )
+
+    def _validate(self, request: SearchRequest, source: Source, modality: Modality) -> None:
+        if request.network_scope != Scope.PUBLIC or (source, modality) not in self.pairs:
+            raise ProviderFailure("failed")
+
+
+def _locale(request: SearchRequest) -> tuple[str | None, str | None]:
+    parts = (request.language or "").split("-")
+    language = parts[0].lower() or None
+    language_region = parts[-1].upper() if len(parts) > 1 and len(parts[-1]) == 2 else None
+    return language, request.region or language_region
+
+
+def _retry_after(header: object) -> float | None:
+    if not isinstance(header, str) or not header:
+        return None
+    try:
+        if len(header) <= 10 and header.isascii() and header.isdecimal():
+            return float(header)
+        target = parsedate_to_datetime(header)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        return max(0.0, (target - datetime.now(UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _engine_failure(errors: list) -> FailureStatus:
+    codes = [
+        error[1].casefold()
+        for error in errors
+        if isinstance(error, (tuple, list)) and len(error) >= 2 and isinstance(error[1], str)
+    ]
+    if len(codes) == len(errors):
+        if all("timeout" in code or "timed out" in code for code in codes):
+            return "timeout"
+        if all(
+            "429" in code or "rate limit" in code or "too many requests" in code for code in codes
+        ):
+            return "rate_limited"
+    return "failed"
+
+
+class SearXNGProvider(PublicProvider):
+    provider_id = "searxng"
+    cache_version = "2026.11.2-cccbc9e15"
+
+    def __init__(self, base_url: str, client: httpx.AsyncClient, enable_images: bool = True):
+        super().__init__(enable_images)
+        self._url = f"{base_url.rstrip('/')}/search"
+        self._client = client
+
+    async def search(
+        self,
+        request: SearchRequest,
+        source: Source,
+        modality: Modality,
+        limit: int,
+        timeout_s: float,
+    ) -> ProviderResult:
+        self._validate(request, source, modality)
+        category = _CATEGORIES[source, modality]
+        data = {"q": request.query, "categories": category, "format": "json", "safesearch": "1"}
+        language, region = _locale(request)
+        if language:
+            data["language"] = f"{language}-{region}" if region else request.language or language
+        try:
+            async with (
+                asyncio.timeout(timeout_s),
+                self._client.stream(
+                    "POST",
+                    self._url,
+                    data=data,
+                    timeout=timeout_s,
+                    follow_redirects=False,
+                    headers={"Accept": "application/json", "Accept-Encoding": "identity"},
+                ) as response,
+            ):
+                if response.status_code == 429:
+                    raise ProviderFailure(
+                        "rate_limited", _retry_after(response.headers.get("retry-after"))
+                    )
+                if response.status_code in {408, 504}:
+                    raise ProviderFailure("timeout")
+                if (
+                    response.status_code != 200
+                    or response.headers.get("content-encoding", "identity").lower() != "identity"
+                ):
+                    raise ProviderFailure("failed")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > _MAX_UPSTREAM_BYTES:
+                        raise ProviderFailure("failed")
+                    body.extend(chunk)
+            payload = json.loads(body)
+        except (TimeoutError, httpx.TimeoutException) as error:
+            raise ProviderFailure("timeout") from error
+        except (httpx.HTTPError, RecursionError, ValueError) as error:
+            raise ProviderFailure("failed") from error
+        if not isinstance(payload, dict) or not isinstance(rows := payload.get("results"), list):
+            raise ProviderFailure("failed")
+        unavailable = payload.get("unresponsive_engines", [])
+        if not isinstance(unavailable, list):
+            raise ProviderFailure("failed")
+        if unavailable and not rows:
+            raise ProviderFailure(_engine_failure(unavailable))
+        expected_rows = [
+            row
+            for row in rows
+            if isinstance(row, dict) and row.get("category") in (None, "", category)
+        ]
+        results, warnings = normalize(
+            expected_rows, request, self.provider_id, source, modality, limit
+        )
+        mismatched_categories = len(expected_rows) != len(rows)
+        if mismatched_categories:
+            warnings.append("searxng:unexpected_result_category")
+        if unavailable:
+            warnings.append(f"searxng:unresponsive_engines:{len(unavailable)}")
+        if region and not language:
+            warnings.append("searxng:region_requires_language")
+        elif language:
+            warnings.append("searxng:locale_best_effort")
+        if (
+            modality == Modality.IMAGE
+            and request.image_options
+            and request.image_options.image_type
+        ):
+            warnings.append("searxng:image_type_unsupported")
+        return ProviderResult(results, warnings, partial=bool(unavailable) or mismatched_categories)
+
+
+class DDGSProvider(PublicProvider):
+    provider_id = "ddgs"
+    cache_version = "9.16.1-ddg-bing"
+
+    async def search(
+        self,
+        request: SearchRequest,
+        source: Source,
+        modality: Modality,
+        limit: int,
+        timeout_s: float,
+    ) -> ProviderResult:
+        self._validate(request, source, modality)
+        method, engine = _DDGS_METHODS[_CATEGORIES[source, modality]]
+        language, region = _locale(request)
+        if region == "GB" and engine == "duckduckgo":
+            region = "UK"
+        args = {
+            "method": method,
+            "backend": engine,
+            "query": request.query,
+            "max_results": limit,
+            "region": f"{region.lower()}-{language or 'en'}" if region else "us-en",
+            "timeout": max(1, math.ceil(timeout_s)),
+        }
+        warnings = []
+        if request.language or request.region:
+            if modality == Modality.IMAGE:
+                warnings.append("ddgs:locale_unsupported")
+            elif not region and language != "en":
+                warnings.append("ddgs:locale_requires_region")
+            else:
+                warnings.append("ddgs:locale_best_effort")
+        if (
+            modality == Modality.IMAGE
+            and request.image_options
+            and request.image_options.image_type
+        ):
+            warnings.append("ddgs:image_type_unsupported")
+        # 子进程仅接收解释器运行所需的环境变量，不继承应用密钥和代理设置。
+        env = {
+            key: os.environ[key]
+            for key in ("PATH", "SYSTEMROOT", "TMP", "TEMP")
+            if key in os.environ
+        }
+        try:
+            async with asyncio.timeout(timeout_s):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    str(Path(__file__).with_name("ddgs_child.py")),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                )
+                try:
+                    output, _ = await process.communicate(json.dumps(args).encode("utf-8"))
+                finally:
+                    if process.returncode is None:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        await process.communicate()
+            if process.returncode or len(output) > _MAX_UPSTREAM_BYTES:
+                raise ProviderFailure("failed")
+            payload = json.loads(output)
+        except TimeoutError as error:
+            raise ProviderFailure("timeout") from error
+        except (OSError, RecursionError, ValueError) as error:
+            raise ProviderFailure("failed") from error
+        if not isinstance(payload, dict):
+            raise ProviderFailure("failed")
+        match payload.get("status"):
+            case "timeout":
+                raise ProviderFailure("timeout")
+            case "rate_limited":
+                raise ProviderFailure("rate_limited", _retry_after(payload.get("retry_after")))
+            case "success" if isinstance(payload.get("results"), list):
+                rows = payload["results"]
+            case _:
+                raise ProviderFailure("failed")
+        results, result_warnings = normalize(
+            rows,
+            request,
+            self.provider_id,
+            source,
+            modality,
+            limit,
+            ddgs_engine=engine,
+        )
+        return ProviderResult(results, warnings + result_warnings)
+
+
+def create_providers(config: Settings, client: httpx.AsyncClient) -> list[Provider]:
+    providers: list[Provider] = [SearXNGProvider(config.searxng_url, client, config.enable_images)]
+    if config.enable_ddgs:
+        providers.append(DDGSProvider(config.enable_images))
+    return providers

@@ -4,9 +4,10 @@ use_default_settings:
       - duckduckgo
       - duckduckgo images
       - duckduckgo news
-      - bing
       - bing images
       - bing news
+      - brave
+      - wikipedia
 
 server:
   limiter: false
@@ -21,3 +22,7 @@ search:
 outgoing:
   request_timeout: 3.0
   max_request_timeout: 4.0
+
+engines:
+  - name: wikipedia
+    display_type: [list]
