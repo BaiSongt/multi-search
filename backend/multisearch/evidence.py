@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -20,11 +21,13 @@ from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
 from .pdf_parser import PDF_EXTRACTION_VERSION, OCRPending, PdfParser
+from .render_resources import MAX_RESOURCE_BUNDLE_BYTES, MAX_RESOURCE_BYTES, ResourceSpec
 from .safe_fetch import FetchedPage, FetchError, SafeFetcher, snippet_limit
 from .tracing import trace_event
 
 if TYPE_CHECKING:
     from .dynamic_renderer import DynamicRenderer
+    from .render_resources import FetchedResource
 
 _MAX_EXCERPT = 512
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
@@ -81,6 +84,7 @@ _BLOCKED_FETCH_CODES = {
     "FETCH_ROBOTS_DENIED",
     "FETCH_ROBOTS_UNAVAILABLE",
     "FETCH_RENDER_POLICY_UNSUPPORTED",
+    "FETCH_RESOURCE_REDIRECT",
     "FETCH_SITE_RESTRICTED",
 }
 
@@ -254,6 +258,7 @@ class EvidenceBuilder:
         record_attempt: Callable[[str | None, FetchStatus], None] | None = None,
         renderer: DynamicRenderer | None = None,
         dynamic_hosts: frozenset[str] = frozenset(),
+        dynamic_resources: Mapping[str, tuple[ResourceSpec, ...]] | None = None,
     ):
         self.fetcher = fetcher
         self.parser = parser
@@ -261,6 +266,7 @@ class EvidenceBuilder:
         self.record_attempt = record_attempt
         self.renderer = renderer
         self.dynamic_hosts = dynamic_hosts
+        self.dynamic_resources = dict(dynamic_resources or {})
 
     async def extract(
         self,
@@ -293,7 +299,15 @@ class EvidenceBuilder:
                 domain_denylist=domain_denylist,
                 authorized_hosts=self.dynamic_hosts if dynamic else None,
             )
-            evidence = await self._extract_page(page, deadline, result_id, query, dynamic=dynamic)
+            evidence = await self._extract_page(
+                page,
+                deadline,
+                result_id,
+                query,
+                dynamic=dynamic,
+                domain_allowlist=domain_allowlist,
+                domain_denylist=domain_denylist,
+            )
         except OCRPending as error:
             error_code = error.code
             status = "ocr_pending"
@@ -332,10 +346,14 @@ class EvidenceBuilder:
         query: str | None,
         *,
         dynamic: bool,
+        domain_allowlist: Sequence[str],
+        domain_denylist: Sequence[str],
     ) -> EvidenceRecord:
         warnings: list[str] = []
         hints: tuple[str, ...] = ()
         render_version = None
+        bundle_sha = None
+        resource_limit = None
         if dynamic and page.content_type != "text/html":
             raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染仅支持 HTML")
         if page.content_type == "application/pdf":
@@ -357,7 +375,9 @@ class EvidenceBuilder:
             metadata, meta_limit = _html_metadata(document)
             kind = "html_text"
             if dynamic:
-                document, render_version = await self._render_document(page, deadline)
+                document, render_version, bundle_sha, resource_limit = await self._render_document(
+                    page, deadline, domain_allowlist, domain_denylist
+                )
                 _, rendered_limit = _html_metadata(document)
                 if rendered_limit is not None:
                     meta_limit = (
@@ -381,7 +401,9 @@ class EvidenceBuilder:
             metadata, meta_limit = {}, None
             kind = "plain_text"
         excerpt_limit = min(
-            value for value in (_MAX_EXCERPT, page.max_snippet, meta_limit) if value is not None
+            value
+            for value in (_MAX_EXCERPT, page.max_snippet, meta_limit, resource_limit)
+            if value is not None
         )
         excerpt, locator, text_sha, selected = _content(blocks, kind, query, excerpt_limit, hints)
         if monotonic() >= deadline:
@@ -394,6 +416,8 @@ class EvidenceBuilder:
             method = "browser_dom"
             extraction_version = f"{render_version}+normalizer.{STATIC_EXTRACTION_VERSION}"
             identity += f"\nrender:{extraction_version}"
+            if bundle_sha is not None:
+                identity += f"\nbundle:{bundle_sha}"
         elif locator.kind == "pdf_text":
             method, extraction_version = "pypdf", PDF_EXTRACTION_VERSION
         elif selected:
@@ -419,12 +443,17 @@ class EvidenceBuilder:
             content_sha256=text_sha,
             extraction_method=method,
             extraction_version=extraction_version,
+            render_bundle_sha256=bundle_sha,
             warnings=warnings,
         )
 
     async def _render_document(
-        self, page: FetchedPage, deadline: float
-    ) -> tuple[html.HtmlElement, str]:
+        self,
+        page: FetchedPage,
+        deadline: float,
+        domain_allowlist: Sequence[str],
+        domain_denylist: Sequence[str],
+    ) -> tuple[html.HtmlElement, str, str | None, int | None]:
         assert self.renderer is not None
         source_csp = ", ".join(
             value
@@ -446,10 +475,65 @@ class EvidenceBuilder:
             raise FetchError(
                 415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染需要有效的 UTF-8 HTML"
             ) from None
-        rendered = await self.renderer.render(
-            raw_html, timeout_s=deadline - monotonic(), source_csp=source_csp or None
+        resources = await self._prefetch_resources(
+            page.url, deadline, domain_allowlist, domain_denylist
         )
+        bundle_sha = None
+        resource_limit = None
+        if resources:
+            rendered = await self.renderer.render_bundle(
+                page.url,
+                raw_html,
+                resources,
+                timeout_s=deadline - monotonic(),
+                source_csp=source_csp or None,
+            )
+            inputs = [
+                (
+                    asset.url,
+                    asset.kind,
+                    asset.content_type,
+                    sha256(asset.body.encode("utf-8")).hexdigest(),
+                )
+                for asset in sorted(resources, key=lambda asset: asset.url)
+            ]
+            bundle_sha = sha256(
+                json.dumps(inputs, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            resource_limit = min(
+                (asset.max_snippet for asset in resources if asset.max_snippet is not None),
+                default=None,
+            )
+        else:
+            rendered = await self.renderer.render(
+                raw_html, timeout_s=deadline - monotonic(), source_csp=source_csp or None
+            )
         if rendered is None:
             raise FetchError(503, "FETCH_RENDER_UNAVAILABLE", "动态渲染暂不可用", retryable=True)
         snapshot = replace(page, body=rendered.html.encode("utf-8"), charset="utf-8")
-        return parse_static_html(snapshot), rendered.version
+        return parse_static_html(snapshot), rendered.version, bundle_sha, resource_limit
+
+    async def _prefetch_resources(
+        self,
+        page_url: str,
+        deadline: float,
+        domain_allowlist: Sequence[str],
+        domain_denylist: Sequence[str],
+    ) -> list[FetchedResource]:
+        remaining_bytes = MAX_RESOURCE_BUNDLE_BYTES
+        resources = []
+        for spec in self.dynamic_resources.get(page_url, ()):
+            if remaining_bytes <= 0:
+                raise FetchError(413, "FETCH_BODY_TOO_LARGE", "动态资源总响应超过上限")
+            asset = await self.fetcher.fetch_resource(
+                spec,
+                page_url=page_url,
+                timeout_s=deadline - monotonic(),
+                authorized_hosts=self.dynamic_hosts,
+                domain_allowlist=domain_allowlist,
+                domain_denylist=domain_denylist,
+                max_body_bytes=min(MAX_RESOURCE_BYTES, remaining_bytes),
+            )
+            remaining_bytes -= len(asset.body.encode("utf-8"))
+            resources.append(asset)
+        return resources

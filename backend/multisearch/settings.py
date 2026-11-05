@@ -2,9 +2,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from .deployment_policy import DeploymentPolicy, load_deployment_policy
+from .render_resources import ResourceSpec, parse_resource_manifest
 from .safe_fetch import FetchError, validate_fetch_url
 
 _DYNAMIC_DOMAIN = re.compile(
@@ -66,6 +67,9 @@ class Settings:
     dynamic_fetch_domains: frozenset[str] = frozenset()
     enable_dynamic_fetch: bool = False
     renderer_token: str = field(default="", repr=False)
+    dynamic_fetch_resources: dict[str, tuple[ResourceSpec, ...]] = field(
+        default_factory=dict, repr=False
+    )
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,6 +106,11 @@ class Settings:
             bool(dynamic_domains)
             and os.getenv("MULTISEARCH_ENABLE_DYNAMIC_FETCH", "false").lower() == "true"
         )
+        dynamic_resources = parse_resource_manifest(
+            os.getenv("MULTISEARCH_DYNAMIC_FETCH_RESOURCES", "")
+        )
+        if any(urlsplit(page).hostname not in dynamic_domains for page in dynamic_resources):
+            raise ValueError("动态资源清单的页面主机须在 MULTISEARCH_DYNAMIC_FETCH_DOMAINS 中")
         return cls(
             database_url=database_url,
             redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
@@ -135,4 +144,5 @@ class Settings:
             dynamic_fetch_domains=dynamic_domains,
             enable_dynamic_fetch=dynamic_enabled,
             renderer_token=secret("MULTISEARCH_RENDERER_TOKEN") if dynamic_enabled else "",
+            dynamic_fetch_resources=dynamic_resources,
         )

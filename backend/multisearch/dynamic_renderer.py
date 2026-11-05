@@ -3,20 +3,29 @@
 import asyncio
 import json
 import re
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
 
+from .render_resources import (
+    MAX_RESOURCE_BUNDLE_BYTES,
+    MAX_RESOURCE_BYTES,
+    MAX_RESOURCES_PER_PAGE,
+    FetchedResource,
+)
 from .safe_fetch import FetchError
 
 _SOCKET = "/run/multisearch-renderer/render.sock"
 _BASE = "http://renderer"
 _MAX_HTML_BYTES = 1024 * 1024
+_MAX_BUNDLE_WIRE_BYTES = 10 * _MAX_HTML_BYTES
 _MAX_RESPONSE_BYTES = 6 * _MAX_HTML_BYTES
 _MAX_RENDER_SECONDS = 8.0
 _READY_SECONDS = 0.5
 _VERSION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.+-]{0,63}")
+_CSP = re.compile(r"[\x20-\x7e]{1,4096}")
 HEARTBEAT_KEY = "multisearch:worker:fetch_dynamic"
 
 
@@ -65,24 +74,76 @@ class DynamicRenderer:
     async def render(
         self, html: str, *, timeout_s: float, source_csp: str | None = None
     ) -> RenderedHTML | None:
-        if not timeout_s > 0:
-            raise FetchError(504, "TIME_BUDGET_EXCEEDED", "动态正文提取时限已耗尽", retryable=True)
-        headers = {**self._headers, "Content-Type": "text/html; charset=utf-8"}
+        headers = {"Content-Type": "text/html; charset=utf-8"}
         if source_csp is not None:
-            if re.fullmatch(r"[\x20-\x7e]{1,4096}", source_csp) is None:
+            if _CSP.fullmatch(source_csp) is None:
                 return None
             headers["X-MultiSearch-Source-CSP"] = source_csp
         try:
             data = html.encode("utf-8")
-            if not data or len(data) > _MAX_HTML_BYTES:
+        except UnicodeError:
+            return None
+        if not data or len(data) > _MAX_HTML_BYTES:
+            return None
+        return await self._submit("/render", data, headers, timeout_s)
+
+    async def render_bundle(
+        self,
+        url: str,
+        html: str,
+        resources: Sequence[FetchedResource],
+        *,
+        timeout_s: float,
+        source_csp: str | None = None,
+    ) -> RenderedHTML | None:
+        if not 1 <= len(resources) <= MAX_RESOURCES_PER_PAGE:
+            return None
+        if source_csp is not None and _CSP.fullmatch(source_csp) is None:
+            return None
+        try:
+            sizes = [len(resource.body.encode("utf-8")) for resource in resources]
+            if (
+                not 0 < len(html.encode("utf-8")) <= _MAX_HTML_BYTES
+                or max(sizes) > MAX_RESOURCE_BYTES
+                or sum(sizes) > MAX_RESOURCE_BUNDLE_BYTES
+            ):
                 return None
+            payload = {
+                "url": url,
+                "html": html,
+                "source_csp": source_csp,
+                "resources": [
+                    {
+                        "url": resource.url,
+                        "kind": resource.kind,
+                        "content_type": resource.content_type,
+                        "body": resource.body,
+                    }
+                    for resource in resources
+                ],
+            }
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except UnicodeError:
+            return None
+        if len(data) > _MAX_BUNDLE_WIRE_BYTES:
+            return None
+        return await self._submit(
+            "/render-bundle", data, {"Content-Type": "application/json"}, timeout_s
+        )
+
+    async def _submit(
+        self, endpoint: str, data: bytes, headers: dict[str, str], timeout_s: float
+    ) -> RenderedHTML | None:
+        if not timeout_s > 0:
+            raise FetchError(504, "TIME_BUDGET_EXCEEDED", "动态正文提取时限已耗尽", retryable=True)
+        try:
             async with (
                 asyncio.timeout(min(timeout_s, _MAX_RENDER_SECONDS)),
                 self._client.stream(
                     "POST",
-                    _BASE + "/render",
+                    _BASE + endpoint,
                     content=data,
-                    headers=headers,
+                    headers={**self._headers, **headers},
                     follow_redirects=False,
                 ) as response,
             ):

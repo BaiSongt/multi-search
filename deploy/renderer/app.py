@@ -11,7 +11,9 @@ import socket
 import stat
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import uvicorn
 from playwright.async_api import Browser, Error, async_playwright
@@ -21,6 +23,10 @@ SOCKET = Path("/run/multisearch-renderer/render.sock")
 ORIGIN = "https://multisearch-render.invalid/"
 MAX_HTML = 1024 * 1024
 MAX_WIRE = 6 * MAX_HTML
+MAX_BUNDLE_WIRE = 10 * 1024 * 1024
+MAX_ASSETS = 8
+MAX_ASSET = 256 * 1024
+MAX_ASSET_TOTAL = 512 * 1024
 RENDER_SECONDS = 5
 SETTLE_SECONDS = 0.2
 CHROMIUM = "/usr/bin/chromium"
@@ -30,6 +36,112 @@ CSP = (
     "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-src 'none'; "
     "connect-src 'none'; worker-src 'none'; object-src 'none'"
 )
+BUNDLE_CSP = (
+    "sandbox allow-scripts allow-same-origin; default-src 'none'; script-src 'self' 'unsafe-inline'; "
+    "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-src 'none'; "
+    "connect-src 'self'; worker-src 'none'; object-src 'none'"
+)
+ASSET_TYPES = {
+    "script": (frozenset({"text/javascript", "application/javascript"}), frozenset({"script"})),
+    "json": (frozenset({"application/json"}), frozenset({"fetch", "xhr"})),
+}
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+BLOCKED_REQUEST_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", "range"})
+
+
+@dataclass(frozen=True)
+class Asset:
+    content_type: str
+    body: str
+    request_types: frozenset[str]
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    url: str
+    html: str
+    source_csp: str | None
+    assets: dict[str, Asset]
+
+
+def canonical_host(url: str) -> str:
+    if not isinstance(url, str) or not re.fullmatch(r"[!-~]{1,4096}", url) or "\\" in url:
+        raise ValueError("快照 URL 无效")
+    parts = urlsplit(url)
+    host = parts.hostname
+    if (
+        parts.scheme != "https"
+        or not host
+        or parts.netloc != host
+        or len(host) > 253
+        or not parts.path.startswith("/")
+        or url != urlunsplit(("https", host, parts.path, parts.query, ""))
+    ):
+        raise ValueError("快照 URL 无效")
+    labels = host.split(".")
+    if (
+        len(labels) < 2
+        or not labels[-1][:1].isalpha()
+        or not all(DNS_LABEL.fullmatch(label) for label in labels)
+    ):
+        raise ValueError("快照域名无效")
+    return host
+
+
+def distinct_keys(pairs: list[tuple]) -> dict:
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError("快照包含重复字段")
+    return value
+
+
+def parse_bundle(raw: bytes) -> Snapshot:
+    data = json.loads(raw.decode("utf-8"), object_pairs_hook=distinct_keys)
+    if not isinstance(data, dict) or data.keys() != {"url", "html", "source_csp", "resources"}:
+        raise ValueError("快照字段无效")
+    host = canonical_host(data["url"])
+    body, policy, resources = data["html"], data["source_csp"], data["resources"]
+    if not isinstance(body, str) or not body or not isinstance(resources, list) or not resources:
+        raise ValueError("快照正文或资源无效")
+    if len(body.encode()) > MAX_HTML or len(resources) > MAX_ASSETS:
+        raise OverflowError
+    if policy is not None and (
+        not isinstance(policy, str) or not re.fullmatch(r"[ -~]{1,4096}", policy)
+    ):
+        raise ValueError("快照 CSP 无效")
+    assets: dict[str, Asset] = {}
+    total_size = 0
+    for resource in resources:
+        if not isinstance(resource, dict) or resource.keys() != {
+            "url",
+            "kind",
+            "content_type",
+            "body",
+        }:
+            raise ValueError("资源字段无效")
+        url, kind, content_type, text = (
+            resource["url"],
+            resource["kind"],
+            resource["content_type"],
+            resource["body"],
+        )
+        if (
+            canonical_host(url) != host
+            or url == data["url"]
+            or url in assets
+            or not isinstance(kind, str)
+            or kind not in ASSET_TYPES
+            or not isinstance(content_type, str)
+            or content_type not in ASSET_TYPES[kind][0]
+            or not isinstance(text, str)
+        ):
+            raise ValueError("资源地址或类型无效")
+        size = len(text.encode())
+        total_size += size
+        if size > MAX_ASSET or total_size > MAX_ASSET_TOTAL:
+            raise OverflowError
+        assets[url] = Asset(content_type, text, ASSET_TYPES[kind][1])
+    return Snapshot(data["url"], body, policy, assets)
 
 
 def token() -> bytes:
@@ -56,14 +168,14 @@ async def reply(send, status: int, document: dict) -> None:
     await send({"type": "http.response.body", "body": data})
 
 
-async def read_body(receive) -> bytes | None:
+async def read_body(receive, limit: int) -> bytes | None:
     body = bytearray()
     while True:
         event = await receive()
         if event["type"] == "http.disconnect":
             return None
         chunk = event.get("body", b"")
-        if len(body) + len(chunk) > MAX_HTML:
+        if len(body) + len(chunk) > limit:
             raise OverflowError
         body.extend(chunk)
         if not event.get("more_body", False):
@@ -106,41 +218,87 @@ async def sandbox_status(browser: Browser) -> None:
         raise RuntimeError("Chromium 命名空间或 Seccomp-BPF 沙箱未启用")
 
 
-async def render(browser: Browser, body: str, source_csp: str | None) -> str:
+async def render(browser: Browser, snapshot: Snapshot) -> str:
     async with browser_context(browser) as context:
         page = await context.new_page()
         delivered = False
+        policy = BUNDLE_CSP if snapshot.assets else CSP
+        if snapshot.source_csp:
+            policy += f", {snapshot.source_csp}"
 
         async def intercept(route):
             nonlocal delivered
             request = route.request
             if (
-                not delivered
-                and request.url == ORIGIN
-                and request.method == "GET"
-                and request.is_navigation_request()
-                and request.frame == page.main_frame
+                request.method != "GET"
+                or request.redirected_from is not None
+                or request.post_data_buffer
             ):
+                await route.abort("blockedbyclient")
+                return
+            main_document = (
+                not delivered and request.url == snapshot.url and request.is_navigation_request()
+            )
+            asset = snapshot.assets.get(request.url)
+            resource_allowed = (
+                delivered
+                and asset is not None
+                and not request.is_navigation_request()
+                and request.resource_type in asset.request_types
+            )
+            if not (main_document or resource_allowed):
+                await route.abort("blockedbyclient")
+                return
+            try:
+                from_main_frame = request.frame == page.main_frame
+            except Error:
+                # 部分导航请求在创建对应 frame 前即到达。
+                from_main_frame = False
+            if not from_main_frame or BLOCKED_REQUEST_HEADERS.intersection(
+                await request.all_headers()
+            ):
+                await route.abort("blockedbyclient")
+                return
+            if main_document:
+                if delivered:
+                    await route.abort("blockedbyclient")
+                    return
                 delivered = True
                 await route.fulfill(
                     status=200,
                     headers={
                         "content-type": "text/html; charset=utf-8",
-                        "content-security-policy": f"{CSP}, {source_csp}" if source_csp else CSP,
+                        "content-security-policy": policy,
+                        "cache-control": "no-store",
+                        "x-content-type-options": "nosniff",
                     },
-                    body=body,
+                    body=snapshot.html,
                 )
-            else:
-                await route.abort("blockedbyclient")
+                return
+            assert asset is not None
+            await route.fulfill(
+                status=200,
+                headers={
+                    "content-type": f"{asset.content_type}; charset=utf-8",
+                    "cache-control": "no-store",
+                    "x-content-type-options": "nosniff",
+                },
+                body=asset.body,
+            )
 
         async def block_websocket(route):
             await route.close(code=1008)
 
         await context.route("**/*", intercept)
         await context.route_web_socket("**/*", block_websocket)
-        await page.goto(ORIGIN, wait_until="domcontentloaded", timeout=3500)
-        await asyncio.sleep(SETTLE_SECONDS)
-        if not delivered or page.url != ORIGIN:
+        await page.goto(
+            snapshot.url,
+            wait_until="networkidle" if snapshot.assets else "domcontentloaded",
+            timeout=3500,
+        )
+        if not snapshot.assets:
+            await asyncio.sleep(SETTLE_SECONDS)
+        if not delivered or page.url != snapshot.url:
             raise ValueError("页面离开已验证的快照")
         # 在独立 JavaScript 环境中读取 DOM 并限制发送到 IPC 的大小。
         session = await context.new_cdp_session(page)
@@ -163,7 +321,7 @@ async def render(browser: Browser, body: str, source_csp: str | None) -> str:
                 "returnByValue": True,
             },
         )
-        if "exceptionDetails" in result or page.url != ORIGIN:
+        if "exceptionDetails" in result or page.url != snapshot.url:
             raise ValueError("无法读取原页面的渲染结果")
         html = result["result"].get("value")
         if html is None or len(html.encode()) > MAX_HTML:
@@ -218,7 +376,7 @@ class Renderer:
                     or tuple(map(int, self.browser.version.split("."))) < MIN_CHROMIUM_VERSION
                 ):
                     raise RuntimeError("Chromium 版本未达到动态渲染安全基线")
-                self.version = f"chromium.{self.browser.version}.renderer.1"
+                self.version = f"chromium.{self.browser.version}"
                 self.browser.on("disconnected", self.browser_disconnected)
                 await send({"type": "lifespan.startup.complete"})
                 phase = "shutdown"
@@ -236,15 +394,21 @@ class Renderer:
         values = [value for key, value in scope["headers"] if key == b"authorization"]
         if len(values) != 1 or not hmac.compare_digest(values[0], self.authorization):
             return await reply(send, 401, {"code": "AUTH_REQUIRED"})
-        if endpoint not in {("GET", "/health/ready"), ("POST", "/render")}:
+        if endpoint not in {
+            ("GET", "/health/ready"),
+            ("POST", "/render"),
+            ("POST", "/render-bundle"),
+        }:
             return await reply(send, 404, {"code": "NOT_FOUND"})
         if not self.browser or not self.browser.is_connected():
             return await reply(send, 503, {"code": "RENDERER_UNAVAILABLE"})
         if endpoint == ("GET", "/health/ready"):
             return await reply(send, 200, {"status": "ready"})
         headers = dict(scope["headers"])
+        bundled = endpoint[1] == "/render-bundle"
+        media_type = b"application/json" if bundled else b"text/html"
         content_type = headers.get(b"content-type", b"").lower().replace(b" ", b"")
-        if content_type not in (b"text/html", b"text/html;charset=utf-8") or (
+        if content_type not in (media_type, media_type + b";charset=utf-8") or (
             headers.get(b"content-encoding", b"identity").lower() != b"identity"
         ):
             return await reply(send, 415, {"code": "UNSUPPORTED_MEDIA_TYPE"})
@@ -252,32 +416,38 @@ class Renderer:
         if len(policies) > 1 or (
             policies
             and (
-                not 1 <= len(policies[0]) <= 4096
+                bundled
+                or not 1 <= len(policies[0]) <= 4096
                 or any(byte < 32 or byte > 126 for byte in policies[0])
             )
         ):
             return await reply(send, 400, {"code": "INVALID_SOURCE_CSP"})
         try:
-            async with asyncio.timeout(RENDER_SECONDS):
-                raw = await read_body(receive)
+            async with asyncio.timeout(RENDER_SECONDS), self.slot:
+                raw = await read_body(receive, MAX_BUNDLE_WIRE if bundled else MAX_HTML)
                 if raw is None:
                     return
-                body = raw.decode("utf-8")
-                if not body:
+                if not raw:
                     return await reply(send, 422, {"code": "EMPTY_HTML"})
-                async with self.slot:
-                    html = await render(
-                        self.browser,
-                        body,
+                snapshot = (
+                    parse_bundle(raw)
+                    if bundled
+                    else Snapshot(
+                        ORIGIN,
+                        raw.decode("utf-8"),
                         policies[0].decode("ascii") if policies else None,
+                        {},
                     )
+                )
+                html = await render(self.browser, snapshot)
         except OverflowError:
             return await reply(send, 413, {"code": "BODY_TOO_LARGE"})
         except (BrowserTimeout, TimeoutError):
             return await reply(send, 504, {"code": "RENDER_TIMEOUT"})
-        except (Error, UnicodeError, ValueError):
+        except (Error, UnicodeError, ValueError, RecursionError):
             return await reply(send, 422, {"code": "RENDER_FAILED"})
-        return await reply(send, 200, {"html": html, "version": self.version})
+        version = f"{self.version}.renderer.{2 if bundled else 1}"
+        return await reply(send, 200, {"html": html, "version": version})
 
 
 class UnixConnection(http.client.HTTPConnection):

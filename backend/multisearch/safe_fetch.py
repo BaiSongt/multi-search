@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from email.message import Message
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 from time import monotonic
+from typing import Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -41,6 +42,18 @@ _MAX_TIMEOUT_S = 60
 _MIN_HOST_DELAY = 0.2
 
 type IP = IPv4Address | IPv6Address
+type ResourceKind = Literal["script", "json"]
+
+_RESOURCE_TYPES: dict[ResourceKind, frozenset[str]] = {
+    "script": frozenset({"text/javascript", "application/javascript"}),
+    "json": frozenset({"application/json"}),
+}
+_RESOURCE_MIME = re.compile(
+    r"[ \t]*[a-z]+/[a-z]+"
+    r'(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*(?:"[a-z0-9-]+"|[a-z0-9-]+))?[ \t]*',
+    re.IGNORECASE | re.ASCII,
+)
+MAX_RESOURCE_BYTES = 256 * 1024
 
 
 class FetchError(ApiError):
@@ -57,6 +70,21 @@ class FetchedPage:
     charset: str | None = None
     max_snippet: int | None = None
     content_security_policy: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResourceSpec:
+    url: str
+    kind: ResourceKind
+
+
+@dataclass(frozen=True)
+class FetchedResource:
+    url: str
+    kind: ResourceKind
+    content_type: str
+    body: str
+    max_snippet: int | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +213,28 @@ def _target(url: str) -> _Target:
     return _Target(canonical, host, authority, parts.scheme, _PORTS[parts.scheme])
 
 
+def render_target(url: str) -> _Target:
+    """验证渲染清单中的规范 HTTPS URL，拒绝浏览器可能改写的路径。"""
+    target = _target(url)
+    if (
+        target.scheme != "https"
+        or target.url != url
+        or not url.isascii()
+        or "#" in url
+        or re.search(r"%(?![0-9a-fA-F]{2})", url)
+        or any(
+            part.lower().replace("%2e", ".") in {".", ".."}
+            for part in urlsplit(url).path.split("/")
+        )
+    ):
+        raise _blocked()
+    try:
+        ip_address(target.host)
+    except ValueError:
+        return target
+    raise _blocked()
+
+
 def _domain_matches(host: str, values: Sequence[str]) -> bool:
     return any(host == value.lower() or host.endswith(f".{value.lower()}") for value in values)
 
@@ -274,13 +324,75 @@ class SafeFetcher:
         domain_denylist: Sequence[str] = (),
         authorized_hosts: frozenset[str] | None = None,
     ) -> FetchedPage:
+        return await self._fetch(
+            url,
+            timeout_s=timeout_s,
+            network_scope=network_scope,
+            domain_allowlist=domain_allowlist,
+            domain_denylist=domain_denylist,
+            authorized_hosts=authorized_hosts,
+            content_types=_RENDER_TYPES if authorized_hosts is not None else _PAGE_TYPES,
+            max_body_bytes=self._max_body_bytes,
+        )
+
+    async def fetch_resource(
+        self,
+        spec: ResourceSpec,
+        *,
+        page_url: str,
+        timeout_s: float,
+        authorized_hosts: frozenset[str],
+        network_scope: Scope | str = Scope.PUBLIC,
+        domain_allowlist: Sequence[str] = (),
+        domain_denylist: Sequence[str] = (),
+        max_body_bytes: int = MAX_RESOURCE_BYTES,
+    ) -> FetchedResource:
+        page, resource = render_target(page_url), render_target(spec.url)
+        if not authorized_hosts or resource.origin != page.origin or resource.url == page.url:
+            raise _blocked()
+        if max_body_bytes < 1:
+            raise FetchError(413, "FETCH_BODY_TOO_LARGE", "渲染资源超出抓取上限")
+        fetched = await self._fetch(
+            resource.url,
+            timeout_s=timeout_s,
+            network_scope=network_scope,
+            domain_allowlist=domain_allowlist,
+            domain_denylist=domain_denylist,
+            authorized_hosts=authorized_hosts,
+            content_types=_RESOURCE_TYPES[spec.kind],
+            max_body_bytes=min(self._max_body_bytes, MAX_RESOURCE_BYTES, max_body_bytes),
+            resource_request=True,
+        )
+        if fetched.charset not in {None, "utf-8", "utf8", "us-ascii", "ascii"}:
+            raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "渲染资源必须使用 UTF-8")
+        try:
+            encoding = "ascii" if fetched.charset in {"us-ascii", "ascii"} else "utf-8"
+            body = fetched.body.decode(encoding)
+        except UnicodeDecodeError:
+            raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "渲染资源必须使用 UTF-8") from None
+        return FetchedResource(
+            fetched.url, spec.kind, fetched.content_type, body, fetched.max_snippet
+        )
+
+    async def _fetch(
+        self,
+        url: str,
+        *,
+        timeout_s: float,
+        network_scope: Scope | str,
+        domain_allowlist: Sequence[str],
+        domain_denylist: Sequence[str],
+        authorized_hosts: frozenset[str] | None,
+        content_types: frozenset[str],
+        max_body_bytes: int,
+        resource_request: bool = False,
+    ) -> FetchedPage:
         if network_scope != Scope.PUBLIC:
             raise _blocked()
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise _budget_exhausted()
         timeout_s = min(timeout_s, _MAX_TIMEOUT_S)
         target = _target(url)
-        content_types = _RENDER_TYPES if authorized_hosts is not None else _PAGE_TYPES
         origin_url = target.url
         deadline = monotonic() + timeout_s
         seen: set[str] = set()
@@ -305,9 +417,13 @@ class SafeFetcher:
                         if wait > 0:
                             await asyncio.sleep(wait)
                         rules.ready_at = monotonic() + rules.delay
-                        response = await self._request(target, content_types, self._max_body_bytes)
+                        response = await self._request(
+                            target, content_types, max_body_bytes, resource_request=resource_request
+                        )
                     if response.status not in _REDIRECTS:
                         return self._page(origin_url, target, response)
+                    if resource_request:
+                        raise FetchError(403, "FETCH_RESOURCE_REDIRECT", "渲染资源禁止重定向")
                     target = _redirect(target, response.location)
         except (TimeoutError, httpx.TimeoutException):
             raise _budget_exhausted() from None
@@ -362,7 +478,12 @@ class SafeFetcher:
         return result
 
     async def _request(
-        self, target: _Target, content_types: frozenset[str], max_bytes: int
+        self,
+        target: _Target,
+        content_types: frozenset[str],
+        max_bytes: int,
+        *,
+        resource_request: bool = False,
     ) -> _Response:
         try:
             literal = ip_address(target.host)
@@ -401,6 +522,11 @@ class SafeFetcher:
             if response.headers.get("content-encoding", "identity").casefold() != "identity":
                 raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "响应使用了不受支持的编码")
             mime_header = response.headers.get("content-type", "")
+            if resource_request and (
+                len(response.headers.get_list("content-type")) != 1
+                or _RESOURCE_MIME.fullmatch(mime_header) is None
+            ):
+                raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "渲染资源的类型或字符集格式无效")
             kind = mime_header.partition(";")[0].strip().lower()
             if kind not in content_types:
                 raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "来源响应类型不受支持")

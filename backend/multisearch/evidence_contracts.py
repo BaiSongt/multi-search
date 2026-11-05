@@ -44,6 +44,9 @@ class EvidenceRecord(BaseModel):
         "static_html", "crawl4ai_static", "plain_text", "pypdf", "browser_dom"
     ]
     extraction_version: str = STATIC_EXTRACTION_VERSION
+    render_bundle_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None
+    )
     verification_status: Literal["content_extracted"] = "content_extracted"
     access_policy: Literal["metadata_and_excerpt"] = "metadata_and_excerpt"
     warnings: list[str] = Field(default_factory=list)

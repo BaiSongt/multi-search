@@ -4,9 +4,16 @@ import httpx
 import pytest
 
 from multisearch import safe_fetch
+from multisearch.render_resources import MAX_RESOURCE_BYTES, FetchedResource, ResourceSpec
 from multisearch.safe_fetch import FetchError, SafeFetcher
 
 PUBLIC_IP = "8.8.8.8"
+SCRIPT = ResourceSpec("https://one.example/app.js", "script")
+RESOURCE_OPTIONS = {
+    "page_url": "https://one.example/page",
+    "timeout_s": 1,
+    "authorized_hosts": frozenset({"one.example"}),
+}
 
 
 @pytest.fixture
@@ -147,6 +154,134 @@ async def test_dynamic_fetch_requires_exact_https_and_retains_enforced_csp(netwo
     )
     result = await SafeFetcher().fetch("https://one.example/", **options)
     assert result.content_security_policy == ("script-src 'none'", "base-uri 'none'")
+
+
+async def test_render_resources_use_the_pinned_credential_free_transport_and_preserve_utf8(network):
+    dns, requests, _, responses = network
+    responses[("one.example", "/app.js")] = httpx.Response(
+        200,
+        headers={
+            "Content-Type": 'Application/JavaScript; charset="utf-8"',
+            "Set-Cookie": "ignored=1",
+            "X-Robots-Tag": "max-snippet: 17",
+        },
+        content=b"\xef\xbb\xbfconst value = 'value';",
+    )
+    responses[("one.example", "/data")] = httpx.Response(
+        200, headers={"Content-Type": "application/json"}, content=b'{"value":"value"}'
+    )
+    fetcher = SafeFetcher()
+    script = ResourceSpec("https://one.example/app.js?v=1", "script")
+    data = ResourceSpec("https://one.example/data", "json")
+    assert await fetcher.fetch_resource(script, **RESOURCE_OPTIONS) == FetchedResource(
+        script.url, "script", "application/javascript", "\ufeffconst value = 'value';", 17
+    )
+    assert await fetcher.fetch_resource(data, **RESOURCE_OPTIONS) == FetchedResource(
+        data.url, "json", "application/json", '{"value":"value"}'
+    )
+    assert [item.url.raw_path for item in requests] == [b"/robots.txt", b"/app.js?v=1", b"/data"]
+    assert dns == [("one.example", 443)] * 3
+    assert all(
+        item.url.host == PUBLIC_IP
+        and item.extensions["sni_hostname"] == "one.example"
+        and "cookie" not in item.headers
+        and "authorization" not in item.headers
+        for item in requests
+    )
+
+
+async def test_render_resource_obeys_robots_disallow(network):
+    _, requests, _, responses = network
+    responses[("one.example", "/robots.txt")] = httpx.Response(
+        200, headers={"Content-Type": "text/plain"}, text="User-agent: *\nDisallow: /app.js\n"
+    )
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(SCRIPT, **RESOURCE_OPTIONS)
+    assert error.value.code == "FETCH_ROBOTS_DENIED"
+    assert [item.url.path for item in requests] == ["/robots.txt"]
+
+
+async def test_render_resource_rejects_private_dns_after_robots(network):
+    _, requests, answers, _ = network
+    records = iter([[PUBLIC_IP], ["127.0.0.1"]])
+    answers["one.example"] = lambda: next(records)
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(SCRIPT, **RESOURCE_OPTIONS)
+    assert error.value.code == "FETCH_TARGET_BLOCKED"
+    assert [item.url.path for item in requests] == ["/robots.txt"]
+
+
+async def test_render_resource_rejects_even_same_origin_redirect(network):
+    dns, requests, _, responses = network
+    responses[("one.example", "/app.js")] = httpx.Response(302, headers={"Location": "/other.js"})
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(SCRIPT, **RESOURCE_OPTIONS)
+    assert error.value.code == "FETCH_RESOURCE_REDIRECT"
+    assert [item.url.path for item in requests] == ["/robots.txt", "/app.js"]
+    assert dns == [("one.example", 443)] * 2
+
+
+@pytest.mark.parametrize(
+    ("script", "options"),
+    [
+        (SCRIPT, {"authorized_hosts": frozenset()}),
+        (SCRIPT, {"domain_denylist": ["one.example"]}),
+        (SCRIPT, {"network_scope": "offline"}),
+        (
+            ResourceSpec("https://two.example/app.js", "script"),
+            {"authorized_hosts": frozenset({"one.example", "two.example"})},
+        ),
+    ],
+)
+async def test_render_resource_requires_origin_and_scope_authorization_before_dns(
+    network, script, options
+):
+    dns, requests, *_ = network
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(script, **{**RESOURCE_OPTIONS, **options})
+    assert error.value.code == "FETCH_TARGET_BLOCKED"
+    assert dns == requests == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "content"),
+    [
+        ({"Content-Type": "text/javascript", "Content-Encoding": "gzip"}, None),
+        ({"Content-Type": "text/html"}, b"<p>wrong MIME</p>"),
+        ([("Content-Type", "text/javascript; charset=utf-8"), ("Content-Type", "text/html")], b""),
+        ({"Content-Type": "text/javascript; charset=windows-1252"}, b"const x = 1;"),
+        ({"Content-Type": "text/javascript"}, b"\xff"),
+    ],
+    ids=["compressed", "mime", "duplicate-mime", "charset", "non-utf8"],
+)
+async def test_render_resource_rejects_unsupported_content(network, headers, content):
+    _, _, _, responses = network
+    responses[("one.example", "/app.js")] = httpx.Response(
+        200, headers=headers, content=content, stream=Stream(0) if content is None else None
+    )
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch_resource(SCRIPT, **RESOURCE_OPTIONS)
+    assert error.value.code == "FETCH_CONTENT_UNSUPPORTED"
+
+
+async def test_render_resource_enforces_absolute_and_remaining_byte_caps(network):
+    _, _, _, responses = network
+    headers = {"Content-Type": "text/javascript"}
+    responses[("one.example", "/app.js")] = httpx.Response(
+        200, headers=headers, content=b"a" * (MAX_RESOURCE_BYTES + 1)
+    )
+    fetcher = SafeFetcher()
+    with pytest.raises(FetchError) as absolute:
+        await fetcher.fetch_resource(
+            SCRIPT, **RESOURCE_OPTIONS, max_body_bytes=MAX_RESOURCE_BYTES * 2
+        )
+    assert absolute.value.code == "FETCH_BODY_TOO_LARGE"
+
+    stream = Stream(0)
+    responses[("one.example", "/app.js")] = httpx.Response(200, headers=headers, stream=stream)
+    with pytest.raises(FetchError) as remaining:
+        await fetcher.fetch_resource(SCRIPT, **RESOURCE_OPTIONS, max_body_bytes=15)
+    assert remaining.value.code == "FETCH_BODY_TOO_LARGE" and stream.closed
 
 
 async def test_redirect_cycle_stops_and_robots_is_cached(network):

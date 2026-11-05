@@ -13,6 +13,7 @@ from multisearch.crawl_parser import CrawlParser
 from multisearch.dynamic_renderer import RenderedHTML
 from multisearch.evidence import EvidenceBuilder
 from multisearch.pdf_parser import OCRPending
+from multisearch.render_resources import MAX_RESOURCE_BYTES, FetchedResource, ResourceSpec
 from multisearch.safe_fetch import FetchedPage, FetchError
 from multisearch.tracing import bind_trace
 
@@ -179,6 +180,62 @@ async def test_dynamic_extraction_honors_original_and_rendered_robots_and_requir
         await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
     assert encoding.value.code == "FETCH_CONTENT_UNSUPPORTED"
     renderer.render.assert_not_awaited()
+
+
+async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_fingerprint():
+    script = ResourceSpec("https://source.example/app.js", "script")
+    data = ResourceSpec("https://source.example/api", "json")
+    script_asset = FetchedResource(
+        script.url, "script", "text/javascript", "a" * MAX_RESOURCE_BYTES
+    )
+    json_asset = FetchedResource(data.url, "json", "application/json", '{"data":1}', 6)
+    fetcher = FakeFetcher("<p>Shell</p>")
+    fetcher.fetch_resource = AsyncMock(side_effect=[script_asset, json_asset])
+    rendered = RenderedHTML(
+        "<html><head></head><body><p>Generated paragraph</p></body></html>", "renderer.2"
+    )
+    renderer = Mock(render=AsyncMock(), render_bundle=AsyncMock(return_value=rendered))
+    hosts = frozenset({"origin.example", "source.example"})
+    builder = EvidenceBuilder(
+        fetcher,
+        renderer=renderer,
+        dynamic_hosts=hosts,
+        dynamic_resources={CANONICAL: (script, data)},
+    )
+    result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert result.evidence_text == "Genera"
+    assert result.extraction_version == "renderer.2+normalizer.1"
+    assert len(result.render_bundle_sha256) == 64
+    assert renderer.render_bundle.await_args.args[0] == CANONICAL
+    assert renderer.render_bundle.await_args.args[2] == [script_asset, json_asset]
+    renderer.render.assert_not_awaited()
+    for request in fetcher.fetch_resource.await_args_list:
+        assert request.kwargs["page_url"] == CANONICAL
+        assert request.kwargs["authorized_hosts"] == hosts
+
+    fetcher.fetch_resource.side_effect = [script_asset, replace(json_asset, body='{"data":2}')]
+    changed = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert changed.content_sha256 == result.content_sha256
+    assert changed.render_bundle_sha256 != result.render_bundle_sha256
+    assert changed.evidence_id != result.evidence_id
+
+
+async def test_dynamic_bundle_is_not_rendered_if_a_required_resource_is_blocked():
+    asset = ResourceSpec("https://source.example/app.js", "script")
+    fetcher = FakeFetcher("<p>Shell</p>")
+    fetcher.fetch_resource = AsyncMock(side_effect=FetchError(403, "FETCH_ROBOTS_DENIED", "denied"))
+    renderer = Mock(render=AsyncMock(), render_bundle=AsyncMock())
+    builder = EvidenceBuilder(
+        fetcher,
+        renderer=renderer,
+        dynamic_hosts=frozenset({"source.example"}),
+        dynamic_resources={CANONICAL: (asset,)},
+    )
+    with pytest.raises(FetchError) as error:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    assert error.value.code == "FETCH_ROBOTS_DENIED"
+    renderer.render.assert_not_awaited()
+    renderer.render_bundle.assert_not_awaited()
 
 
 async def test_extract_observes_each_attempt_with_known_type_and_preserves_errors(caplog):
