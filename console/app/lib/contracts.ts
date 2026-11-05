@@ -78,6 +78,7 @@ export type KeyRow = {
   prefix: string;
   suffix: string;
   scopes: string[];
+  ip_allowlist?: string[];
   created_at: string;
   expires_at: string;
   revoked_at: string | null;

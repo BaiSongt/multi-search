@@ -41,6 +41,16 @@ docker compose exec multisearch-api python -m multisearch.keys user-add --tenant
 
 HTTP 字面回环地址使用本地会话 Cookie。HTTPS Console 地址启用 Secure 标志。管理操作经同源 Console 代理转发，由 API 检查会话、角色、Origin 与 CSRF。
 
+### API Key 的 IP 白名单
+
+签发受限 Key 前，先升级所有对外提供 API 的实例并完成数据库迁移。回退至早于 `0.3.0-alpha.12` 的版本前，先吊销全部仍有效的受限 Key。数据库迁移会阻止直接移除此类 Key 的白名单。
+
+API 默认按实际连接对端校验白名单，部署有 NAT 时应复验 API 看到的对端。Console Playground 经同源网关转发，适用于不限制 IP 的 Key。
+
+需要通过反向代理使用受限 Key 时，在 `MULTISEARCH_TRUSTED_PROXIES` 配置直接连接 API 的代理 IP 地址，多个地址以逗号分隔。每个可信代理应覆盖客户端提供的 `X-Forwarded-For`，并写入一个经代理确认的 IPv4 或 IPv6 地址。API 对可信对端提供的缺失、重复或含多个地址的头部按无可验证地址处理。直接接入时，客户端自行附加的代理头无效。
+
+Compose 启动 API 时关闭 Uvicorn 的自动代理头重写。直接启动 Uvicorn 时同样使用 `--no-proxy-headers`，由 MultiSearch 校验地址。MCP 入口仍应用原有 Host 和 Origin 要求。 [MCP 部署](mcp.md)
+
 ## 签发测试凭据
 
 在拥有该部署 Docker 访问权限的本地终端执行操作员 CLI。以下命令签发一小时有效的双模态搜索 Key。

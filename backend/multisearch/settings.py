@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from .client_address import IPAddress, parse_client_address
 from .deployment_policy import DeploymentPolicy, load_deployment_policy
 from .render_resources import ResourceSpec, parse_resource_manifest
 from .safe_fetch import FetchError, validate_fetch_url
@@ -36,6 +37,19 @@ def _dynamic_domains(name: str) -> frozenset[str]:
     except FetchError:
         raise ValueError(f"{name} 需要逗号分隔的精确公网域名") from None
     return domains
+
+
+def _trusted_proxies() -> frozenset[IPAddress]:
+    value = os.getenv("MULTISEARCH_TRUSTED_PROXIES", "").strip()
+    if not value:
+        return frozenset()
+    addresses = set()
+    for part in value.split(","):
+        address = parse_client_address(part.strip())
+        if address is None or address.is_unspecified or address.is_multicast:
+            raise ValueError("MULTISEARCH_TRUSTED_PROXIES 需要逗号分隔的代理 IP 地址")
+        addresses.add(address)
+    return frozenset(addresses)
 
 
 @dataclass(frozen=True)
@@ -71,6 +85,7 @@ class Settings:
     dynamic_fetch_resources: dict[str, tuple[ResourceSpec, ...]] = field(
         default_factory=dict, repr=False
     )
+    trusted_proxies: frozenset[IPAddress] = frozenset()
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -149,4 +164,5 @@ class Settings:
             enable_dynamic_fetch=dynamic_enabled,
             renderer_token=secret("MULTISEARCH_RENDERER_TOKEN") if dynamic_enabled else "",
             dynamic_fetch_resources=dynamic_resources,
+            trusted_proxies=_trusted_proxies(),
         )

@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import httpx2
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from lxml import html
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -21,7 +21,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from multisearch import safe_fetch
-from multisearch.auth import authenticate_machine
+from multisearch.auth import authenticate_machine, machine_peer
 from multisearch.dynamic_renderer import DynamicRenderer
 from multisearch.errors import install_errors
 from multisearch.evidence import EvidenceBuilder
@@ -893,8 +893,8 @@ async def verify_queue(db, pepper: str, builder: EvidenceBuilder, baseline: Evid
     app.include_router(job_router)
     app.include_router(evidence_router)
 
-    async def authenticate(raw):
-        return await authenticate_machine(identity, raw)
+    async def authenticate(raw: str, request: Request):
+        return await authenticate_machine(identity, raw, peer=machine_peer(request))
 
     async def unused(*_):
         raise AssertionError("此探针仅验证抓取任务")

@@ -18,6 +18,7 @@ from mcp_types import (
 )
 from pydantic import TypeAdapter, ValidationError
 from starlette.datastructures import Headers, MutableHeaders
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -27,7 +28,7 @@ from .identity import MachineIdentity
 from .job_contracts import FetchRequest, JobAccepted, JobView
 
 type SearchCallback = Callable[[SearchRequest, MachineIdentity, str], Awaitable[SearchResponse]]
-type AuthenticateCallback = Callable[[str], Awaitable[MachineIdentity]]
+type AuthenticateCallback = Callable[[str, Request], Awaitable[MachineIdentity]]
 type FetchCallback = Callable[[FetchRequest, MachineIdentity, str], Awaitable[JobAccepted]]
 type ResearchCallback = Callable[[SearchRequest, MachineIdentity, str], Awaitable[JobAccepted]]
 type JobCallback = Callable[[UUID, MachineIdentity], Awaitable[JobView]]
@@ -234,7 +235,7 @@ class _MachineAuth:
         try:
             if scheme.lower() != "bearer" or not credential:
                 raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
-            state["mcp_identity"] = await self.authenticate(credential)
+            state["mcp_identity"] = await self.authenticate(credential, Request(scope))
         except ApiError as error:
             headers = {"WWW-Authenticate": "Bearer"} if error.status == 401 else {}
             if error.retry_after_ms is not None:

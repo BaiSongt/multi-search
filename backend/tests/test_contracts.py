@@ -49,7 +49,7 @@ async def test_machine_permissions_and_validation_redaction():
     key = MachineIdentity(uuid4(), uuid4(), uuid4(), frozenset({"search:text"}))
 
     class TestIdentity:
-        async def authenticate(self, raw):
+        async def authenticate(self, raw, *, peer):
             if raw == "valid":
                 return key
             raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")

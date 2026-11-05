@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from .admin_api import router as admin_router
 from .api import router
 from .application import SearchApplication
-from .auth import authenticate_machine, console_origin
+from .auth import authenticate_machine, console_origin, machine_peer
 from .errors import install_errors
 from .evidence_api import router as evidence_router
 from .identity import IdentityStore
@@ -39,8 +39,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def mcp_search(body, identity, request_id):
         return await app.state.application.machine_search(body, identity, request_id)
 
-    async def mcp_authenticate(raw):
-        return await authenticate_machine(app.state.identity, raw, telemetry)
+    async def mcp_authenticate(raw: str, request: Request):
+        return await authenticate_machine(
+            app.state.identity, raw, telemetry, peer=machine_peer(request)
+        )
 
     async def mcp_fetch(body, identity, request_id):
         return await app.state.job_application.fetch(body, identity, request_id)

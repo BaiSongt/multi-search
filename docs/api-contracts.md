@@ -102,7 +102,10 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 
 管理接口使用浏览器会话，写操作还要求匹配配置的 `Origin` 以及 `X-CSRF-Token`。Console 通过同源 `/gateway` 路径转发。登录、会话刷新和登出分别使用 `/api/v1/auth/login`、`/api/v1/auth/refresh`、`/api/v1/auth/logout`。登录与刷新返回新的 CSRF 令牌，`GET /api/v1/me` 返回当前身份。
 
+- `GET /api/v1/auth/sessions` 分页返回本人当前租户的活跃会话，包含稳定的管理 ID、创建时间、到期时间和 `current` 标记。分页参数为 `limit`（默认 20，最多 50）及 `cursor`，响应返回 `sessions` 和 `next_cursor`。
+- `POST /api/v1/auth/sessions/{id}/revoke` 撤销其他活跃会话，成功返回 HTTP 204 并写入 `session.revoke` 审计。其他用户、其他租户和无效会话统一返回 `404 SESSION_NOT_FOUND`。撤销当前会话返回 `409 SESSION_CURRENT`，当前会话通过登出结束。刷新轮换登录凭据并保留管理 ID。
 - `GET/POST /api/v1/keys` 查看掩码列表或创建密钥。创建与轮换响应的 `secret` 只返回一次。调用 `POST /api/v1/keys/{id}/rotate` 或 `/revoke` 更新生命周期。
+- 创建密钥时可提交最多 32 项的 `ip_allowlist`。支持 IPv4、IPv6 单地址或主机位为零的 CIDR。单地址分别规范为 `/32` 或 `/128`，重复的规范条目会被拒绝。省略或传空列表表示不限 IP。列表、创建和轮换响应返回规范化白名单，轮换继承原白名单。REST 与 MCP 对不匹配或无法验证的地址返回 `401 AUTH_REQUIRED`。 [可信代理与网关](deployment.md#api-key-的-ip-白名单)
 - `GET /api/v1/usage` 返回最近 30 个 UTC 自然日的计量、趋势和当前租户配额。开发者仅能查看自己的用量，具备权限的角色可查看本租户用量。
 - `/api/v1/admin/` 提供总览、Provider、脱敏请求、租户和审计。平台管理员可创建租户、修改租户配额与 Provider 策略。运维、审计及租户管理员按各自权限读取。
 - 平台管理员与运维可通过 `GET /api/v1/admin/requests/{id}` 读取脱敏请求及已存的来源运行记录。运维仅能读取所在租户，跨租户 ID 与不存在的 ID 均返回 404。列表支持来源、模式、模态、租户、状态、时间与追踪 ID 筛选，租户筛选按角色授权。

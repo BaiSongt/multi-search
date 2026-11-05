@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .auth import SessionUser, SessionWrite, console_origin, require_console_origin
 from .contracts import InputModel, Role
 from .errors import ApiError
-from .identity import KeyView, key_hash
+from .identity import MAX_KEY_NETWORKS, KeyView, key_hash, normalize_key_allowlist
 from .policy import validate_limits
 from .sessions import EMAIL_PATTERN, SESSION_COOKIE, TENANT_PATTERN, SessionIdentity
 
@@ -49,6 +49,18 @@ class SessionView(BaseModel):
     csrf_token: str = Field(repr=False)
 
 
+class ManagedSession(BaseModel):
+    id: UUID
+    created_at: datetime
+    expires_at: datetime
+    current: bool
+
+
+class SessionPage(BaseModel):
+    sessions: list[ManagedSession]
+    next_cursor: UUID | None = None
+
+
 class KeyCreate(InputModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     environment: Literal["dev", "test", "prod"] = "dev"
@@ -59,6 +71,12 @@ class KeyCreate(InputModel):
     limits: dict[str, Annotated[int, Field(strict=True)]] = Field(
         default_factory=dict, max_length=11
     )
+    ip_allowlist: list[
+        Annotated[
+            str,
+            StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=64),
+        ]
+    ] = Field(default_factory=list, max_length=MAX_KEY_NETWORKS)
 
     @field_validator("scopes")
     @classmethod
@@ -71,6 +89,11 @@ class KeyCreate(InputModel):
     @classmethod
     def limits_policy(cls, limits: dict[str, int]) -> dict[str, int]:
         return validate_limits(limits)
+
+    @field_validator("ip_allowlist")
+    @classmethod
+    def ip_networks(cls, values: list[str]) -> list[str]:
+        return normalize_key_allowlist(values)
 
 
 class KeyRotate(InputModel):
@@ -161,6 +184,25 @@ async def logout(request: Request, actor: SessionWrite) -> Response:
     return response
 
 
+@router.get("/auth/sessions")
+async def list_sessions(
+    request: Request,
+    actor: SessionUser,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    cursor: UUID | None = None,
+) -> SessionPage:
+    sessions, next_cursor = await request.app.state.identity.sessions.list_sessions(
+        actor, limit, cursor
+    )
+    return SessionPage(sessions=sessions, next_cursor=next_cursor)
+
+
+@router.post("/auth/sessions/{session_id}/revoke", status_code=204)
+async def revoke_session(request: Request, session_id: UUID, actor: SessionWrite) -> Response:
+    await request.app.state.identity.sessions.revoke_session(actor, session_id)
+    return Response(status_code=204)
+
+
 @router.get("/keys")
 async def list_keys(
     request: Request,
@@ -182,6 +224,7 @@ async def create_key(request: Request, body: KeyCreate, actor: SessionWrite) -> 
         body.ttl_hours,
         body.limits,
         min(5, request.app.state.settings.max_concurrent),
+        ip_allowlist=body.ip_allowlist,
     )
     return KeyCreated(key=key, secret=raw)
 

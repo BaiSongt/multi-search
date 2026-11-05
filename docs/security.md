@@ -21,6 +21,8 @@ docker compose exec -T multisearch-api python -m multisearch.keys issue --tenant
 
 签发输出包含仅展示一次的明文，应直接保存在秘密存储中。SDK 和本地 MCP 示例从服务端进程的 `MULTISEARCH_KEY` 读取凭据。文字研究同时需要 `research` 和 `search:text`，图片研究需要 `research` 和 `search:image`。抓取使用 `fetch`。轮换时先更新调用方，完成验证后吊销旧 Key。审计与支持请求通过 `X-Request-ID` 和 `X-Trace-ID` 关联。 [SDK 示例](sdk.md) · [MCP 工具](mcp.md)
 
+通过 Console 或管理 API 签发 Key 时可限制调用方 IP。先确认所有对外 API 已升级，并复验实际入口的地址识别、伪造转发头拒绝和轮换继承。可信代理配置只包含部署方控制的直接代理地址。 [IP 白名单部署](deployment.md#api-key-的-ip-白名单)
+
 ## 内容与许可证
 
 证据接口保留来源、必要摘录与定位信息。部署方应按数据源许可、robots 和组织保留规则设置来源。使用图片前应复查原始落地页和授权状态，尊重权利人条件。项目采用 Apache-2.0，仓库中的第三方通知列明主要直接依赖和独立服务的上游许可。分发镜像或修改版时，应按各组件的实际许可履行适用义务。 [证据与图片归属](image-attribution.md) · [LICENSE](../LICENSE) · [NOTICE](../NOTICE)

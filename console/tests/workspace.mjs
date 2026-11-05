@@ -46,6 +46,10 @@ async function verifySingleDisplay(page) {
   await secret.waitFor();
   const value = await secret.textContent();
   assert.ok(value && /^msk_[a-f0-9]{32}\.[A-Za-z0-9_-]{43}$/.test(value), "创建响应应一次性展示密钥");
+  await dialog.getByText("curl 使用示例", { exact: true }).click();
+  const example = await dialog.locator("pre").textContent();
+  assert.match(example, /\$MULTISEARCH_KEY/);
+  assert.ok(!example.includes(value), "使用示例不能包含 API Key 明文");
   await dialog.getByRole("button", { name: "已安全保存" }).click();
   await secret.waitFor({ state: "detached" });
   const response = await page.request.get("/gateway/keys");
@@ -59,6 +63,49 @@ async function keySearch(context, key) {
     headers: { Authorization: `Bearer ${key}` },
     data: { query: "browser-cache-check", mode: "local" },
   });
+}
+
+async function verifyIpAllowlist(page, developer) {
+  const name = "浏览器 IP 白名单密钥";
+  await page.goto("/console/keys");
+  await page.getByRole("button", { name: "新建密钥" }).click();
+  const create = page.getByRole("dialog", { name: "新建密钥" });
+  const allowlist = create.getByLabel("IP 白名单（可选）");
+  await create.getByLabel("密钥名称").fill(name);
+  await allowlist.fill(Array.from({ length: 33 }, (_, index) => `192.0.2.${index + 1}`).join("\n"));
+  await create.getByRole("button", { name: "生成密钥" }).click();
+  await create.getByRole("alert").filter({ hasText: "IP 白名单最多支持 32 项。" }).waitFor();
+  await allowlist.fill("192.0.2.17,\n2001:0DB8:0000::1");
+  await create.getByRole("button", { name: "生成密钥" }).click();
+  const original = await verifySingleDisplay(page);
+  const activeRow = page.getByRole("row").filter({ hasText: name }).filter({
+    has: page.getByRole("button", { name: "轮换", exact: true }),
+  });
+  await activeRow.getByText("2 个地址或网段", { exact: true }).click();
+  const networks = ["192.0.2.17/32", "2001:db8::1/128"];
+  for (const network of networks) await activeRow.getByText(network, { exact: true }).waitFor();
+  assert.equal((await keySearch(developer, original)).status(), 401);
+
+  await activeRow.getByRole("button", { name: "轮换", exact: true }).click();
+  const rotate = page.getByRole("dialog", { name: "轮换密钥" });
+  await rotate.getByText("新密钥将继承原 IP 白名单。").waitFor();
+  await rotate.getByRole("button", { name: "确认轮换" }).click();
+  const rotated = await verifySingleDisplay(page);
+  assert.ok(rotated !== original);
+  const response = await developer.request.get("/gateway/keys");
+  assert.equal(response.status(), 200);
+  const { keys } = await response.json();
+  const active = keys.find((key) => key.name === name && key.status === "active");
+  assert.ok(active);
+  assert.deepEqual([...active.ip_allowlist].sort(), networks);
+  const spoofed = await developer.request.post("/gateway/search", {
+    headers: { Authorization: `Bearer ${rotated}`, "X-Forwarded-For": "192.0.2.17" },
+    data: { query: "browser-ip-allowlist-check", mode: "local" },
+  });
+  assert.equal(spoofed.status(), 401);
+  await activeRow.getByRole("button", { name: "吊销", exact: true }).click();
+  await page.getByRole("button", { name: "确认吊销" }).click();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
 }
 
 async function unknownImage(page) {
@@ -826,6 +873,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession, auditor);
     await verifyImageQuality(adminPage, developer, developerSession, operations);
     await verifyQuotaUsage(adminPage, developer, operations, developerAccount, developerSession.tenant_id);
+    await verifyIpAllowlist(developerPage, developer);
     await adminPage.goto("/admin/tenants");
     await adminPage.getByRole("button", { name: "新建租户" }).click();
     const tenant = `browser-${randomBytes(6).toString("hex")}`;
@@ -850,6 +898,60 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     await verifyInvitation(browser, adminPage, tenant, tenantId);
     await verifyOperations(adminPage, tenantId);
     await verifyCancellation(adminPage, tenantId);
+
+    const secondBrowser = await browser.newContext({ baseURL: base.origin });
+    try {
+      const secondLogin = await secondBrowser.request.post("/gateway/auth/login", {
+        data: developerAccount, headers: { Origin: base.origin },
+      });
+      assert.equal(secondLogin.status(), 200);
+      const secondSession = await session(secondBrowser);
+      const activePath = "/gateway/auth/sessions";
+      const active = await developer.request.get(activePath);
+      assert.equal(active.status(), 200);
+      assert.equal(active.headers()["cache-control"], "no-store");
+      const { sessions } = await active.json();
+      assert.equal(sessions.length, 2);
+      const current = sessions.find((entry) => entry.current);
+      const target = sessions.find((entry) => !entry.current);
+      assert.ok(current && target);
+      const pageOne = await (await developer.request.get(activePath, { params: { limit: 1 } })).json();
+      const pageTwo = await (await developer.request.get(activePath, { params: { limit: 1, cursor: pageOne.next_cursor } })).json();
+      assert.deepEqual([...pageOne.sessions, ...pageTwo.sessions], sessions);
+      assert.equal(pageTwo.next_cursor, null);
+
+      const revokePath = (id) => `${activePath}/${id}/revoke`;
+      const headers = { Origin: base.origin, "X-CSRF-Token": developerSession.csrf_token };
+      const foreign = (await (await admin.request.get(activePath)).json()).sessions.find((entry) => entry.current);
+      assert.equal((await developer.request.post(revokePath(target.id), { headers: { Origin: base.origin } })).status(), 403);
+      assert.equal((await developer.request.post(revokePath(foreign.id), { headers })).status(), 404);
+      assert.equal((await developer.request.post(revokePath(current.id), { headers })).status(), 409);
+      assert.equal((await developer.request.get(revokePath(target.id))).status(), 404);
+
+      await developerPage.goto("/console/settings");
+      const activeTable = developerPage.getByRole("region", { name: "浏览器会话" });
+      const targetRow = activeTable.getByRole("row").filter({ hasText: target.id });
+      await targetRow.getByRole("button", { name: "撤销会话", exact: true }).click();
+      const secondRefresh = await secondBrowser.request.post("/gateway/auth/refresh", {
+        headers: { Origin: base.origin, "X-CSRF-Token": secondSession.csrf_token },
+      });
+      assert.equal(secondRefresh.status(), 200);
+      const newTarget = (await (await secondBrowser.request.get(activePath)).json()).sessions.find((entry) => entry.current);
+      assert.equal(newTarget.id, target.id);
+      assert.equal(newTarget.created_at, target.created_at);
+      const confirmation = developerPage.getByRole("dialog", { name: "撤销其他会话" });
+      const revoked = developerPage.waitForResponse(`**${revokePath(target.id)}`);
+      await confirmation.getByRole("button", { name: "确认撤销会话" }).click();
+      assert.equal((await revoked).status(), 204);
+      await developerPage.getByText("会话已撤销。", { exact: true }).waitFor();
+      await targetRow.waitFor({ state: "detached" });
+      assert.equal((await secondBrowser.request.get("/gateway/me")).status(), 401);
+      assert.equal((await developer.request.get("/gateway/me")).status(), 200);
+      await adminPage.goto("/admin/audit");
+      await adminPage.getByText("session.revoke", { exact: true }).first().waitFor();
+    } finally {
+      await secondBrowser.close();
+    }
 
     await developerPage.goto("/console/settings");
     const refreshed = developerPage.waitForResponse("**/gateway/auth/refresh");

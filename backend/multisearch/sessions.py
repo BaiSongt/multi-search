@@ -28,9 +28,10 @@ _ACTIVE_SESSION = """
     JOIN tenants AS t ON t.id = s.tenant_id
     JOIN users AS u ON u.id = s.user_id
     JOIN memberships AS m ON (m.tenant_id, m.user_id) = (s.tenant_id, s.user_id)
-    WHERE s.id = :id AND s.revoked_at IS NULL AND s.expires_at > now()
+    WHERE s.id = :id AND s.revoked_at IS NULL AND s.expires_at > statement_timestamp()
         AND t.enabled AND u.enabled AND m.enabled
 """
+_OWN_SESSIONS = "tenant_id = :tenant_id AND user_id = :user_id"
 
 
 def _password_digest(password: str, salt: bytes) -> bytes:
@@ -342,10 +343,14 @@ class SessionStore:
         expires_at = await connection.scalar(
             text("""
                 INSERT INTO browser_sessions
-                    (id, tenant_id, user_id, secret_hash, expires_at, absolute_expires_at)
+                    (id, tenant_id, user_id, secret_hash, expires_at, absolute_expires_at,
+                     management_id, created_at)
                 SELECT :id, :tenant_id, :user_id, :hash,
-                       least(now() + interval '8 hours', deadline), deadline
-                FROM (SELECT coalesce(:absolute, now() + interval '7 days') AS deadline) cutoff
+                       least(statement_timestamp() + interval '8 hours', deadline), deadline,
+                       :management_id, coalesce(:created_at, statement_timestamp())
+                FROM (
+                    SELECT coalesce(:absolute, statement_timestamp() + interval '7 days') AS deadline
+                ) cutoff
                 RETURNING expires_at
             """),
             {
@@ -354,6 +359,8 @@ class SessionStore:
                 "user_id": row["user_id"],
                 "hash": self._digest("session", raw),
                 "absolute": row.get("absolute_expires_at"),
+                "management_id": row["management_id"] if "management_id" in row else uuid4(),
+                "created_at": row.get("created_at"),
             },
         )
         return raw, self._identity(raw, {**row, "id": session_id, "expires_at": expires_at})
@@ -393,6 +400,7 @@ class SessionStore:
                     text(
                         """
                 SELECT s.id, s.tenant_id, s.user_id, s.absolute_expires_at,
+                       s.management_id, s.created_at,
                        m.role, t.slug AS tenant, u.email
             """
                         + _ACTIVE_SESSION
@@ -414,8 +422,61 @@ class SessionStore:
             raise ApiError(403, "FORBIDDEN", "账户角色已变更，请重试")
         return row
 
+    async def list_sessions(
+        self, actor: SessionIdentity, limit: int, cursor: UUID | None
+    ) -> tuple[list[dict], UUID | None]:
+        owner = {"tenant_id": actor.tenant_id, "user_id": actor.user_id}
+        async with self.db.connect() as connection:
+            await self.assert_actor(connection, actor)
+            boundary = ""
+            if cursor is not None:
+                created_at = await connection.scalar(
+                    text(f"""
+                        SELECT created_at FROM browser_sessions
+                        WHERE {_OWN_SESSIONS} AND management_id = :cursor LIMIT 1
+                    """),
+                    {**owner, "cursor": cursor},
+                )
+                if created_at is None:
+                    raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在")
+                owner.update(cursor=cursor, created_at=created_at)
+                boundary = "AND (created_at, management_id) < (:created_at, :cursor)"
+            result = await connection.execute(
+                text(f"""
+                    SELECT management_id AS id, created_at, expires_at, id = :current AS current
+                    FROM browser_sessions
+                    WHERE {_OWN_SESSIONS} AND revoked_at IS NULL
+                        AND expires_at > statement_timestamp() {boundary}
+                    ORDER BY created_at DESC, management_id DESC LIMIT :limit
+                """),
+                {**owner, "current": actor.session_id, "limit": limit + 1},
+            )
+            rows = [dict(row) for row in result.mappings()]
+        return rows[:limit], rows[limit - 1]["id"] if len(rows) > limit else None
+
+    async def revoke_session(self, actor: SessionIdentity, session_id: UUID) -> None:
+        async with self.db.begin() as connection:
+            # 与凭据刷新串行化，以相同管理标识撤销最新凭据。
+            await lock_tenant(connection, actor.tenant_id)
+            current = await self.assert_actor(connection, actor)
+            if current["management_id"] == session_id:
+                raise ApiError(409, "SESSION_CURRENT", "请使用登出结束当前会话")
+            changed = await connection.scalar(
+                text(f"""
+                    UPDATE browser_sessions SET revoked_at = statement_timestamp()
+                    WHERE {_OWN_SESSIONS} AND management_id = :id AND revoked_at IS NULL
+                        AND expires_at > statement_timestamp()
+                    RETURNING id
+                """),
+                {"tenant_id": actor.tenant_id, "user_id": actor.user_id, "id": session_id},
+            )
+            if changed is None:
+                raise ApiError(404, "SESSION_NOT_FOUND", "会话不存在")
+            await self._audit(connection, actor, "session.revoke", target_id=session_id)
+
     async def refresh(self, actor: SessionIdentity) -> tuple[str, SessionIdentity]:
         async with self.db.begin() as connection:
+            await lock_tenant(connection, actor.tenant_id)
             row = await self.assert_actor(connection, actor, rotate=True)
             await self._close(connection, actor)
             raw, refreshed = await self._open(connection, row)
@@ -424,6 +485,7 @@ class SessionStore:
 
     async def logout(self, actor: SessionIdentity) -> None:
         async with self.db.begin() as connection:
+            await lock_tenant(connection, actor.tenant_id)
             await self.assert_actor(connection, actor, rotate=True)
             await self._close(connection, actor)
             await self._audit(connection, actor, "session.logout")
@@ -435,7 +497,12 @@ class SessionStore:
         )
 
     async def _audit(
-        self, connection: AsyncConnection, actor: SessionIdentity, action: str
+        self,
+        connection: AsyncConnection,
+        actor: SessionIdentity,
+        action: str,
+        *,
+        target_id: UUID | None = None,
     ) -> None:
         await connection.execute(
             text("""
@@ -446,7 +513,7 @@ class SessionStore:
                 "tenant_id": actor.tenant_id,
                 "user_id": actor.user_id,
                 "action": action,
-                "id": actor.session_id,
+                "id": target_id or actor.session_id,
             },
         )
 

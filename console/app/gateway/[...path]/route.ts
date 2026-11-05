@@ -5,7 +5,7 @@ import { SESSION_COOKIE } from "../../lib/contracts";
 export const dynamic = "force-dynamic";
 
 const GET_ROUTES = new Set([
-  "me", "keys", "usage", "capabilities", "providers", "admin/overview", "admin/providers",
+  "me", "auth/sessions", "keys", "usage", "capabilities", "providers", "admin/overview", "admin/providers",
   "admin/requests", "admin/tenants", "admin/audit", "admin/jobs", "admin/images", "admin/routing",
   "admin/cache", "admin/settings",
 ]);
@@ -14,6 +14,7 @@ const POST_ROUTES = new Set([
   "admin/routing/test", "admin/routing/publish", "admin/routing/rollback", "admin/cache/invalidate",
 ]);
 const KEY_ACTION = /^keys\/[a-f0-9-]{32,36}\/(rotate|revoke)$/i;
+const SESSION_REVOKE = /^auth\/sessions\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/revoke$/i;
 const REQUEST_VIEW = /^admin\/requests\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const TENANT_QUOTA_USAGE = /^admin\/tenants\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/quota-usage$/i;
 const JOB_VIEW = /^admin\/jobs\/[a-f0-9-]{32,36}$/i;
@@ -31,7 +32,7 @@ function accepted(method: string, path: string) {
   if (method === "GET") return GET_ROUTES.has(path) || REQUEST_VIEW.test(path) || JOB_VIEW.test(path)
     || CONSOLE_JOB_VIEW.test(path) || TEAM_READ.test(path) || TENANT_QUOTA_USAGE.test(path);
   if (method === "POST") return POST_ROUTES.has(path) || KEY_ACTION.test(path) || JOB_CANCEL.test(path) || TEAM_WRITE.test(path)
-    || CONSOLE_JOB_CANCEL.test(path);
+    || CONSOLE_JOB_CANCEL.test(path) || SESSION_REVOKE.test(path);
   return method === "PATCH" && (ADMIN_UPDATE.test(path) || MEMBER_UPDATE.test(path));
 }
 
@@ -78,6 +79,7 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  if (path.length === 1 && path[0] === "search") headers.set("x-multisearch-client-unavailable", "1");
   const session = request.cookies.get(SESSION_COOKIE);
   if (session) headers.set("cookie", `${SESSION_COOKIE}=${encodeURIComponent(session.value)}`);
   try {

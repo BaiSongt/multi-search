@@ -38,11 +38,42 @@ def test_password_hash_has_unique_salt_and_checks_candidate():
         {"ttl_hours": 0},
         {"limits": {"requests_per_minute": True}},
         {"limits": {"unknown": 2}},
+        {"ip_allowlist": ["*"]},
+        {"ip_allowlist": ["192.0.2.10/24"]},
+        {"ip_allowlist": ["192.0.2.0/255.255.255.0"]},
+        {"ip_allowlist": ["fe80::1%eth0"]},
+        {"ip_allowlist": ["192.0.2.1", "::ffff:192.0.2.1"]},
+        {"ip_allowlist": [f"192.0.2.{index}" for index in range(33)]},
+        {"ip_allowlist": [1234]},
+        {"ip_allowlist": "192.0.2.1"},
+        {"ip_allowlist": None},
     ],
 )
-def test_key_contract_rejects_invalid_scopes_and_quotas(changes):
+def test_key_contract_rejects_invalid_scopes_quotas_and_networks(changes):
     with pytest.raises(ValidationError):
         KeyCreate.model_validate({"name": "client", "scopes": ["search:text"], **changes})
+
+
+def test_key_contract_normalizes_ip_networks_and_defaults_to_unrestricted():
+    base = {"name": "client", "scopes": ["search:text"]}
+    assert KeyCreate.model_validate(base).ip_allowlist == []
+    value = KeyCreate.model_validate(
+        {
+            **base,
+            "ip_allowlist": [
+                " 192.0.2.1 ",
+                "2001:0DB8::3",
+                "::FFFF:198.51.100.0/120",
+                "2001:db8::/64",
+            ],
+        }
+    )
+    assert value.ip_allowlist == [
+        "192.0.2.1/32",
+        "2001:db8::3/128",
+        "198.51.100.0/24",
+        "2001:db8::/64",
+    ]
 
 
 def test_console_origin_requires_tls_outside_loopback(monkeypatch):
@@ -77,6 +108,7 @@ async def test_browser_login_cookie_csrf_and_machine_separation(monkeypatch):
         suffix="9abc",
         scopes=["search:text"],
         limits={},
+        ip_allowlist=["192.0.2.1/32"],
         created_at=now,
         expires_at=now + timedelta(hours=1),
         revoked_at=None,
@@ -112,7 +144,16 @@ async def test_browser_login_cookie_csrf_and_machine_separation(monkeypatch):
         sessions = TestSessions()
 
         async def create_key(
-            self, identity, name, environment, scopes, ttl_hours, limits, max_concurrent
+            self,
+            identity,
+            name,
+            environment,
+            scopes,
+            ttl_hours,
+            limits,
+            max_concurrent,
+            *,
+            ip_allowlist,
         ):
             identity.require_key_manager()
             assert identity == actor
@@ -124,6 +165,7 @@ async def test_browser_login_cookie_csrf_and_machine_separation(monkeypatch):
                 {"requests_per_minute": 2},
                 5,
             )
+            assert ip_allowlist == ["192.0.2.1/32"]
             return test_key, "test-key-shown-once"
 
         async def list_keys(self, identity, limit, cursor):
@@ -169,14 +211,17 @@ async def test_browser_login_cookie_csrf_and_machine_separation(monkeypatch):
             "scopes": ["search:text"],
             "ttl_hours": 1,
             "limits": {"requests_per_minute": 2},
+            "ip_allowlist": ["192.0.2.1"],
         }
         without_csrf = await client.post("/api/v1/keys", json=payload, headers={"Origin": origin})
         assert without_csrf.status_code == 403
         headers = {"Origin": origin, "X-CSRF-Token": actor.csrf_token}
         created = await client.post("/api/v1/keys", json=payload, headers=headers)
         assert created.status_code == 201 and created.json()["secret"] == "test-key-shown-once"
+        assert created.json()["key"]["ip_allowlist"] == ["192.0.2.1/32"]
         keys = await client.get("/api/v1/keys")
         assert keys.status_code == 200 and "test-key-shown-once" not in keys.text
+        assert keys.json()["keys"][0]["ip_allowlist"] == ["192.0.2.1/32"]
         reply = await client.post("/api/v1/auth/refresh", headers=headers)
         assert reply.status_code == 200 and reply.json()["csrf_token"] == rotated.csrf_token
         stale = await client.post("/api/v1/auth/logout", headers=headers)

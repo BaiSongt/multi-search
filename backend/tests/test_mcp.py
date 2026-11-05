@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import httpx2
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -50,7 +50,7 @@ def _server(jobs=None, extra_keys=None):
     keys.update(extra_keys or {})
     calls: list[tuple[SearchRequest, MachineIdentity, SearchResponse]] = []
 
-    async def authenticate(key: str):
+    async def authenticate(key: str, request: Request):
         if key not in keys:
             raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
         return keys[key]

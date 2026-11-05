@@ -8,11 +8,24 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import SQLAlchemyError
 
+from .client_address import parse_client_address
 from .errors import ApiError
 from .identity import MachineIdentity
 from .sessions import SESSION_COOKIE, SessionIdentity
 
 bearer = HTTPBearer(auto_error=False)
+
+
+def machine_peer(request: Request) -> str | None:
+    # Console 网关无可验证的客户端地址。标记只能收紧受限密钥的权限。
+    if "x-multisearch-client-unavailable" in request.headers:
+        return None
+    address = parse_client_address(request.client.host if request.client else None)
+    trusted = getattr(getattr(request.app.state, "settings", None), "trusted_proxies", ())
+    if address is not None and address in trusted:
+        forwarded = request.headers.getlist("x-forwarded-for")
+        address = parse_client_address(forwarded[0].strip(" \t")) if len(forwarded) == 1 else None
+    return str(address) if address is not None else None
 
 
 async def require_machine(
@@ -24,12 +37,16 @@ async def require_machine(
         if telemetry:
             telemetry.record_auth("failed")
         raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
-    return await authenticate_machine(request.app.state.identity, auth.credentials, telemetry)
+    return await authenticate_machine(
+        request.app.state.identity, auth.credentials, telemetry, peer=machine_peer(request)
+    )
 
 
-async def authenticate_machine(store, raw: str, telemetry=None) -> MachineIdentity:
+async def authenticate_machine(
+    store, raw: str, telemetry=None, *, peer: str | None
+) -> MachineIdentity:
     try:
-        identity = await store.authenticate(raw)
+        identity = await store.authenticate(raw, peer=peer)
     except ApiError:
         if telemetry:
             telemetry.record_auth("failed")

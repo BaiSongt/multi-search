@@ -4,14 +4,16 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from math import ceil
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from .client_address import parse_client_address
 from .contracts import Modality, Role
 from .errors import ApiError
 from .policy import lock_tenant, tenant_quota
@@ -19,9 +21,10 @@ from .sessions import SessionIdentity, SessionStore
 
 KEY_FORMAT = re.compile(r"msk_([a-f0-9]{32})\.[A-Za-z0-9_-]{43}")
 KEY_SCOPES = ("search:text", "search:image", "fetch", "research")
+MAX_KEY_NETWORKS = 32
 _KEY_COLUMNS = """
     id, owner_id, name, environment, prefix, suffix, scopes, limits, created_at,
-    expires_at, last_used_at, revoked_at, rotation_expires_at,
+    expires_at, last_used_at, revoked_at, rotation_expires_at, ip_allowlist::TEXT[] AS ip_allowlist,
     CASE
         WHEN revoked_at IS NOT NULL THEN 'revoked'
         WHEN coalesce(rotation_expires_at, expires_at) <= now() THEN 'expired'
@@ -36,6 +39,28 @@ _KEY_ACCESS = """
 
 def key_hash(raw: str, pepper: str) -> bytes:
     return hmac.digest(pepper.encode(), raw.encode(), "sha256")
+
+
+def normalize_key_allowlist(values: list[str]) -> list[str]:
+    if len(values) > MAX_KEY_NETWORKS:
+        raise ValueError("IP 白名单最多包含 32 项")
+    networks = []
+    for value in values:
+        _, separator, prefix = value.partition("/")
+        if "%" in value or (separator and not re.fullmatch(r"[0-9]{1,3}", prefix)):
+            raise ValueError("IP 白名单需要 IPv4、IPv6 地址或 CIDR")
+        try:
+            network = ip_network(value)
+        except ValueError:
+            raise ValueError("IP 白名单需要有效地址或主机位为零的 CIDR") from None
+        if isinstance(network, IPv6Network) and network.prefixlen >= 96:
+            mapped = network.network_address.ipv4_mapped
+            if mapped is not None:
+                network = IPv4Network((mapped, network.prefixlen - 96))
+        networks.append(str(network))
+    if len(networks) != len(set(networks)):
+        raise ValueError("IP 白名单不得包含重复地址或网络")
+    return networks
 
 
 @dataclass(frozen=True)
@@ -61,6 +86,7 @@ class KeyView(BaseModel):
     suffix: str
     scopes: list[str]
     limits: dict[str, int]
+    ip_allowlist: list[str] = Field(default_factory=list)
     created_at: datetime
     expires_at: datetime
     last_used_at: datetime | None
@@ -75,15 +101,18 @@ class IdentityStore:
         self.pepper = pepper
         self.sessions = SessionStore(db, pepper)
 
-    async def authenticate(self, raw: str) -> MachineIdentity:
+    async def authenticate(self, raw: str, *, peer: str | None = None) -> MachineIdentity:
         match = KEY_FORMAT.fullmatch(raw)
         if match is None:
             raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
         key_id = UUID(hex=match[1])
+        address = parse_client_address(peer)
         async with self.db.connect() as connection:
             result = await connection.execute(
                 text("""
-                SELECT k.tenant_id, k.owner_id, k.secret_hash, k.scopes, k.limits
+                SELECT k.tenant_id, k.owner_id, k.secret_hash, k.scopes, k.limits,
+                    cardinality(k.ip_allowlist) = 0 OR
+                    CAST(CAST(:peer AS TEXT) AS INET) <<= ANY(k.ip_allowlist) AS peer_allowed
                 FROM api_keys AS k
                 JOIN tenants AS t ON k.tenant_id = t.id
                 JOIN users AS u ON k.owner_id = u.id
@@ -92,10 +121,14 @@ class IdentityStore:
                     AND coalesce(k.rotation_expires_at, k.expires_at) > now()
                     AND t.enabled AND u.enabled AND m.enabled
             """),
-                {"id": key_id},
+                {"id": key_id, "peer": str(address) if address is not None else None},
             )
             row = result.mappings().one_or_none()
-        if row is None or not hmac.compare_digest(row["secret_hash"], key_hash(raw, self.pepper)):
+        if (
+            row is None
+            or not hmac.compare_digest(row["secret_hash"], key_hash(raw, self.pepper))
+            or not row["peer_allowed"]
+        ):
             raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
         return MachineIdentity(
             key_id, row["tenant_id"], row["owner_id"], frozenset(row["scopes"]), row["limits"]
@@ -181,6 +214,8 @@ class IdentityStore:
         scopes: list[str],
         ttl_hours: int,
         limits: dict[str, int],
+        *,
+        ip_allowlist: list[str] | None = None,
     ) -> tuple[KeyView, str]:
         key_id = uuid4()
         raw = f"msk_{key_id.hex}.{secrets.token_urlsafe(32)}"
@@ -188,9 +223,10 @@ class IdentityStore:
             text(f"""
                 INSERT INTO api_keys
                     (id, tenant_id, owner_id, name, environment, secret_hash, prefix, suffix,
-                     scopes, limits, expires_at)
+                     scopes, limits, ip_allowlist, expires_at)
                 VALUES (:id, :tenant_id, :owner_id, :name, :environment, :secret_hash,
                         :prefix, :suffix, :scopes, CAST(:limits AS JSONB),
+                        CAST(CAST(:ip_allowlist AS TEXT[]) AS CIDR[]),
                         now() + make_interval(hours => :hours))
                 RETURNING {_KEY_COLUMNS}
             """),
@@ -205,6 +241,7 @@ class IdentityStore:
                 "suffix": raw[-4:],
                 "scopes": scopes,
                 "limits": json.dumps(limits),
+                "ip_allowlist": ip_allowlist if ip_allowlist is not None else [],
                 "hours": ttl_hours,
             },
         )
@@ -293,6 +330,8 @@ class IdentityStore:
         ttl_hours: int,
         limits: dict[str, int],
         max_concurrent: int,
+        *,
+        ip_allowlist: list[str] | None = None,
     ) -> tuple[KeyView, str]:
         actor.require_key_manager()
         async with self.db.begin() as connection:
@@ -310,6 +349,7 @@ class IdentityStore:
                 scopes,
                 ttl_hours,
                 limits,
+                ip_allowlist=ip_allowlist,
             )
             await self._audit(
                 connection,
@@ -322,6 +362,7 @@ class IdentityStore:
                     "ttl_hours": ttl_hours,
                     "environment": environment,
                     "limits": limits,
+                    "ip_allowlist_count": len(key.ip_allowlist),
                 },
             )
         return key, raw
@@ -374,6 +415,7 @@ class IdentityStore:
                 old.scopes,
                 ttl_hours,
                 limits,
+                ip_allowlist=old.ip_allowlist,
             )
             if grace_seconds:
                 await connection.execute(
@@ -395,6 +437,11 @@ class IdentityStore:
                 actor.user_id,
                 "key.rotate",
                 key_id,
-                {"replacement_id": new.id, "grace_seconds": grace_seconds, "limits": limits},
+                {
+                    "replacement_id": new.id,
+                    "grace_seconds": grace_seconds,
+                    "limits": limits,
+                    "ip_allowlist_count": len(new.ip_allowlist),
+                },
             )
         return new, raw
