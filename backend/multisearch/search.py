@@ -895,7 +895,7 @@ class SearchService:
                 return None
             attempted += 1
             try:
-                record = await self.evidence.extract(
+                return await self.evidence.extract(
                     result.url,
                     timeout_s=min(remaining, 12),
                     result_id=result.result_id,
@@ -904,13 +904,9 @@ class SearchService:
                     domain_allowlist=request.domain_allowlist,
                     domain_denylist=request.domain_denylist,
                 )
-                trace_event("fetch.extract", status="success")
-                return record
             except OCRPending:
-                trace_event("fetch.extract", status="ocr_pending")
                 return "ocr_pending"
             except (FetchError, TimeoutError):
-                trace_event("fetch.extract", status="failed")
                 return None
 
         selected = targets[: budget.max_pages]

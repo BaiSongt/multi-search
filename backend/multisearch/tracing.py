@@ -39,6 +39,7 @@ def trace_event(
     elapsed_ms: int | None = None,
     provider: str | None = None,
     reason_codes: Sequence[ProviderReason] = (),
+    error_code: str | None = None,
 ) -> None:
     identifier = trace_id()
     if identifier is None or not _logger.isEnabledFor(logging.INFO):
@@ -50,4 +51,6 @@ def trace_event(
         fields["provider"] = provider
     if reason_codes:
         fields["reason_codes"] = list(reason_codes)
+    if error_code is not None:
+        fields["error_code"] = error_code
     _logger.info(json.dumps(fields, separators=(",", ":")))

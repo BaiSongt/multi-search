@@ -1,6 +1,7 @@
+import asyncio
 import codecs
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -12,12 +13,13 @@ from lxml import etree, html
 
 from .contracts import Scope
 from .crawl_parser import CRAWL4AI_VERSION, CrawlParser
-from .evidence_contracts import STATIC_EXTRACTION_VERSION
+from .evidence_contracts import STATIC_EXTRACTION_VERSION, FetchStatus
 from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
 from .pdf_parser import PDF_EXTRACTION_VERSION, OCRPending, PdfParser
 from .safe_fetch import FetchedPage, FetchError, SafeFetcher, snippet_limit
+from .tracing import trace_event
 
 _MAX_EXCERPT = 512
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
@@ -69,6 +71,7 @@ _HIDDEN = {
 }
 _BOT_NAMES = {"robots", "multisearchbot"}
 _DOI = re.compile(r"10\.\d{4,9}/[!-~]+", re.IGNORECASE)
+_BLOCKED_FETCH_CODES = {"FETCH_TARGET_BLOCKED", "FETCH_ROBOTS_UNAVAILABLE", "FETCH_SITE_RESTRICTED"}
 
 
 @dataclass(frozen=True)
@@ -229,10 +232,17 @@ def _content(
 
 
 class EvidenceBuilder:
-    def __init__(self, fetcher: SafeFetcher, parser: CrawlParser | None = None):
+    def __init__(
+        self,
+        fetcher: SafeFetcher,
+        parser: CrawlParser | None = None,
+        *,
+        record_attempt: Callable[[str | None, FetchStatus], None] | None = None,
+    ):
         self.fetcher = fetcher
         self.parser = parser
         self.pdf = PdfParser()
+        self.record_attempt = record_attempt
 
     async def extract(
         self,
@@ -245,14 +255,53 @@ class EvidenceBuilder:
         domain_allowlist: Sequence[str] = (),
         domain_denylist: Sequence[str] = (),
     ) -> EvidenceRecord:
-        deadline = monotonic() + timeout_s
-        page = await self.fetcher.fetch(
-            url,
-            timeout_s=timeout_s,
-            network_scope=network_scope,
-            domain_allowlist=domain_allowlist,
-            domain_denylist=domain_denylist,
-        )
+        started = monotonic()
+        deadline = started + timeout_s
+        page = None
+        status: FetchStatus = "failed"
+        error_code = None
+        try:
+            page = await self.fetcher.fetch(
+                url,
+                timeout_s=timeout_s,
+                network_scope=network_scope,
+                domain_allowlist=domain_allowlist,
+                domain_denylist=domain_denylist,
+            )
+            evidence = await self._extract_page(page, deadline, result_id, query)
+        except OCRPending as error:
+            error_code = error.code
+            status = "ocr_pending"
+            raise
+        except FetchError as error:
+            error_code = error.code
+            if error.code == "TIME_BUDGET_EXCEEDED":
+                status = "timeout"
+            elif error.code in _BLOCKED_FETCH_CODES:
+                status = "blocked"
+            raise
+        except TimeoutError:
+            status = "timeout"
+            raise
+        except asyncio.CancelledError:
+            status = "timeout" if monotonic() >= deadline else "cancelled"
+            raise
+        else:
+            status = "completed"
+            return evidence
+        finally:
+            if self.record_attempt is not None:
+                self.record_attempt(page.content_type if page is not None else None, status)
+            trace_event(
+                "fetch.extract",
+                status=status,
+                elapsed_ms=int((monotonic() - started) * 1000),
+                error_code=error_code,
+            )
+
+    async def _extract_page(
+        self, page: FetchedPage, deadline: float, result_id: str | None, query: str | None
+    ) -> EvidenceRecord:
         warnings: list[str] = []
         hints: tuple[str, ...] = ()
         if page.content_type == "application/pdf":

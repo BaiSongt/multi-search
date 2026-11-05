@@ -16,6 +16,7 @@ from .evidence import EvidenceBuilder
 from .identity import IdentityStore
 from .job_contracts import FetchRequest, JobError, JobKind, JobProgress, JobStatus
 from .job_store import Claim, JobOutcome, JobStore
+from .observability import FetchMetrics
 from .ops_store import OpsStore
 from .pdf_parser import OCRPending
 from .research import ResearchOrchestrator, ResearchPricing
@@ -84,20 +85,16 @@ class Worker:
                         domain_denylist=body.domain_denylist,
                     )
             except TimeoutError:
-                trace_event("fetch.extract", status="timeout")
                 errors.append(
                     {"index": index, "code": "TIME_BUDGET_EXCEEDED", "message": "抓取时限已耗尽"}
                 )
             except OCRPending as error:
-                trace_event("fetch.extract", status="ocr_pending")
                 pending.append(index)
                 result["ocr_pending"] = pending
                 warnings.append(error.code)
             except FetchError as error:
-                trace_event("fetch.extract", status="failed")
                 errors.append({"index": index, "code": error.code, "message": str(error)})
             else:
-                trace_event("fetch.extract", status="success")
                 records.append(record.model_dump(mode="json"))
             progress.pages_fetched = len(records)
             if not await self.store.progress(claim, progress, checkpoint=result):
@@ -190,8 +187,11 @@ async def main() -> None:
         settings.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
     )
     try:
-        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
-            evidence = build_evidence(settings, client)
+        async with (
+            httpx.AsyncClient(trust_env=False, follow_redirects=False) as client,
+            FetchMetrics.connect(settings.redis_url) as fetch_metrics,
+        ):
+            evidence = build_evidence(settings, client, fetch_metrics)
             store = JobStore(db, settings.max_concurrent)
             worker = Worker(store, evidence)
             if settings.enable_research:

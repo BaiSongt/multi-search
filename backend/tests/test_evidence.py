@@ -1,12 +1,18 @@
+import asyncio
+import json
+import logging
 from datetime import UTC, datetime
 from hashlib import sha256
+from unittest.mock import AsyncMock, Mock, call
 
 import httpx
 import pytest
 
 from multisearch.crawl_parser import CrawlParser
 from multisearch.evidence import EvidenceBuilder
+from multisearch.pdf_parser import OCRPending
 from multisearch.safe_fetch import FetchedPage, FetchError
+from multisearch.tracing import bind_trace
 
 ORIGIN = "https://origin.example/doc"
 CANONICAL = "https://source.example/doc"
@@ -95,6 +101,44 @@ async def test_empty_or_script_only_page_never_produces_evidence():
     with pytest.raises(FetchError) as error:
         await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1)
     assert error.value.code == "FETCH_NO_EXCERPT"
+
+
+async def test_extract_observes_each_attempt_with_known_type_and_preserves_errors(caplog):
+    recorder = Mock()
+    builder = EvidenceBuilder(FakeFetcher("<p>Valid text</p>"), record_attempt=recorder)
+    await builder.extract(ORIGIN, timeout_s=1)
+
+    fetch = AsyncMock(side_effect=FetchError(403, "FETCH_TARGET_BLOCKED", "blocked"))
+    builder.fetcher = Mock(fetch=fetch)
+    caplog.set_level(logging.INFO, logger="uvicorn.error.multisearch.telemetry")
+    with bind_trace("test-trace"), pytest.raises(FetchError, match="blocked"):
+        await builder.extract(ORIGIN, timeout_s=1)
+    (trace,) = [json.loads(entry.message) for entry in caplog.records]
+    assert trace["trace_id"] == "test-trace" and trace["status"] == "blocked"
+    assert trace["error_code"] == "FETCH_TARGET_BLOCKED" and ORIGIN not in caplog.text
+    fetch.side_effect = TimeoutError()
+    with pytest.raises(TimeoutError):
+        await builder.extract(ORIGIN, timeout_s=1)
+    fetch.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await builder.extract(ORIGIN, timeout_s=1)
+
+    builder.fetcher = FakeFetcher("%PDF-", content_type="application/pdf")
+    parse = AsyncMock(side_effect=FetchError(422, "FETCH_PDF_INVALID", "invalid PDF"))
+    builder.pdf = Mock(parse=parse)
+    with pytest.raises(FetchError, match="invalid PDF"):
+        await builder.extract(ORIGIN, timeout_s=1)
+    parse.side_effect = OCRPending()
+    with pytest.raises(OCRPending):
+        await builder.extract(ORIGIN, timeout_s=1)
+    assert recorder.call_args_list == [
+        call("text/html", "completed"),
+        call(None, "blocked"),
+        call(None, "timeout"),
+        call(None, "cancelled"),
+        call("application/pdf", "failed"),
+        call("application/pdf", "ocr_pending"),
+    ]
 
 
 async def test_isolated_crawl_parser_only_ranks_substrings_of_original_text():

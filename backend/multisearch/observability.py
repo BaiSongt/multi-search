@@ -9,6 +9,7 @@ import re
 from bisect import bisect_left
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from itertools import accumulate
@@ -16,6 +17,9 @@ from time import monotonic
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -23,6 +27,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .contracts import ImageSearchResult, Modality, Mode, ProviderRun, SearchResponse, Source
+from .evidence_contracts import FetchStatus
 from .settings import secret
 from .tracing import bind_trace
 
@@ -42,6 +47,15 @@ _SCOPES = frozenset({"search:text", "search:image", "fetch", "research"})
 _JOB_MODES = frozenset({"fetch", "research"})
 _ACTIVE = frozenset({"queued", "running", "cancelling"})
 _CONTENT = frozenset({"text/html", "text/plain", "application/pdf", "application/xhtml+xml"})
+_FETCH_STATUSES = frozenset(
+    {"blocked", "cancelled", "completed", "failed", "ocr_pending", "timeout"}
+)
+_FETCH_COUNTER_KEY = "multisearch:metrics:fetch:v1"
+_FETCH_FIELDS = {
+    f"{content_type}:{status}": (content_type, status)
+    for content_type in sorted(_CONTENT | {"unknown"})
+    for status in sorted(_FETCH_STATUSES | {"unknown"})
+}
 _BUCKETS = (0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0)
 _SAMPLE_LIMIT = 4_000
 _SNAPSHOT_TTL_S = 5.0
@@ -180,7 +194,6 @@ _COUNTERS = {
         ("route", "method", "status"),
         "API transport requests by fixed route and HTTP status class.",
     ),
-    "fetch": (("content_type", "status"), "Evidence fetches observed in this API process."),
 }
 _HISTOGRAMS = {
     "request_duration_seconds": (
@@ -252,9 +265,6 @@ class Telemetry:
         ratio = self.evidence[mode]
         ratio[0] += sum(bool(getattr(result, "evidence_refs", ())) for result in response.results)
         ratio[1] += len(response.results)
-        if not response.cache_hit:
-            for record in getattr(response, "evidence_records", ()):
-                self._count("fetch", _label(record.content_type, _CONTENT), "completed")
 
     def record_search_failure(
         self, mode: Mode, status: str, code: str, modalities: Iterable[Modality], elapsed_ms: float
@@ -305,6 +315,64 @@ class Telemetry:
             if total
         ]
         return lines
+
+
+class FetchMetrics:
+    """Publish API and Worker extraction outcomes to one deployment-wide counter."""
+
+    def __init__(self, redis: Redis) -> None:
+        self.redis = redis
+        self.pending: Counter[str] = Counter()
+        self.wakeup = asyncio.Event()
+        self.stopping = False
+        self.available = True
+
+    def record(self, content_type: str | None, status: FetchStatus) -> None:
+        field = f"{_label(content_type, _CONTENT)}:{_label(status, _FETCH_STATUSES)}"
+        self.pending[field] += 1
+        self.wakeup.set()
+
+    @classmethod
+    @asynccontextmanager
+    async def connect(cls, redis_url: str):
+        # A lost response can follow a successful increment, so disable client retries.
+        async with (
+            Redis.from_url(redis_url, retry=Retry(NoBackoff(), 0)) as redis,
+            cls(redis).publishing() as metrics,
+        ):
+            yield metrics
+
+    async def _publish(self) -> None:
+        while not self.stopping or self.pending:
+            await self.wakeup.wait()
+            if not self.stopping:
+                await asyncio.sleep(0.25)
+            self.wakeup.clear()
+            if not self.pending:
+                continue
+            pending, self.pending = self.pending, Counter()
+            try:
+                async with asyncio.timeout(0.25), self.redis.pipeline() as commands:
+                    for field, count in pending.items():
+                        commands.hincrby(_FETCH_COUNTER_KEY, field, count)
+                    await commands.execute()
+            except (RedisError, OSError, TimeoutError):
+                # A lost acknowledgement may follow a successful write. Do not replay.
+                if self.available:
+                    LOGGER.warning("fetch_metrics_write_unavailable")
+                self.available = False
+            else:
+                self.available = True
+
+    @asynccontextmanager
+    async def publishing(self):
+        publisher = asyncio.create_task(self._publish())
+        try:
+            yield self
+        finally:
+            self.stopping = True
+            self.wakeup.set()
+            await publisher
 
 
 class _RedactedHTTP:
@@ -526,8 +594,10 @@ async def _redis_lines(request: Request) -> list[str]:
                 commands.info("memory")
                 for kind in sorted(_JOB_MODES):
                     commands.exists(f"multisearch:worker:{kind}")
-                memory, *workers = await commands.execute()
+                commands.hmget(_FETCH_COUNTER_KEY, list(_FETCH_FIELDS))
+                memory, *workers, fetches = await commands.execute()
             used_bytes = int(memory["used_memory"])
+            fetch_counts = [int(value) if value is not None else 0 for value in fetches]
     except (KeyError, RedisError, OSError, ValueError, TimeoutError):
         return _dependency("redis", False)
     lines = _dependency("redis", True)
@@ -541,6 +611,15 @@ async def _redis_lines(request: Request) -> list[str]:
             ({"mode": kind}, int(bool(ready)))
             for kind, ready in zip(sorted(_JOB_MODES), workers, strict=True)
         ),
+    )
+    metric = "multisearch_fetch_total"
+    lines += _metadata(
+        metric, "counter", "Evidence extraction attempts across the API and Workers."
+    )
+    lines.extend(
+        _metric_line(metric, {"content_type": content_type, "status": status}, count)
+        for (content_type, status), count in zip(_FETCH_FIELDS.values(), fetch_counts, strict=True)
+        if count > 0
     )
     return lines
 

@@ -8,6 +8,7 @@ from .evidence import EvidenceBuilder
 from .image_attribution import ImageAttributionResolver
 from .image_source import PublicImageSourceResolver
 from .local_index import LocalIndex
+from .observability import FetchMetrics
 from .ops_store import OpsStore
 from .policy import ProviderPolicy
 from .providers import create_providers
@@ -17,13 +18,15 @@ from .settings import Settings
 from .vertical_providers import create_vertical_providers
 
 
-def build_evidence(config: Settings, client: httpx.AsyncClient) -> EvidenceBuilder:
+def build_evidence(
+    config: Settings, client: httpx.AsyncClient, fetch_metrics: FetchMetrics
+) -> EvidenceBuilder:
     parser = (
         CrawlParser(client, config.crawl4ai_url, config.crawl4ai_token)
         if config.crawl4ai_url
         else None
     )
-    return EvidenceBuilder(SafeFetcher(), parser)
+    return EvidenceBuilder(SafeFetcher(), parser, record_attempt=fetch_metrics.record)
 
 
 async def load_search_policies(search: SearchService, db: AsyncEngine, ops: OpsStore) -> None:

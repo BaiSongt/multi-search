@@ -4,6 +4,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 STATIC_EXTRACTION_VERSION = "1"
+type FetchStatus = Literal["blocked", "cancelled", "completed", "failed", "ocr_pending", "timeout"]
 
 
 class DocumentIdentifier(BaseModel):

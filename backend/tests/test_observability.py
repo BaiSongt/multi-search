@@ -1,5 +1,6 @@
 import json
 import logging
+from collections import Counter
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock
 
@@ -7,7 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from multisearch.contracts import Modality, Mode
-from multisearch.observability import Telemetry, install_observability
+from multisearch.observability import FetchMetrics, Telemetry, install_observability
 
 
 class FakeDatabase:
@@ -37,10 +38,22 @@ class FakeDatabase:
 
 
 class FakeRedis:
+    def __init__(self):
+        self.hashes: Counter = Counter()
+
     @asynccontextmanager
     async def pipeline(self, **_kwargs):
         pipe = Mock()
-        pipe.execute = AsyncMock(return_value=({"used_memory": 1024}, 1, 0))
+
+        async def execute():
+            if pipe.hmget.called:
+                key, fields = pipe.hmget.call_args.args
+                return [{"used_memory": 1024}, 1, 0, [self.hashes.get((key, f)) for f in fields]]
+            for call in pipe.hincrby.call_args_list:
+                key, field, count = call.args
+                self.hashes[key, field] += count
+
+        pipe.execute = execute
         yield pipe
 
 
@@ -111,6 +124,36 @@ async def test_metrics_loopback_rejects_forwarded_peer_and_reports_partial_failu
     assert 'multisearch_metrics_dependency_up{dependency="postgres"} 0' in response.text
     assert 'multisearch_metrics_dependency_up{dependency="redis"} 1' in response.text
     assert "database password" not in response.text
+
+
+async def test_fetch_metrics_publish_to_shared_counter_and_keep_labels_bounded():
+    app = make_app(allow_loopback=True)
+    async with (
+        FetchMetrics(app.state.redis).publishing() as api,
+        FetchMetrics(app.state.redis).publishing() as worker,
+    ):
+        api.record("text/html", "completed")
+        worker.record("text/html", "completed")
+        worker.record("application/pdf", "ocr_pending")
+        worker.record("private-server-header", "failed")
+        worker.record(None, "blocked")
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("127.0.0.1", 9999)), base_url="http://localhost"
+    ) as client:
+        response = await client.get("/metrics")
+    assert response.status_code == 200
+    assert response.text.count("# TYPE multisearch_fetch_total counter") == 1
+    for content_type, status, count in [
+        ("text/html", "completed", 2),
+        ("application/pdf", "ocr_pending", 1),
+        ("unknown", "failed", 1),
+        ("unknown", "blocked", 1),
+    ]:
+        assert (
+            f'multisearch_fetch_total{{content_type="{content_type}",status="{status}"}} {count}'
+            in response.text
+        )
+    assert "private-server-header" not in response.text
 
 
 async def test_transport_trace_does_not_log_path_query_or_supplied_ids(caplog):

@@ -23,7 +23,7 @@ from .job_store import JobStore
 from .management_identity import router as identity_router
 from .mcp_api import MCPJobs, create_mcp, create_mcp_app
 from .metering import UsageMeter
-from .observability import install_observability
+from .observability import FetchMetrics, install_observability
 from .ops_api import router as ops_router
 from .ops_store import OpsStore
 from .reporting import UsageReports
@@ -79,7 +79,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         try:
             await bootstrap_identity(app.state.identity.sessions)
-            async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            async with (
+                httpx.AsyncClient(trust_env=False, follow_redirects=False) as client,
+                FetchMetrics.connect(config.redis_url) as fetch_metrics,
+            ):
                 meter = UsageMeter(app.state.db, config.max_concurrent)
                 ops = OpsStore(
                     app.state.db,
@@ -95,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     app.state.redis,
                     client,
                     ops,
-                    build_evidence(config, client),
+                    build_evidence(config, client, fetch_metrics),
                 )
                 app.state.application = SearchApplication(
                     app.state.search, meter, telemetry=telemetry
