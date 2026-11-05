@@ -198,3 +198,10 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 独立 PostgreSQL 的 8 个研究用量场景通过。新旧模型检查点均能在租约耗尽后保留预留、报告未知用量与费用。重新领取后无需再次调用模型，已确认用量的取消任务仍入账。费用迁移保留旧账单值，支持精确保存 `0.00000000000001` 及未知费用 `NULL`。模型响应使用受控夹具。
 - 真实 PostgreSQL 验证图片来源六种状态、旧记录归类、组合筛选、游标分页和租户隔离。队列汇总覆盖空租户、租户隔离、全局、重试和最早等待时间，已终结或过截止的任务从积压中排除。
 - Chromium 工作区回归通过。审计员可只读打开 Provider 页面，统计限当前租户。图片来源筛选、旧 API 兼容和研究报告费用展示通过。八个最终运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
+
+### `0.3.0-alpha.12` 复验
+
+- 411 项后端测试、9 项 SDK 测试、Console 类型检查、管理冒烟和 Chromium 工作区回归通过。隔离 Compose 的八个服务健康。动态抓取与本地研究探针复验 REST／MCP、证据归档、租户隔离和单次计量。
+- 真实 Uvicorn 的 REST 和 MCP 均验证直连地址、可信代理的 IPv4／IPv6、伪造或重复转发头拒绝、Console 网关无法核验地址时的拒绝，以及轮换宽限期内新旧 Key 的白名单继承。独立 PostgreSQL 验证已有 Key 迁移兼容、吊销和降级保护。 [IP 白名单部署](deployment.md#api-key-的-ip-白名单)
+- Chromium 验证创建和轮换时的 IP 白名单及一次性密钥示例。账户会话列表和撤销经过真实 Cookie、Origin 和 CSRF 检查。独立 PostgreSQL 验证旧 Cookie 迁移、分页、租户与所有者隔离，以及续期与撤销并发时撤销仍能定位对应会话。 [会话契约](api-contracts.md#管理面)
+- 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。公网 RFC Editor 正文探针在同版本再次收到 `FETCH_TARGET_BLOCKED`，Worker DNS 返回了非公网地址。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
