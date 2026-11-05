@@ -214,3 +214,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 研究 Worker 在第二轮检索中断后，独立 PostgreSQL 分别验证末次租约结束和租约重领。两条路径保留候选、预算和中断轮次，返回部分完成并计量一次，未观测的轮次指标保持未知。
 - 四租户的 20 并发 Mock Provider 基准完成 40 次冷请求和 40 次租户内缓存命中，80 条完成事件与实际调用一致。冷请求 P50 为 132.633 ms，P95 为 178.352 ms，P99 为 183.009 ms。 [基准方法](operations.md#性能与质量基线)
 - 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。公网 RFC Editor 正文探针仍因 Worker DNS 返回非公网地址而收到 `FETCH_TARGET_BLOCKED`。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
+
+### `0.3.0-alpha.14` 复验
+
+- 434 项后端测试、9 项 SDK 测试、Console 类型检查及 Chromium 工作区回归通过。隔离 Compose 八个服务健康，同源与跨源动态抓取、REST／MCP、本地研究和单次计量复验通过。
+- 独立真实 PostgreSQL 验证旧库迁移默认关闭、两事务版本冲突、权限隔离和最近十条设置历史。Chromium 验证差异预览、确认提交、版本冲突刷新、显式查看及脱敏审计。 [设置和查看接口](api-contracts.md#管理面)
+- 真实 REST／MCP 验证同步与研究首次计量时才写原文，跨入口重放不会补采。关闭或更改策略、重新启用、到期、其他租户或未授权会话均无法获取不适用的原文。后台清理移除已到期或作废的原文，保留用量记录。真实逻辑备份恢复验证原文表数据为空，策略、审计、用量与早期归档兼容。 [备份边界](operations.md#逻辑备份与恢复演练)
+- 20 并发 Mock Provider 基准完成四租户 40 次冷请求、40 次缓存命中和 80 条计量记录。冷请求 P50 为 142.573 ms，P95 为 185.1 ms，P99 为 204.501 ms。
+- 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。公网 RFC Editor 正文探针在同版本仍因 Worker DNS 返回非公网地址而收到 `FETCH_TARGET_BLOCKED`。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
