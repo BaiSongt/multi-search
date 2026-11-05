@@ -75,3 +75,7 @@ PostgreSQL 的严重和高危记录来自 `gosu` 嵌入的 Go 标准库，表中
 `0.3.0-alpha.3` 保留固定的官方 PostgreSQL 基础镜像与入口脚本，用 Alpine `su-exec 0.3-r0` 完成降权。镜像附带 su-exec 的 MIT 许可证。通过新库初始化、原卷兼容、重启和优雅停库验收，实际数据库进程 UID/GID 为 70、有效能力为零。 [官方入口脚本](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh) · [su-exec 许可证](https://github.com/ncopa/su-exec/blob/v0.3/LICENSE)
 
 同一 Trivy 0.76.1 与漏洞库快照复扫七个 `linux/amd64` 运行镜像，PostgreSQL 子清单 `sha256:1c8fc61d0b1971337487353237aaa6bfa4a0c89063d8d7cf6ea953453e907e62` 的严重与高危记录从 1／25 降为 0／0。其余镜像的严重与高危计数与上一轮相同，整体门禁仍返回 2。
+
+`0.3.0-alpha.4` 将 API、Worker 和 Console 切换到固定摘要的 Alpine 基础镜像。Crawl4AI 使用固定摘要的 Wolfi glibc 镜像，以支持 Patchright 的原生驱动。Python 与构建期 uv 的直接 APK 版本已固定，传递 APK 由签名的 Wolfi 仓库解析。 [API 镜像](../backend/Dockerfile) · [Console 镜像](../console/Dockerfile) · [Crawl4AI 镜像](../deploy/crawl4ai/Dockerfile) · [Wolfi 构建文档](https://edu.chainguard.dev/open-source/wolfi/wolfi-with-dockerfiles/)
+
+使用 Trivy 0.76.1 和 2026-11-05 13:09 UTC 更新的漏洞库对最终七个 `linux/amd64` 运行镜像生成 SBOM。严重和高危记录均为零，`--fail-on-high` 返回 0。API 与 Worker 的相同 Python 依赖各有 5 条中危和 1 条低危记录，其余五个镜像在本次扫描中未检出记录。最终运行镜像通过了浏览器、隔离 PDF 子进程和授权 HTML 解析复验。
