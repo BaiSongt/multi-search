@@ -4,7 +4,7 @@
 
 ## 简体中文
 
-MultiSearch 是可独立部署的通用检索平台。当前版本 `0.1.0-alpha.2` 对应 V2.0 规格的阶段 I。
+MultiSearch 是可独立部署的通用检索平台。当前预发布版本 `0.2.0-alpha.1` 对应 V2.0 规格的阶段 II。
 
 REST 和 MCP 支持网页文字、新闻和图片检索。平台通过 DDGS 与 SearXNG 提供模式选择、预算、回退、融合去重和来源追踪。开发者可管理 API Key、查看用量并在 Playground 检索。管理员可查看请求与审计、配置 Provider 和租户配额。
 
@@ -27,7 +27,7 @@ docker compose up --build --wait
 
 启动后运行 `python scripts/smoke.py` 检查 Compose、鉴权和公网双模态结果。运行 `python scripts/smoke_management.py` 验证会话、密钥、计量和权限。 [部署](docs/deployment.md) · [REST 契约](docs/api-contracts.md) · [MCP](docs/mcp.md) · [图片归属](docs/image-attribution.md) · [验收](docs/acceptance.md)
 
-图片许可默认显示未知，支持选择性核验 Wikimedia Commons 的许可声明。网页证据提取、专业数据源、持久任务和深度研究按后续阶段推进。
+阶段 II 增加可定位网页证据、图片来源检查、可选专业与本地来源，以及可恢复抓取任务。启用 `fetch` Compose 配置可运行独立 Worker 和隔离 Crawl4AI。深度研究属于阶段 III。 [部署配置](docs/deployment.md)
 
 ### 版本与许可证
 
@@ -37,7 +37,7 @@ docker compose up --build --wait
 
 ## English
 
-MultiSearch is a self-hosted general-purpose search platform. Version `0.1.0-alpha.2` corresponds to Phase I of the V2.0 specification.
+MultiSearch is a self-hosted general-purpose search platform. Prerelease `0.2.0-alpha.1` corresponds to Phase II of the V2.0 specification.
 
 REST and MCP support web text, news, and image search. DDGS and SearXNG supply candidates with mode selection, budgets, fallback, deduplication, and source tracking. Developers can manage API keys, see usage, and search in the Playground. Administrators can inspect requests and audit events, configure providers, and manage tenant quotas.
 
@@ -60,7 +60,7 @@ docker compose up --build --wait
 
 Run `python scripts/smoke.py` after startup to check Compose, authentication, and live text and image results. Run `python scripts/smoke_management.py` to verify sessions, API keys, metering, and permissions. [Deployment](docs/deployment.md) · [REST contract](docs/api-contracts.md) · [MCP](docs/mcp.md) · [Image attribution](docs/image-attribution.md) · [Acceptance](docs/acceptance.md)
 
-Image rights default to unknown, with optional verification of Wikimedia Commons license declarations. Web evidence extraction, vertical sources, durable jobs, and deep research follow in later phases.
+Phase II adds locatable web evidence, image source checks, optional vertical and local sources, and recoverable fetch jobs. The Compose `fetch` profile starts a separate worker and an isolated Crawl4AI parser. Deep research follows in Phase III. [Deployment settings](docs/deployment.md)
 
 ### Versioning and license
 

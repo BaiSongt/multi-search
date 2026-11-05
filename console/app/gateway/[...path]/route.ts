@@ -6,17 +6,26 @@ export const dynamic = "force-dynamic";
 
 const GET_ROUTES = new Set([
   "me", "keys", "usage", "capabilities", "providers", "admin/overview", "admin/providers",
-  "admin/requests", "admin/tenants", "admin/audit",
+  "admin/requests", "admin/tenants", "admin/audit", "admin/jobs", "admin/images", "admin/routing",
+  "admin/cache", "admin/settings",
 ]);
-const POST_ROUTES = new Set(["auth/login", "auth/refresh", "auth/logout", "keys", "playground", "search", "admin/tenants"]);
+const POST_ROUTES = new Set([
+  "auth/login", "auth/refresh", "auth/logout", "auth/invitations/accept", "keys", "playground", "search", "admin/tenants",
+  "admin/routing/test", "admin/routing/publish", "admin/routing/rollback", "admin/cache/invalidate",
+]);
 const KEY_ACTION = /^keys\/[a-f0-9-]{32,36}\/(rotate|revoke)$/i;
+const JOB_VIEW = /^admin\/jobs\/[a-f0-9-]{32,36}$/i;
+const JOB_CANCEL = /^admin\/jobs\/[a-f0-9-]{32,36}\/cancel$/i;
 const ADMIN_UPDATE = /^admin\/(?:providers\/[a-z0-9_-]{1,64}|tenants\/[a-f0-9-]{32,36}(?:\/quota)?)$/i;
+const TEAM_READ = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/(?:members|invitations)$/i;
+const TEAM_WRITE = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/invitations(?:\/[a-f0-9-]{32,36}\/revoke)?$/i;
+const MEMBER_UPDATE = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/members\/[a-f0-9-]{32,36}$/i;
 const BODY_LIMIT = 64 * 1024;
 
 function accepted(method: string, path: string) {
-  if (method === "GET") return GET_ROUTES.has(path);
-  if (method === "POST") return POST_ROUTES.has(path) || KEY_ACTION.test(path);
-  return method === "PATCH" && ADMIN_UPDATE.test(path);
+  if (method === "GET") return GET_ROUTES.has(path) || JOB_VIEW.test(path) || TEAM_READ.test(path);
+  if (method === "POST") return POST_ROUTES.has(path) || KEY_ACTION.test(path) || JOB_CANCEL.test(path) || TEAM_WRITE.test(path);
+  return method === "PATCH" && (ADMIN_UPDATE.test(path) || MEMBER_UPDATE.test(path));
 }
 
 function failure(status: number, code: string, message: string) {
@@ -75,7 +84,7 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path: st
       body,
       redirect: "error",
       cache: "no-store",
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(25_000)]),
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(path.join("/") === "playground" || path.join("/") === "search" ? 65_000 : 25_000)]),
     });
     const output = new Headers({ "Cache-Control": "no-store" });
     for (const name of ["content-type", "x-request-id", "retry-after", "www-authenticate"]) {

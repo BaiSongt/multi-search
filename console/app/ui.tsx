@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ApiError, callApi, errorMessage } from "./lib/api";
 
 const numbers = new Intl.NumberFormat("zh-HK", { maximumFractionDigits: 2 });
@@ -66,6 +66,13 @@ export function Failure({ reason, retry }: { reason: unknown; retry?: () => void
   return (
     <div className="notice danger" role="alert">
       <p>{errorMessage(reason)}</p>
+      {reason instanceof ApiError && (
+        <div className="actions">
+          <code>{reason.code}</code>
+          {reason.requestId && <CopyId value={reason.requestId} />}
+          {reason.retryAfterMs != null && <span>可在 {Math.ceil(reason.retryAfterMs / 1000)} 秒后重试。</span>}
+        </div>
+      )}
       {reason instanceof ApiError && reason.status === 401
         ? <a href="/auth">重新登录</a>
         : retry && <button type="button" onClick={retry}>重试</button>}
@@ -76,6 +83,7 @@ export function Failure({ reason, retry }: { reason: unknown; retry?: () => void
 export function useResource<T>(path: string) {
   const [revision, setRevision] = useState(0);
   const [result, setResult] = useState<{ path: string; revision: number; data?: T; error?: unknown }>();
+  const reload = useCallback(() => setRevision((previous) => previous + 1), []);
   useEffect(() => {
     const abort = new AbortController();
     void callApi<T>(path, { signal: abort.signal }).then(
@@ -85,12 +93,13 @@ export function useResource<T>(path: string) {
     return () => abort.abort();
   }, [path, revision]);
 
-  const current = result?.path === path && result.revision === revision ? result : undefined;
+  const current = result?.path === path ? result : undefined;
+  const pending = current?.revision !== revision;
   return {
     data: current?.data,
-    error: current?.error,
-    pending: current === undefined,
-    reload: () => setRevision((previous) => previous + 1),
+    error: pending ? undefined : current?.error,
+    pending,
+    reload,
   };
 }
 
@@ -164,7 +173,12 @@ export function Dialog({ title, children, close, pending = false }: { title: str
   const label = useId();
   useEffect(() => {
     const node = dialog.current;
-    if (node && !node.open) node.showModal();
+    if (!node) return;
+    const trigger = document.activeElement;
+    if (!node.open) node.showModal();
+    return () => {
+      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
+    };
   }, []);
   return (
     <dialog ref={dialog} aria-labelledby={label} onClose={close} onCancel={(event) => { if (pending) event.preventDefault(); }}>

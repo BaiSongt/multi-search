@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { callApi } from "./lib/api";
 import { quotaLabels, type Audit, type Overview, type Page, type Provider, type RequestRow, type Tenant } from "./lib/contracts";
@@ -15,7 +16,7 @@ export function AdminOverview() {
   return (
     <>
       <div className="actions">
-        <span className="muted">按授权范围汇总。没有样本时显示「—」。</span>
+        <span className="muted">QPS 取最近 1 分钟，其他用量和延迟取最近 30 天。没有样本时显示「—」。</span>
         <button type="button" onClick={() => { resource.reload(); failures.reload(); }}>刷新指标</button>
       </div>
       <Metrics values={[
@@ -266,7 +267,12 @@ export function TenantsView({ csrf, quotas = false }: { csrf: string; quotas?: b
               <td><span className={`badge ${tenant.enabled ? "positive" : "warning"}`}>{tenant.enabled ? "启用" : "停用"}</span></td>
               <td>{formatNumber(tenant.search_requests)}</td>
               {quotas && <td><QuotaSummary quota={tenant.quota} /></td>}
-              <td><button type="button" onClick={() => setEditing(tenant)}>{quotas ? "编辑额度" : "编辑状态"}</button></td>
+              <td>
+                <div className="actions">
+                  {!quotas && <Link className="button" href={`/admin/tenants/${encodeURIComponent(tenant.id)}`}>成员与邀请</Link>}
+                  <button type="button" onClick={() => setEditing(tenant)}>{quotas ? "编辑额度" : "编辑状态"}</button>
+                </div>
+              </td>
             </tr>
           ))}
         </Table>

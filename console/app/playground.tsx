@@ -2,8 +2,8 @@
 
 import { useState, type FormEvent } from "react";
 import { callApi } from "./lib/api";
-import type { ImageResult, RightsStatus, SearchResponse } from "./lib/contracts";
-import { Copy, CopyId, dateTime, Dialog, Empty, ExternalLink, Failure, Loading, safeLink } from "./ui";
+import type { Capabilities, EvidenceRecord, ImageResult, RightsStatus, SearchResponse } from "./lib/contracts";
+import { Copy, CopyId, dateTime, Dialog, Empty, ExternalLink, Failure, Loading, safeLink, useResource } from "./ui";
 
 const RIGHTS: Record<RightsStatus, { label: string; color: string }> = {
   unknown: { label: "授权未知", color: "warning" },
@@ -71,6 +71,14 @@ function ImageDetails({ result, close }: { result: ImageResult; close: () => voi
 }
 
 type ModalityChoice = "text" | "image" | "mixed";
+const MODES = { auto: "自动", quick: "快速", standard: "标准", local: "本地缓存", evidence: "证据检索" };
+const SOURCES: Record<string, string> = { web: "Web", news: "新闻", academic: "学术", code: "代码", local: "本地", patent: "专利" };
+const SCOPES: Record<string, string> = { public: "公共网络", private: "私有网络", offline: "离线" };
+const DEFAULT_PAIRS = [
+  { source_type: "web", modality: "text" },
+  { source_type: "web", modality: "image" },
+  { source_type: "news", modality: "text" },
+];
 
 function searchBody(fields: FormData, imageOnly: boolean) {
   const choice = imageOnly ? "image" : fields.get("modality") ?? "text";
@@ -81,17 +89,25 @@ function searchBody(fields: FormData, imageOnly: boolean) {
   const imageType = fields.get("image_type");
   const language = fields.get("language");
   const region = fields.get("region");
+  const latency = fields.get("max_latency_ms");
+  const pages = fields.get("max_pages");
+  const metadataFetches = fields.get("max_image_metadata_fetches");
   return {
     query: String(fields.get("query") ?? "").trim(),
     mode: fields.get("mode") ?? "auto",
-    source_types: [choice === "text" ? fields.get("source") ?? "web" : "web"],
+    source_types: [fields.get("source") ?? "web"],
     modalities,
     max_results: Number(fields.get("max_results") || "10"),
     ...(language ? { language } : {}),
     ...(region ? { region } : {}),
+    ...(latency ? { max_latency_ms: Number(latency) } : {}),
+    ...(pages ? { max_pages: Number(pages) } : {}),
+    ...(metadataFetches ? { max_image_metadata_fetches: Number(metadataFetches) } : {}),
+    ...(fields.has("require_evidence") ? { require_evidence: true } : {}),
+    ...(fields.has("network_scope") ? { network_scope: fields.get("network_scope") } : {}),
     ...(choice === "text" ? {} : {
       image_options: {
-        source_page_required: fields.get("source_page_required") !== null,
+        source_page_required: !fields.has("image_options_present") || fields.has("source_page_required"),
         license_policy: fields.get("license_policy") ?? "any_with_status",
         ...(width ? { min_width: Number(width) } : {}),
         ...(height ? { min_height: Number(height) } : {}),
@@ -102,13 +118,55 @@ function searchBody(fields: FormData, imageOnly: boolean) {
   };
 }
 
-export function Playground({ csrf, imageOnly = false }: { csrf: string; imageOnly?: boolean }) {
+function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () => void }) {
+  const locator = record.locator;
+  return (
+    <Dialog title="可定位证据" close={close}>
+      <div className="stack">
+        <h3>{record.title ?? "已提取的来源摘录"}</h3>
+        <blockquote className="notice evidence-excerpt">{record.evidence_text}</blockquote>
+        <dl>
+          <dt>来源页面</dt><dd><ExternalLink href={record.origin_url}>{record.origin_url}</ExternalLink></dd>
+          <dt>证据 ID</dt><dd><CopyId value={record.evidence_id} /></dd>
+          <dt>抓取时间</dt><dd>{dateTime(record.retrieved_at)}</dd>
+          <dt>位置类型</dt><dd>{locator.kind}</dd>
+          <dt>章节</dt><dd>{locator.section ?? "未标注"}</dd>
+          <dt>字符偏移</dt><dd>{locator.text_offset_start}–{locator.text_offset_end}</dd>
+          {locator.page_number !== null && <><dt>页码</dt><dd>{locator.page_number}</dd></>}
+          {record.document_identifier && <><dt>文档标识</dt><dd>{record.document_identifier.type} · {record.document_identifier.value}</dd></>}
+          <dt>提取方式</dt><dd>{record.extraction_method} / {record.extraction_version}</dd>
+          <dt>内容 SHA-256</dt><dd><CopyId value={record.content_sha256} /></dd>
+          <dt>证据状态</dt><dd>{record.verification_status}</dd>
+        </dl>
+        <p className="muted">字符偏移定位到本次抓取所提取的文本。</p>
+      </div>
+    </Dialog>
+  );
+}
+
+export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { csrf: string; imageOnly?: boolean; sessionSearch?: boolean }) {
   const [modality, setModality] = useState<ModalityChoice>(imageOnly ? "image" : "text");
+  const [mode, setMode] = useState("auto");
+  const [draft, setDraft] = useState<ReturnType<typeof searchBody>>();
   const [request, setRequest] = useState<ReturnType<typeof searchBody>>();
   const [response, setResponse] = useState<SearchResponse>();
   const [selected, setSelected] = useState<ImageResult>();
+  const [evidence, setEvidence] = useState<EvidenceRecord>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
+  const capabilities = useResource<Capabilities>("capabilities");
+  const limits = capabilities.data?.limits;
+  const evidenceAvailable = capabilities.data?.modes.evidence === "available";
+  const imageAvailable = capabilities.data ? capabilities.data.modalities.image === "available" : true;
+  const allowedModes = Object.entries(MODES).filter(([name]) => capabilities.data
+    ? capabilities.data.modes[name] === "available" : name !== "evidence");
+  const pairs = capabilities.data?.combinations ?? DEFAULT_PAIRS;
+  const scopes = Object.entries(SCOPES).filter(([scope]) => capabilities.data
+    ? capabilities.data.network_scopes[scope] === "available" : scope === "public");
+  const sources = [...new Set(pairs.filter((pair) => modality === "mixed"
+    ? pairs.some((item) => item.source_type === pair.source_type && item.modality !== pair.modality && ["text", "image"].includes(item.modality))
+    : pair.modality === modality).map((pair) => pair.source_type))];
+  const modeLimit = limits?.modes[mode === "auto" ? "standard" : mode];
 
   async function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -133,49 +191,67 @@ export function Playground({ csrf, imageOnly = false }: { csrf: string; imageOnl
 
   return (
     <>
-      <form method="post" onSubmit={search} className="panel" aria-busy={pending}>
+      {capabilities.error !== undefined && <Failure reason={capabilities.error} retry={capabilities.reload} />}
+      {imageOnly && !imageAvailable && <p className="notice warning" role="status">当前部署没有可用的图片搜索来源。</p>}
+      <form method="post" onSubmit={search} onChange={(event) => setDraft(searchBody(new FormData(event.currentTarget), imageOnly))} className="panel" aria-busy={pending}>
         <div className="form-grid">
           <label className="wide">关键词<input name="query" required maxLength={1024} placeholder={imageOnly ? "例如：Golden Gate Bridge" : "例如：NASA"} /></label>
           {!imageOnly && (
             <label>模态
               <select name="modality" value={modality} onChange={(event) => setModality(event.target.value as ModalityChoice)}>
-                <option value="text">文字</option><option value="image">图片</option><option value="mixed">混合</option>
+                <option value="text">文字</option><option value="image" disabled={!imageAvailable}>图片</option><option value="mixed" disabled={!imageAvailable}>混合</option>
               </select>
             </label>
           )}
           <label>来源
-            <select name="source" disabled={modality !== "text"}>
-              <option value="web">Web</option><option value="news">新闻</option>
+            <select name="source" key={modality} disabled={!sources.length}>
+              {sources.length
+                ? sources.map((source) => <option key={source} value={source}>{SOURCES[source] ?? source}</option>)
+                : <option value="">暂无可用来源</option>}
             </select>
           </label>
           <label>搜索深度
-            <select name="mode"><option value="auto">自动</option><option value="quick">快速</option><option value="standard">标准</option><option value="local">本地缓存</option></select>
+            <select name="mode" value={mode} onChange={(event) => setMode(event.target.value)}>
+              {allowedModes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
           </label>
           <label>最多结果<input type="number" name="max_results" defaultValue={10} required min={1} max={30} /></label>
         </div>
         {modality !== "text" && (
           <fieldset>
             <legend>图片筛选</legend>
+            <input type="hidden" name="image_options_present" value="1" />
             <div className="form-grid">
               <label>最小宽度（px）<input type="number" name="min_width" min={1} max={20000} /></label>
               <label>最小高度（px）<input type="number" name="min_height" min={1} max={20000} /></label>
               <label>宽高比<select name="orientation"><option value="">全部</option><option value="landscape">横向</option><option value="portrait">纵向</option><option value="square">方形</option></select></label>
               <label>类型<select name="image_type"><option value="">全部</option><option value="photo">照片</option><option value="illustration">插画</option><option value="transparent">透明背景</option><option value="icon">图标</option></select></label>
               <label>许可策略<select name="license_policy"><option value="any_with_status">全部（含授权未知）</option><option value="declared_only">有声明</option><option value="verified_only">已核验</option></select></label>
+              {limits && limits.max_image_metadata_fetches > 0 && <label>最多来源核验<input name="max_image_metadata_fetches" type="number" min={0} max={limits.max_image_metadata_fetches} /></label>}
             </div>
             <label className="check"><input name="source_page_required" type="checkbox" defaultChecked />要求提供来源页</label>
           </fieldset>
         )}
-        <details>
+        <details open={sessionSearch ? undefined : true}>
           <summary>高级参数与 API Key</summary>
           <div className="form-grid">
             <label>语言<input name="language" placeholder="zh-CN" maxLength={22} /></label>
             <label>地区<input name="region" pattern="[A-Z]{2}" placeholder="HK" maxLength={2} /></label>
-            <label>API Key<input name="api_key" type="password" autoComplete="off" maxLength={128} placeholder="留空使用当前会话" /></label>
+            <label>网络范围<select name="network_scope">{scopes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label>请求时限（ms）<input name="max_latency_ms" type="number" min={100} max={modeLimit?.max_latency_ms ?? 900000} placeholder={String(modeLimit?.max_latency_ms ?? "")} /></label>
+            {evidenceAvailable && (
+              <>
+                <label>最多抓取页数<input name="max_pages" type="number" min={0} max={30} /></label>
+                <label className="check"><input type="checkbox" name="require_evidence" />要求提供证据</label>
+              </>
+            )}
+            <label>API Key<input name="api_key" type="password" autoComplete="off" maxLength={128} required={!sessionSearch}
+              placeholder={sessionSearch ? "留空使用当前会话" : "输入获授权的 API Key"} /></label>
           </div>
         </details>
-        <div className="actions"><button type="submit" className="primary" disabled={pending}>{pending ? "检索中…" : "搜索"}</button></div>
+        <div className="actions"><button type="submit" className="primary" disabled={pending || !sources.length}>{pending ? "检索中…" : "搜索"}</button></div>
       </form>
+      {draft && <details className="panel"><summary>查看请求预览</summary><pre>{JSON.stringify(draft, null, 2)}</pre></details>}
       {request && <details className="panel"><summary>查看请求 JSON</summary><pre>{JSON.stringify(request, null, 2)}</pre></details>}
       {pending && <Loading />}
       {error !== undefined && <Failure reason={error} />}
@@ -222,9 +298,21 @@ export function Playground({ csrf, imageOnly = false }: { csrf: string; imageOnl
             </section>
           )}
           <details className="panel"><summary>查看原始响应 JSON</summary><pre>{JSON.stringify(response, null, 2)}</pre></details>
+          {response.evidence_records && response.evidence_records.length > 0 && (
+            <section className="panel" aria-label="证据列表">
+              <h2>可定位证据 · {response.evidence_records.length} 条</h2>
+              {response.evidence_records.map((record) => (
+                <div className="actions" key={record.evidence_id}>
+                  <ExternalLink href={record.origin_url}>{record.title ?? "来源页"}</ExternalLink>
+                  <button type="button" onClick={() => setEvidence(record)}>证据详情</button>
+                </div>
+              ))}
+            </section>
+          )}
         </>
       )}
       {selected && <ImageDetails result={selected} close={() => setSelected(undefined)} />}
+      {evidence && <EvidenceDetails record={evidence} close={() => setEvidence(undefined)} />}
     </>
   );
 }

@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { callApi } from "./lib/api";
-import { quotaLabels, type IssuedKey, type KeyPage, type KeyRow } from "./lib/contracts";
+import { quotaLabels, type Capabilities, type IssuedKey, type KeyPage, type KeyRow } from "./lib/contracts";
 import { Copy, CopyId, dateTime, Dialog, Empty, Failure, Loading, Pagination, Table, usePagination, useResource } from "./ui";
 
 const statuses = { active: "启用", expired: "已过期", revoked: "已吊销", rotating: "轮换中" };
@@ -72,6 +72,7 @@ function KeyAction({ action, csrf, close, changed }: { action: Action; csrf: str
   const [pending, setPending] = useState(false);
   const [secret, setSecret] = useState("");
   const [error, setError] = useState<unknown>();
+  const capabilities = useResource<Capabilities>("capabilities");
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -134,6 +135,8 @@ function KeyAction({ action, csrf, close, changed }: { action: Action; csrf: str
                 <legend>作用域</legend>
                 <label className="check"><input type="checkbox" name="scope" value="search:text" defaultChecked />文字搜索</label>
                 <label className="check"><input type="checkbox" name="scope" value="search:image" defaultChecked />图片搜索</label>
+                <label className="check"><input type="checkbox" name="scope" value="fetch" />网页提取</label>
+                {capabilities.data?.research === "available" && <label className="check"><input type="checkbox" name="scope" value="research" />深度研究</label>}
               </fieldset>
               <details>
                 <summary>可选密钥额度</summary>

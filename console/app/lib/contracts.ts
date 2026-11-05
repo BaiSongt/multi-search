@@ -27,6 +27,7 @@ export const consoleNav = {
   playground: "Playground",
   images: "图片检索",
   docs: "API 文档",
+  team: "团队与权限",
   settings: "账户设置",
 };
 
@@ -34,18 +35,24 @@ export const adminNav = {
   overview: "服务总览",
   providers: "Provider 管理",
   requests: "请求追踪",
+  jobs: "任务与队列",
+  routing: "路由与策略",
+  images: "图片来源质量",
   tenants: "租户管理",
   quotas: "额度与限流",
   audit: "审计与安全",
+  cache: "缓存与存储",
+  settings: "系统设置",
 };
 
 export function canView(role: Role, workspace: Workspace, section: string) {
   if (workspace === "console") {
     if (role === "auditor") return section === "settings";
+    if (section === "team") return role === "tenant_admin" || role === "platform_admin";
     return section !== "keys" || role !== "operations_admin";
   }
   if (role === "platform_admin") return true;
-  if (role === "operations_admin") return ["overview", "providers", "requests", "audit"].includes(section);
+  if (role === "operations_admin") return ["overview", "providers", "requests", "jobs", "routing", "images", "cache", "audit", "settings"].includes(section);
   return (role === "auditor" || role === "tenant_admin") && section === "audit";
 }
 
@@ -56,6 +63,7 @@ export function workspaceHome(role: Role) {
 }
 
 export function workspaceTarget(value: string | undefined): string | undefined {
+  if (value && /^\/admin\/tenants\/[a-f0-9-]{32,36}$/i.test(value)) return value;
   const match = /^\/(console|admin)\/([a-z]+)$/.exec(value ?? "");
   if (!match) return undefined;
   const nav = match[1] === "console" ? consoleNav : adminNav;
@@ -151,6 +159,26 @@ export type Tenant = { id: string; slug: string; enabled: boolean; quota: Record
 export type Audit = { id: string; tenant_id: string; actor_type: string; actor_id: string | null; action: string; target_id: string | null; details: unknown; occurred_at: string };
 export type Page<T> = { items: T[]; next_cursor: string | null };
 
+export type Member = { user_id: string; email: string; role: Role; enabled: boolean; account_enabled: boolean; has_password: boolean };
+export type Invitation = { id: string; email: string; role: Role; status: string; created_at: string; expires_at: string; tenant_id: string };
+export type IssuedInvitation = { invitation: Invitation; token: string };
+
+export type JobStatus = "queued" | "running" | "cancelling" | "completed" | "partial" | "failed" | "cancelled";
+export type Job = {
+  job_id: string;
+  tenant_id: string;
+  kind: "fetch" | "research";
+  status: JobStatus;
+  created_at: string;
+  updated_at: string;
+  deadline_at: string;
+  attempts: number;
+  max_attempts: number;
+  progress: { stage: string; completed: number; total: number };
+  result: unknown;
+  error: { code: string; message: string } | null;
+};
+
 export type RightsStatus = "unknown" | "declared_unverified" | "verified_license" | "conflict";
 export type Attribution = {
   original_url: string;
@@ -185,6 +213,51 @@ type ResultBase = {
 
 export type SearchResult = (ResultBase & { kind: "text" }) | (ResultBase & { kind: "image"; image: Attribution });
 export type ImageResult = Extract<SearchResult, { kind: "image" }>;
+export type ImageReportRow = {
+  id: string;
+  request_id: string;
+  tenant_id: string;
+  source_page_url: string | null;
+  original_url: string;
+  thumbnail_url?: string | null;
+  rights_status: RightsStatus;
+  source_page_verified: boolean;
+  source_page_status?: string | null;
+  last_check_at?: string | null;
+  retrieved_at: string;
+};
+
+export type ImageReport = Page<ImageReportRow> & { counts: Record<string, number> };
+export type EvidenceRecord = {
+  evidence_id: string;
+  result_id: string | null;
+  origin_url: string;
+  canonical_url: string;
+  document_identifier: { type: string; value: string } | null;
+  retrieved_at: string;
+  published_at: string | null;
+  title: string | null;
+  content_type: string;
+  evidence_text: string;
+  locator: { kind: string; section: string | null; text_offset_start: number; text_offset_end: number; page_number: number | null };
+  content_sha256: string;
+  extraction_method: string;
+  extraction_version: string;
+  verification_status: string;
+  access_policy: string;
+};
+
+export type Capabilities = {
+  fetch?: string;
+  research?: string;
+  modes: Record<string, string>;
+  source_types: Record<string, string>;
+  modalities: Record<string, string>;
+  network_scopes: Record<string, string>;
+  combinations: { source_type: string; modality: string }[];
+  limits: { modes: Record<string, { max_latency_ms: number; max_results: number }>; max_image_metadata_fetches: number };
+};
+
 export type SearchResponse = {
   request_id: string;
   mode_executed: string;
@@ -194,4 +267,5 @@ export type SearchResponse = {
   results: SearchResult[];
   warnings: string[];
   cache_hit: boolean;
+  evidence_records?: EvidenceRecord[];
 };

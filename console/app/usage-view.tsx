@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { quotaLabels, type RequestRow, type Totals, type Usage, type UsageDay } from "./lib/contracts";
+import { downloadCsv } from "./lib/csv";
 import { CopyId, dateTime, Dialog, Empty, Failure, formatNumber, Loading, Table, useResource } from "./ui";
 
 const statusTitles: Record<string, string> = {
@@ -132,6 +133,11 @@ export function UsageView({ overview = false }: { overview?: boolean }) {
         <span className="badge">最近 {usage.window_days} 天</span>
         <span className="muted">时间按浏览器时区显示，图表按 UTC 汇总。</span>
         <button type="button" onClick={resource.reload}>刷新</button>
+        {!overview && <button type="button" disabled={!usage.series.length} onClick={() => downloadCsv(
+          "multisearch-usage-utc.csv",
+          ["日期（UTC）", "搜索次数", "错误次数", "文字结果数", "图片结果数"],
+          usage.series.map((point) => [point.day, point.search_requests, point.errors, point.text_results_returned, point.image_results_returned]),
+        )}>导出日用量 CSV</button>}
       </div>
       <Metrics values={resourceMetrics(usage.totals)} />
       <div className="overview-grid">
@@ -145,6 +151,14 @@ export function UsageView({ overview = false }: { overview?: boolean }) {
           {Object.entries(statusTitles).map(([code, label]) => <option key={code} value={code}>{label}</option>)}
         </select>
         <button type="submit">筛选</button>
+        {!overview && <button type="button" disabled={!recent.length} onClick={() => downloadCsv(
+          "multisearch-requests.csv",
+          ["请求 ID", "时间（UTC）", "状态", "错误码", "模式", "模态", "耗时（毫秒）", "文字结果数", "图片结果数", "缓存命中"],
+          recent.map((row) => [
+            row.request_id, row.created_at, row.status, row.code, row.mode, row.modalities.join("|"),
+            row.elapsed_ms, row.text_results_returned, row.image_results_returned, row.cache_hit,
+          ]),
+        )}>导出筛选调用 CSV</button>}
       </form>
       <RequestTable rows={recent} caption="最近调用" />
     </>
