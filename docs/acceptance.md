@@ -129,3 +129,12 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - Chromium 使用持久化来源诊断验证追踪 ID 和学术来源筛选、验证码／限流明细、普通开发者拒绝与运维跨租户 404。 [管理接口](api-contracts.md#管理面)
 - 独立 Compose 从自定义 YAML 加载快速模式 2500 ms／5 条预算、来源优先级和图片过滤。主 Compose 的四租户 20 并发队列和 REST／MCP 研究探针通过。 [部署配置](deployment.md#部署策略基线)
 - 公网冒烟分别返回 3 条文字和 3 条图片候选，均为部分成功。三次 Mock 并发测量的 P95 为 232.004、217.194 和 197.888 ms，本轮仍未稳定达到 200 ms 的设计目标。 [性能基线](operations.md#性能与质量基线)
+
+### `0.3.0-alpha.5` 复验
+
+- 314 项后端测试与 Console 类型检查通过，七个 Compose 服务健康。
+- 同一容器资源与 PostgreSQL／Redis 下交替运行三对测量，候选版 P95 均低于 200 ms。最终 Compose 的独立 20 并发复测 P95 为 180.876 ms，40 次冷请求、40 次隔离缓存命中及 80 条完成事件一致。 [性能基线](operations.md#性能与质量基线)
+- 独立 PostgreSQL 验证等待租户锁期间过期的 Key 被拒绝且不计量，四租户队列、租约、取消及共享并发额度回归通过。
+- Chromium 使用实际 PostgreSQL 数据验证运维 Provider 计数的租户隔离、平台管理员额度报告权限、脱敏 Key 分页和逐 Key 用量，并展开真实 SearXNG 的能力声明。 [管理接口](api-contracts.md#管理面)
+- 受控来源返回验证码错误时，REST 502 重放保留原追踪 ID 和两条类型化诊断，PostgreSQL 只写入一次用量。真实 REST／MCP 共用研究任务、追踪、单次计量和指标鉴权通过。该次公网研究收集到 30 条候选，正文证据为 0，返回 `partial`。
+- 七个实际运行镜像均生成 SBOM，并通过严重及高危漏洞扫描门禁。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
