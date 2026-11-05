@@ -10,10 +10,11 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from .contracts import Mode, SearchRequest, SearchResponse
+from .contracts import Modality, Mode, SearchRequest, SearchResponse
 from .errors import ApiError
+from .evidence_store import save_search_metadata
 from .policy import lock_tenant, tenant_quota
 
 logger = logging.getLogger(__name__)
@@ -51,14 +52,20 @@ def _windows(now: datetime) -> dict[str, tuple[datetime, datetime]]:
     }
 
 
-def _quota_checks(body: SearchRequest, mode: Mode, now: datetime) -> dict:
+def _quota_checks(
+    modalities: list[Modality], mode: Mode, now: datetime, *, include_concurrency: bool
+) -> dict:
     windows = _windows(now)
     checks = {
         f"requests_per_{unit}": (f"created_at >= :{unit}", end)
         for unit, (_, end) in windows.items()
     }
-    checks["concurrency"] = ("status = 'running' AND reservation_expires_at > :now", None)
-    for modality in body.modalities:
+    if include_concurrency:
+        checks["concurrency"] = (
+            "operation = 'search' AND status = 'running' AND reservation_expires_at > :now",
+            None,
+        )
+    for modality in modalities:
         if modality in {"text", "image"}:
             checks[f"{modality}_per_day"] = (
                 f"created_at >= :day AND '{modality}' = ANY(modalities)",
@@ -66,6 +73,105 @@ def _quota_checks(body: SearchRequest, mode: Mode, now: datetime) -> dict:
             )
     checks[f"{mode}_per_day"] = ("created_at >= :day AND mode = :mode", windows["day"][1])
     return checks
+
+
+async def assert_principal(
+    connection: AsyncConnection, principal: SearchPrincipal, now: datetime
+) -> None:
+    params = {
+        "tenant": principal.tenant_id,
+        "user_id": principal.user_id,
+        "key_id": principal.principal_id if principal.kind == "key" else None,
+        "now": now,
+    }
+    if principal.kind == "key":
+        valid = await connection.scalar(
+            text("""
+            SELECT k.id FROM api_keys k
+            JOIN tenants t ON t.id = k.tenant_id
+            JOIN users u ON u.id = k.owner_id
+            JOIN memberships m ON (m.tenant_id, m.user_id) = (k.tenant_id, k.owner_id)
+            WHERE k.tenant_id = :tenant AND k.id = :key_id AND k.owner_id = :user_id
+              AND k.revoked_at IS NULL AND coalesce(k.rotation_expires_at, k.expires_at) > :now
+              AND t.enabled AND u.enabled AND m.enabled
+        """),
+            params,
+        )
+        if valid is None:
+            raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
+    else:
+        active = await connection.scalar(
+            text("""
+            SELECT m.user_id FROM memberships m
+            JOIN tenants t ON t.id = m.tenant_id JOIN users u ON u.id = m.user_id
+            WHERE m.tenant_id = :tenant AND m.user_id = :user_id AND m.enabled
+              AND t.enabled AND u.enabled
+        """),
+            params,
+        )
+        if active is None:
+            raise ApiError(403, "FORBIDDEN", "租户或账户已停用")
+
+
+async def enforce_quota(
+    connection: AsyncConnection,
+    principal: SearchPrincipal,
+    now: datetime,
+    mode: Mode,
+    modalities: list[Modality],
+    max_concurrent: int,
+    *,
+    include_concurrency: bool = True,
+) -> None:
+    params = {
+        "tenant": principal.tenant_id,
+        "user_id": principal.user_id,
+        "key_id": principal.principal_id if principal.kind == "key" else None,
+        "now": now,
+    }
+    params["mode"] = mode.value
+    quota = await tenant_quota(connection, principal.tenant_id, max_concurrent)
+    checks = _quota_checks(modalities, mode, now, include_concurrency=include_concurrency)
+    columns = []
+    for index, (condition, _) in enumerate(checks.values()):
+        columns.append(f"COUNT(*) FILTER (WHERE {condition}) AS t{index}")
+        if principal.limits:
+            columns.append(f"COUNT(*) FILTER (WHERE {condition} AND key_id = :key_id) AS k{index}")
+    # 所有 SQL 条件来自固定窗口和已验证枚举，查询内容只作为绑定参数。
+    window_starts = {name: start for name, (start, _) in _windows(now).items()}
+    counts = (
+        (
+            await connection.execute(
+                text(f"""
+        SELECT {", ".join(columns)} FROM usage_events
+        WHERE tenant_id = :tenant AND (
+            created_at >= :month OR (status = 'running' AND reservation_expires_at > :now)
+        )
+    """),
+                {**params, **window_starts},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    for index, (name, (_, until)) in enumerate(checks.items()):
+        key_limit = principal.limits.get(name)
+        if counts[f"t{index}"] >= quota[name] or (
+            key_limit is not None and counts[f"k{index}"] >= key_limit
+        ):
+            retry_ms = max(1, int((until - now).total_seconds() * 1000)) if until else 1000
+            code = (
+                "RATE_LIMITED"
+                if name in {"requests_per_minute", "concurrency"}
+                else "QUOTA_EXCEEDED"
+            )
+            raise ApiError(
+                429,
+                code,
+                f"已达到配额限制：{name}",
+                retryable=True,
+                retry_after_ms=retry_ms,
+            )
 
 
 class UsageMeter:
@@ -129,33 +235,7 @@ class UsageMeter:
             await lock_tenant(connection, principal.tenant_id)
             now = (await connection.scalar(text("SELECT clock_timestamp()"))).astimezone(UTC)
             params["now"] = now
-            if principal.kind == "key":
-                valid = await connection.scalar(
-                    text("""
-                    SELECT k.id FROM api_keys k
-                    JOIN tenants t ON t.id = k.tenant_id
-                    JOIN users u ON u.id = k.owner_id
-                    JOIN memberships m ON (m.tenant_id, m.user_id) = (k.tenant_id, k.owner_id)
-                    WHERE k.tenant_id = :tenant AND k.id = :key_id AND k.owner_id = :user_id
-                      AND k.revoked_at IS NULL AND coalesce(k.rotation_expires_at, k.expires_at) > :now
-                      AND t.enabled AND u.enabled AND m.enabled
-                """),
-                    params,
-                )
-                if valid is None:
-                    raise ApiError(401, "AUTH_REQUIRED", "需要有效的 API Key")
-            else:
-                active = await connection.scalar(
-                    text("""
-                    SELECT m.user_id FROM memberships m
-                    JOIN tenants t ON t.id = m.tenant_id JOIN users u ON u.id = m.user_id
-                    WHERE m.tenant_id = :tenant AND m.user_id = :user_id AND m.enabled
-                      AND t.enabled AND u.enabled
-                """),
-                    params,
-                )
-                if active is None:
-                    raise ApiError(403, "FORBIDDEN", "租户或账户已停用")
+            await assert_principal(connection, principal, now)
             if idem is not None:
                 await connection.execute(
                     text("""
@@ -197,50 +277,9 @@ class UsageMeter:
                         )
                     raise ApiError(503, "REQUEST_INTERRUPTED", "上一次请求执行中断")
 
-            quota = await tenant_quota(connection, principal.tenant_id, self.max_concurrent)
-            checks = _quota_checks(body, mode, now)
-            columns = []
-            for index, (condition, _) in enumerate(checks.values()):
-                columns.append(f"COUNT(*) FILTER (WHERE {condition}) AS t{index}")
-                if principal.limits:
-                    columns.append(
-                        f"COUNT(*) FILTER (WHERE {condition} AND key_id = :key_id) AS k{index}"
-                    )
-            # 所有 SQL 条件来自固定窗口和已验证枚举，查询内容只作为绑定参数。
-            window_starts = {name: start for name, (start, _) in _windows(now).items()}
-            counts = (
-                (
-                    await connection.execute(
-                        text(f"""
-                SELECT {", ".join(columns)} FROM usage_events
-                WHERE tenant_id = :tenant AND (
-                    created_at >= :month OR (status = 'running' AND reservation_expires_at > :now)
-                )
-            """),
-                        {**params, **window_starts},
-                    )
-                )
-                .mappings()
-                .one()
+            await enforce_quota(
+                connection, principal, now, mode, body.modalities, self.max_concurrent
             )
-            for index, (name, (_, until)) in enumerate(checks.items()):
-                key_limit = principal.limits.get(name)
-                if counts[f"t{index}"] >= quota[name] or (
-                    key_limit is not None and counts[f"k{index}"] >= key_limit
-                ):
-                    retry_ms = max(1, int((until - now).total_seconds() * 1000)) if until else 1000
-                    code = (
-                        "RATE_LIMITED"
-                        if name in {"requests_per_minute", "concurrency"}
-                        else "QUOTA_EXCEEDED"
-                    )
-                    raise ApiError(
-                        429,
-                        code,
-                        f"已达到配额限制：{name}",
-                        retryable=True,
-                        retry_after_ms=retry_ms,
-                    )
             event_id = uuid4()
             await connection.execute(
                 text("""
@@ -339,6 +378,8 @@ class UsageMeter:
                         for index, run in enumerate(response.provider_runs)
                     ],
                 )
+            if response is not None:
+                await save_search_metadata(connection, admission.event_id, response)
 
     async def cancel(self, admission: Admission) -> None:
         await shield(

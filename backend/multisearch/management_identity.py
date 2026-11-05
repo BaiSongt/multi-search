@@ -52,7 +52,9 @@ class SessionView(BaseModel):
 class KeyCreate(InputModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
     environment: Literal["dev", "test", "prod"] = "dev"
-    scopes: list[Literal["search:text", "search:image"]] = Field(min_length=1, max_length=2)
+    scopes: list[Literal["search:text", "search:image", "fetch", "research"]] = Field(
+        min_length=1, max_length=4
+    )
     ttl_hours: int = Field(default=24, strict=True, ge=1, le=720)
     limits: dict[str, Annotated[int, Field(strict=True)]] = Field(
         default_factory=dict, max_length=11

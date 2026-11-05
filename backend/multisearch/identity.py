@@ -18,7 +18,7 @@ from .policy import lock_tenant, tenant_quota
 from .sessions import SessionIdentity, SessionStore
 
 KEY_FORMAT = re.compile(r"msk_([a-f0-9]{32})\.[A-Za-z0-9_-]{43}")
-SEARCH_SCOPES = ("search:text", "search:image")
+KEY_SCOPES = ("search:text", "search:image", "fetch", "research")
 _KEY_COLUMNS = """
     id, owner_id, name, environment, prefix, suffix, scopes, limits, created_at,
     expires_at, last_used_at, revoked_at, rotation_expires_at,

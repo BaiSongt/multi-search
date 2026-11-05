@@ -11,7 +11,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from .contracts import Role
-from .identity import SEARCH_SCOPES, IdentityStore
+from .identity import KEY_SCOPES, IdentityStore
 from .sessions import EMAIL_PATTERN, TENANT_PATTERN
 from .settings import Settings
 
@@ -42,7 +42,7 @@ def main() -> int:
     issue = commands.add_parser("issue")
     issue.add_argument("--tenant", required=True)
     issue.add_argument("--email", required=True, type=str.lower)
-    issue.add_argument("--scope", required=True, choices=SEARCH_SCOPES, action="append")
+    issue.add_argument("--scope", required=True, choices=KEY_SCOPES, action="append")
     issue.add_argument("--ttl-hours", type=int, default=24)
     revoke = commands.add_parser("revoke")
     revoke.add_argument("--id", required=True, type=UUID)

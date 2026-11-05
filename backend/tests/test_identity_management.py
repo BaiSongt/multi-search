@@ -34,7 +34,7 @@ def test_password_hash_has_unique_salt_and_checks_candidate():
     "changes",
     [
         {"scopes": ["search:image", "search:image"]},
-        {"scopes": ["research"]},
+        {"scopes": ["write"]},
         {"ttl_hours": 0},
         {"limits": {"requests_per_minute": True}},
         {"limits": {"unknown": 2}},
