@@ -1,9 +1,15 @@
-FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_LINK_MODE=copy
+FROM python:3.12-slim@sha256:e695ab189fa2d082b1c61c69a6b888a5adeca61ceeccad107b1ed2a125721a9e AS base
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app/backend
+
+FROM base AS dependencies
+ENV UV_LINK_MODE=copy
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN pip install --no-cache-dir uv==0.7.6 && uv sync --locked --no-dev --no-install-project
+RUN pip install --no-cache-dir uv==0.13.4 && uv sync --locked --no-dev --no-install-project
+
+FROM base
 ENV PATH="/app/backend/.venv/bin:$PATH"
+COPY --from=dependencies /app/backend/.venv/ /app/backend/.venv/
 COPY VERSION /app/VERSION
 COPY backend/ ./
 USER 1000:1000

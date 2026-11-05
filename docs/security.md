@@ -45,3 +45,29 @@ python scripts/ops/dependency_inventory.py > multisearch-dependencies.cdx.json
 ```sh
 npm audit --package-lock-only --ignore-scripts --registry=https://registry.npmjs.org
 ```
+
+### 运行镜像 SBOM 与漏洞扫描
+
+在目标 Compose 项目启动后，安装经过校验的 Trivy，然后在仓库根目录运行以下命令。按实际启动配置指定 `--profile`，需要时用 `--project` 指定 Compose 项目，用 `--trivy` 指定可执行文件。每次扫描使用新的输出目录。 [Trivy 安装](https://trivy.dev/docs/latest/getting-started/installation/) · [镜像扫描参数](https://trivy.dev/docs/latest/guide/references/configuration/cli/trivy_image/)
+
+```sh
+python scripts/ops/image_security.py --profile research --output .secrets/ops/image-security-2026-11-06 --fail-on-high
+```
+
+脚本根据运行容器的镜像 ID 读取本地镜像，要求所选 Compose 配置的服务均在运行。它记录 Trivy 和漏洞数据库版本，并以同一个数据库快照生成每个镜像的原始漏洞 JSON、CycloneDX SBOM 和 `summary.json`。发现高危或严重记录时，`--fail-on-high` 保留报告并以状态码 2 退出。状态码 1 表示扫描未完成。报告按镜像组件与漏洞组合计数，供部署方结合上游公告评估可达性。原始报告包含镜像元数据，应存放在受控目录。 [报告格式](https://www.trivy.dev/docs/latest/guide/configuration/reporting/)
+
+2026 年 11 月 6 日对 `0.3.0-alpha.2` 的七个 `linux/amd64` 运行镜像完成扫描。Trivy 0.76.1 使用 2026-11-05 13:09 UTC 更新的漏洞库，并生成 CycloneDX 1.7。复扫中，三个 Python 镜像先前由构建工具 uv 触发的严重记录和 Console 包管理器触发的 10 条高危 npm 记录均已消失。Python 构建阶段使用包含修复的 uv 0.13.4，运行阶段仅复制锁定依赖的虚拟环境。Console 从运行文件系统中移除了 npm、Corepack 和 Yarn。 [uv 安全公告](https://github.com/astral-sh/uv/security/advisories/GHSA-hq85-5cpj-mr62)
+
+| 服务 | 镜像 ID 前 12 位 | SBOM 组件 | 严重 | 高危 | 报告列有修复版本（严重／高危） |
+| --- | --- | ---: | ---: | ---: | ---: |
+| API | `8d91a65bafb4` | 134 | 0 | 46 | 0／0 |
+| Worker | `5c3eadcaa54c` | 134 | 0 | 46 | 0／0 |
+| Crawl4AI | `662376f91929` | 187 | 0 | 46 | 0／0 |
+| Console | `3fbf90dcafc5` | 110 | 1 | 33 | 0／0 |
+| PostgreSQL | `266d3c257594` | 51 | 1 | 25 | 1／25 |
+| Redis | `f4ed7d6732f9` | 23 | 0 | 0 | 0／0 |
+| SearXNG | `892ed5710603` | 33 | 0 | 0 | 0／0 |
+
+本轮未在识别到的 Python 或 npm 包中发现严重或高危记录。API、Worker、Crawl4AI 和 Console 的剩余高危记录来自 Debian 软件包，当前报告未列修复版本。Console 的 `CVE-2023-45853` 是 Debian 12 `zlib1g` 的版本匹配。Debian 说明该漏洞位于旧版本 `zlib` 源包未构建的 MiniZip 代码，本机 Console 镜像也未安装 `libminizip1`。原始记录保留。 [Debian CVE 记录](https://security-tracker.debian.org/tracker/CVE-2023-45853)
+
+PostgreSQL 的严重和高危记录来自 `gosu` 嵌入的 Go 标准库，表中的修复版本指 Go 版本。对该镜像内的 `gosu` 运行 `govulncheck -mode binary`，未匹配到严重项 `CVE-2025-68121` 的 TLS 易受攻击符号，另检出 `moby/sys/user` 的中危 `CVE-2026-61801`，其利用前提是输入可被攻击者控制的用户或组数据库文件。本 Compose 配置的 PostgreSQL 根文件系统为只读，且不挂载替代的 `/etc/passwd` 或 `/etc/group`。原始 Trivy 高危门禁仍返回 2。 [Go CVE 记录](https://pkg.go.dev/vuln/GO-2026-4337) · [gosu 复核方法](https://github.com/tianon/gosu/security) · [Moby 安全公告](https://github.com/moby/sys/security/advisories/GHSA-mjcv-p78q-w5fw)
