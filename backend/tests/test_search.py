@@ -16,8 +16,10 @@ from multisearch.contracts import (
     TextSearchResult,
 )
 from multisearch.errors import ApiError
+from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
 from multisearch.policy import ProviderPolicy
 from multisearch.providers import ProviderFailure, ProviderResult
+from multisearch.routing_policy import DEFAULT_ROUTING, RoutingRules
 from multisearch.search import SearchService
 from multisearch.settings import Settings
 
@@ -251,6 +253,112 @@ async def test_provider_policy_affects_priority_disabled_state_and_cache():
     disabled = await search.search(request, "tenant", "disabled")
     assert not disabled.cache_hit and disabled.provider_runs[0].provider_id == "ddgs"
     assert search.provider_status()[1]["status"] == "disabled"
+
+
+async def test_evidence_route_respects_page_budget_and_preserves_locator():
+    calls = []
+
+    class Evidence:
+        async def extract(self, url, *, result_id, **kwargs):
+            calls.append(url)
+            return EvidenceRecord(
+                evidence_id="ev_" + "f" * 32,
+                result_id=result_id,
+                origin_url=url,
+                canonical_url=url,
+                retrieved_at=datetime.now(UTC),
+                content_type="text/plain",
+                evidence_text="fact",
+                locator=EvidenceLocator(
+                    kind="plain_text", text_offset_start=10, text_offset_end=14
+                ),
+                content_sha256="a" * 64,
+                extraction_method="plain_text",
+            )
+
+    search = service(FakeProvider("ddgs"), FakeProvider("searxng", url="https://example.org/other"))
+    search.evidence = Evidence()
+    result = await search.search(
+        SearchRequest(query="fact", mode="auto", require_evidence=True, max_pages=1),
+        "tenant",
+        "test",
+    )
+    assert result.mode_executed == Mode.EVIDENCE and result.partial
+    assert (
+        result.budget.max_pages == result.budget.pages_attempted == result.budget.pages_fetched == 1
+    )
+    assert len(calls) == len(result.evidence_records) == 1
+    assert result.results[0].evidence_refs == [result.evidence_records[0].evidence_id]
+    assert result.results[0].evidence_status == "content_extracted"
+    assert result.results[1].evidence_status == "unverified"
+    assert "EVIDENCE_PAGE_BUDGET_REACHED" in result.warnings
+
+
+async def test_published_routing_and_tenant_cache_epoch_change_execution():
+    ddgs = FakeProvider("ddgs", handler=failed)
+    searxng = FakeProvider("searxng")
+    search = service(ddgs, searxng)
+    search.routing = DEFAULT_ROUTING.model_copy(
+        update={
+            "version": 1,
+            "policy": RoutingRules(quick_fallback=False),
+        }
+    )
+    with pytest.raises(ApiError) as failure:
+        await search.search(SearchRequest(query="sample", mode="quick"), "tenant", "failed")
+    assert failure.value.code == "PROVIDER_UNAVAILABLE" and not searxng.calls
+    search.routing = DEFAULT_ROUTING
+    versions = {"tenant-a": 0, "tenant-b": 0}
+
+    async def epochs(tenant):
+        return {"web": versions[tenant]}
+
+    search.load_cache_epochs = epochs
+    ddgs.handler = None
+    request = SearchRequest(query="sample")
+    await search.search(request, "tenant-a", "first")
+    await search.search(request, "tenant-b", "second")
+    versions["tenant-a"] = 1
+    assert not (await search.search(request, "tenant-a", "invalidated")).cache_hit
+    assert (await search.search(request, "tenant-b", "preserved")).cache_hit
+
+
+async def test_offline_local_index_never_sends_query_to_public_providers():
+    external = FakeProvider("ddgs")
+    search = service(external)
+
+    class Local:
+        async def search(self, tenant, request, limit):
+            assert tenant == "tenant" and limit == 10
+            return [
+                TextSearchResult(
+                    result_id=f"private-{number}",
+                    title=request.query,
+                    url=None,
+                    canonical_url=None,
+                    source_type=Source.LOCAL,
+                    provider_ids=["local_index"],
+                    retrieved_at=datetime.now(UTC),
+                )
+                for number in range(2)
+            ]
+
+    search.local_index = Local()
+    body = SearchRequest(
+        query="private query", source_types=["local"], network_scope="offline", max_results=10
+    )
+    response = await search.search(body, "tenant", "private")
+    assert response.mode_executed == Mode.LOCAL and response.result_count == 2
+    with pytest.raises(ApiError) as blocked:
+        await search.search(
+            body.model_copy(update={"source_types": [Source.LOCAL, Source.WEB]}), "tenant", "mixed"
+        )
+    assert blocked.value.code == "SOURCE_UNAVAILABLE" and external.calls == []
+    with pytest.raises(ApiError) as mixed:
+        await search.search(
+            SearchRequest(query="private query", source_types=["local", "web"]), "tenant", "public"
+        )
+    assert mixed.value.code == "SOURCE_UNAVAILABLE" and external.calls == []
 
 
 async def test_cache_is_tenant_scoped_and_local_never_calls_providers():

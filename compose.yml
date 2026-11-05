@@ -5,17 +5,25 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    environment:
+    environment: &runtime-env
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       API_KEY_HASH_PEPPER_FILE: /run/secrets/api_key_hash_pepper
       MULTISEARCH_ENABLE_DDGS: ${MULTISEARCH_ENABLE_DDGS:-true}
       MULTISEARCH_ENABLE_IMAGE_SEARCH: ${MULTISEARCH_ENABLE_IMAGE_SEARCH:-true}
       MULTISEARCH_MAX_CONCURRENT_REQUESTS: ${MULTISEARCH_MAX_CONCURRENT_REQUESTS:-20}
       MULTISEARCH_PUBLIC_CONSOLE_URL: ${MULTISEARCH_PUBLIC_CONSOLE_URL:-http://127.0.0.1:3000}
-    secrets: [postgres_password, api_key_hash_pepper]
+      MULTISEARCH_ENABLE_ACADEMIC: ${MULTISEARCH_ENABLE_ACADEMIC:-false}
+      MULTISEARCH_ENABLE_LOCAL_INDEX: ${MULTISEARCH_ENABLE_LOCAL_INDEX:-false}
+      MULTISEARCH_VERTICAL_SOURCES: ${MULTISEARCH_VERTICAL_SOURCES:-}
+      MULTISEARCH_OPENALEX_KEY: ${MULTISEARCH_OPENALEX_KEY:-}
+      MULTISEARCH_GITHUB_TOKEN: ${MULTISEARCH_GITHUB_TOKEN:-}
+      MULTISEARCH_CROSSREF_EMAIL: ${MULTISEARCH_CROSSREF_EMAIL:-}
+      CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-}
+      CRAWL4AI_API_TOKEN_FILE: /run/secrets/crawl4ai_api_token
+    secrets: [postgres_password, api_key_hash_pepper, crawl4ai_api_token]
     ports:
       - "127.0.0.1:${MULTISEARCH_API_PORT:-8765}:8765"
-    networks: [gateway, data, search]
+    networks: [gateway, data, search, parser]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -56,6 +64,55 @@ services:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 5s
       timeout: 5s
+      retries: 12
+
+  multisearch-worker:
+    profiles: [fetch]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "multisearch.worker"]
+    environment:
+      <<: *runtime-env
+      CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-http://crawl4ai:11235}
+    secrets: [postgres_password, api_key_hash_pepper, crawl4ai_api_token]
+    networks: [data, search, parser]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 96
+    depends_on:
+      multisearch-api:
+        condition: service_healthy
+      crawl4ai:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "multisearch.worker", "--healthcheck"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+
+  crawl4ai:
+    profiles: [fetch]
+    build:
+      context: .
+      dockerfile: deploy/crawl4ai/Dockerfile
+    environment:
+      CRAWL4AI_API_TOKEN_FILE: /run/secrets/crawl4ai_api_token
+    secrets: [crawl4ai_api_token]
+    networks: [parser]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:11235/health/ready', timeout=2)"]
+      interval: 5s
+      timeout: 4s
       retries: 12
 
   postgres:
@@ -115,6 +172,8 @@ networks:
   data:
     internal: true
   search:
+  parser:
+    internal: true
 
 volumes:
   postgres_data:
@@ -127,3 +186,5 @@ secrets:
     file: ./.secrets/api_key_hash_pepper
   searxng_secret:
     file: ./.secrets/searxng_secret
+  crawl4ai_api_token:
+    file: ./.secrets/crawl4ai_api_token

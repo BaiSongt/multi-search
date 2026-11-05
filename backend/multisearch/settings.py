@@ -20,6 +20,13 @@ class Settings:
     enable_images: bool = True
     max_concurrent: int = 20
     requests_per_minute: int = 60
+    vertical_sources: frozenset[str] = frozenset()
+    openalex_key: str = field(default="", repr=False)
+    github_token: str = field(default="", repr=False)
+    crossref_email: str = field(default="", repr=False)
+    crawl4ai_url: str = ""
+    crawl4ai_token: str = field(default="", repr=False)
+    enable_local_index: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -37,6 +44,20 @@ class Settings:
         max_concurrent = int(os.getenv("MULTISEARCH_MAX_CONCURRENT_REQUESTS", "20"))
         if not 1 <= max_concurrent <= 20:
             raise ValueError("MULTISEARCH_MAX_CONCURRENT_REQUESTS 需要在 1–20 之间")
+        vertical_sources = {
+            source.strip().lower()
+            for source in os.getenv("MULTISEARCH_VERTICAL_SOURCES", "").split(",")
+            if source.strip()
+        }
+        academic = {"openalex", "crossref", "arxiv"}
+        if os.getenv("MULTISEARCH_ENABLE_ACADEMIC", "false").lower() == "true":
+            vertical_sources.update(academic)
+        if not vertical_sources <= academic | {"github"}:
+            raise ValueError("MULTISEARCH_VERTICAL_SOURCES 包含不支持的来源")
+        crawl4ai_url = os.getenv("CRAWL4AI_BASE_URL", "").rstrip("/")
+        crawl4ai_token = secret("CRAWL4AI_API_TOKEN")
+        if crawl4ai_url and (crawl4ai_url != "http://crawl4ai:11235" or len(crawl4ai_token) < 32):
+            raise ValueError("Crawl4AI 需要固定内部地址及专用令牌")
         return cls(
             database_url=database_url,
             redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
@@ -45,4 +66,12 @@ class Settings:
             enable_ddgs=os.getenv("MULTISEARCH_ENABLE_DDGS", "true").lower() == "true",
             enable_images=os.getenv("MULTISEARCH_ENABLE_IMAGE_SEARCH", "true").lower() == "true",
             max_concurrent=max_concurrent,
+            vertical_sources=frozenset(vertical_sources),
+            openalex_key=secret("MULTISEARCH_OPENALEX_KEY"),
+            github_token=secret("MULTISEARCH_GITHUB_TOKEN"),
+            crossref_email=secret("MULTISEARCH_CROSSREF_EMAIL"),
+            crawl4ai_url=crawl4ai_url,
+            crawl4ai_token=crawl4ai_token,
+            enable_local_index=os.getenv("MULTISEARCH_ENABLE_LOCAL_INDEX", "false").lower()
+            == "true",
         )

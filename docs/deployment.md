@@ -58,3 +58,30 @@ docker compose exec -T multisearch-api python -m multisearch.keys revoke --id KE
 ## SearXNG 上游
 
 配置文件启用 JSON 格式，保留 Web、新闻和图片类别所需的候选引擎，关闭 SearXNG 图片代理。每个引擎的实际覆盖与可用性受网络环境及上游限制。冒烟脚本会从 API 容器测试 `categories=images&format=json`，分别记录候选数与上游未响应数。[SearXNG Search API](https://docs.searxng.org/dev/search_api.html)
+
+## 可选专业来源
+
+可在 `.env` 中设置 `MULTISEARCH_VERTICAL_SOURCES=crossref,arxiv` 选择来源，或设置 `MULTISEARCH_ENABLE_ACADEMIC=true` 启用 OpenAlex、Crossref 和 arXiv。学术请求使用 `source_types=["academic"]`。OpenAlex 匿名查询使用上游较低的额度，可配置 `MULTISEARCH_OPENALEX_KEY`。如需使用 Crossref 的礼貌访问池，可提供 `MULTISEARCH_CROSSREF_EMAIL`。
+
+GitHub 代码检索通过 `MULTISEARCH_VERTICAL_SOURCES=github` 和 `MULTISEARCH_GITHUB_TOKEN` 启用，请求使用 `source_types=["code"]`。结果只包含公开仓库，默认分支与提交 SHA 分开理解。部署平台可通过对应的 `_FILE` 变量注入密钥文件。未启用的来源由能力端点显式标记为不可用。
+
+## 本地索引和离线查询
+
+设置 `MULTISEARCH_ENABLE_LOCAL_INDEX=true` 并重建 API。操作员将批准的纯文本资料导入指定租户。每行至少包含 `title` 与 `text`，可选 `id`、`source_url`、`language` 和 `published_at`。相同租户和 ID 的导入更新原记录。每批最多 500 条，每租户最多 2000 条。
+
+```sh
+docker compose exec -T multisearch-api python -m multisearch.local_index import --tenant demo < approved-documents.jsonl
+```
+
+PowerShell 使用 `Get-Content -Raw -Encoding UTF8 approved-documents.jsonl | docker compose exec -T multisearch-api python -m multisearch.local_index import --tenant demo`。检索设置 `source_types=["local"]` 和 `network_scope="offline"`。本地来源必须单独选择，关键词与正文留在当前租户。
+
+## 抓取 Worker 和 Crawl4AI
+
+首次升级先运行 `python scripts/init-secrets.py`，为隔离解析器补充专用令牌。已有密钥文件会保留。
+
+```sh
+docker compose --profile fetch up -d --build --wait
+docker compose --profile fetch ps
+```
+
+Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心跳。Crawl4AI 只在独立内部网络接受 Worker 传入的已验证 HTML，使用令牌鉴权。公开 URL 由 SafeFetcher 逐跳检查并固定目标 IP，遵守 robots 和摘录限制。解析器不接收 URL，且无需浏览器或公网访问。API 的同步 L3 默认使用静态提取。如需让同步 L3 使用隔离解析器，在启用 `fetch` 配置时设置 `CRAWL4AI_BASE_URL=http://crawl4ai:11235`。

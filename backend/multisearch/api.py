@@ -2,6 +2,8 @@ from fastapi import APIRouter, Request
 
 from .auth import SearchKey, SessionWrite
 from .contracts import ErrorBody, SearchRequest, SearchResponse
+from .job_api import worker_ready
+from .job_contracts import JobKind
 from .metering import SearchPrincipal
 
 router = APIRouter(prefix="/api/v1")
@@ -9,7 +11,12 @@ router = APIRouter(prefix="/api/v1")
 
 @router.get("/capabilities")
 async def capabilities(request: Request):
-    return request.app.state.search.capabilities()
+    document = request.app.state.search.capabilities()
+    document["fetch"] = (
+        "available" if await worker_ready(request.app.state.redis, JobKind.FETCH) else "unavailable"
+    )
+    document["ocr"] = "unavailable"
+    return document
 
 
 @router.get("/providers", responses={401: {"model": ErrorBody}, 503: {"model": ErrorBody}})

@@ -5,11 +5,12 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from random import uniform
 from time import monotonic
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 
 from .contracts import (
     ImageSearchResult,
@@ -21,13 +22,30 @@ from .contracts import (
     SearchRequest,
     SearchResponse,
     Source,
+    TextSearchResult,
 )
 from .errors import ApiError
+from .evidence import EvidenceBuilder
+from .evidence_contracts import EvidenceRecord
 from .image_attribution import ImageAttributionResolver
+from .image_source import PublicImageSourceResolver
 from .pipeline import fuse, select_results
 from .policy import ProviderPolicy
 from .providers import Provider, ProviderFailure, ProviderResult
+from .routing_policy import (
+    DEFAULT_ROUTING,
+    RoutingRules,
+    RoutingVersion,
+    cache_epoch_signature,
+    cache_ttl,
+    resolve_mode,
+    search_limits,
+)
+from .safe_fetch import FetchError
 from .settings import Settings
+
+if TYPE_CHECKING:
+    from .local_index import LocalIndex
 
 _MODE_LIMITS = {Mode.LOCAL: (2_000, 30), Mode.QUICK: (4_000, 10), Mode.STANDARD: (12_000, 30)}
 _PROVIDER_CONCURRENT = 5
@@ -98,32 +116,27 @@ class Flight:
     waiters: int = 0
 
 
-def _budget(request: SearchRequest, mode: Mode) -> SearchBudget:
-    latency, count = _MODE_LIMITS[mode]
+def _budget(request: SearchRequest, mode: Mode, rules: RoutingRules) -> SearchBudget:
+    latency, count = (45_000, 30) if mode == Mode.EVIDENCE else search_limits(rules, mode)
     max_results = min(request.max_results or count, count)
     strict_images = (
         request.image_options and request.image_options.license_policy != "any_with_status"
     )
     metadata_limit = request.max_image_metadata_fetches
     if metadata_limit is None:
-        metadata_limit = 3 if strict_images else 0
+        metadata_limit = 3 if strict_images or mode == Mode.EVIDENCE else 0
     return SearchBudget(
         max_latency_ms=min(request.max_latency_ms or latency, latency),
         max_results=max_results,
         max_image_results=min(request.max_image_results or max_results, max_results),
         search_rounds=0,
+        max_pages=min(8, request.max_pages if request.max_pages is not None else 8)
+        if mode == Mode.EVIDENCE and Modality.TEXT in request.modalities
+        else 0,
         max_image_metadata_fetches=min(5, metadata_limit)
         if Modality.IMAGE in request.modalities
         else 0,
     )
-
-
-def _resolve_mode(request: SearchRequest) -> Mode:
-    if request.mode != Mode.AUTO:
-        return request.mode
-    if request.max_latency_ms is not None and request.max_latency_ms <= _MODE_LIMITS[Mode.QUICK][0]:
-        return Mode.QUICK
-    return Mode.STANDARD
 
 
 def _time_error() -> ApiError:
@@ -137,12 +150,20 @@ class SearchService:
         providers: list[Provider],
         settings: Settings,
         attribution: ImageAttributionResolver | None = None,
+        evidence: EvidenceBuilder | None = None,
+        image_source: PublicImageSourceResolver | None = None,
+        local_index: "LocalIndex | None" = None,
     ):
         self.redis = redis
         self.providers = {provider.provider_id: provider for provider in providers}
         self.provider_policies = {provider.provider_id: ProviderPolicy() for provider in providers}
         self.settings = settings
         self.attribution = attribution
+        self.evidence = evidence
+        self.image_source = image_source
+        self.local_index = local_index
+        self.routing = DEFAULT_ROUTING
+        self.load_cache_epochs = None
         self.attribution_slots = asyncio.Semaphore(5)
         self.states = {
             provider.provider_id: ProviderState({pair: Circuit() for pair in self._pairs(provider)})
@@ -165,18 +186,36 @@ class SearchService:
         }
 
     def _supported_pairs(self) -> set[Pair]:
-        return {
+        pairs = {
             pair
             for provider in self.providers.values()
             if self.provider_policies[provider.provider_id].enabled
             for pair in self._pairs(provider)
         }
+        if self.local_index is not None:
+            pairs.add((Source.LOCAL, Modality.TEXT))
+        return pairs
 
     def capabilities(self) -> dict:
         pairs = self._supported_pairs()
+        limits = {
+            mode: dict(
+                zip(
+                    ("max_latency_ms", "max_results"),
+                    search_limits(self.routing.policy, mode),
+                    strict=True,
+                )
+            )
+            for mode in _MODE_LIMITS
+        }
+        if self.evidence is not None:
+            limits[Mode.EVIDENCE] = {"max_latency_ms": 45_000, "max_results": 30}
         return {
             "modes": {
-                mode: "available" if mode in (*_MODE_LIMITS, Mode.AUTO) else "unavailable"
+                mode: "available"
+                if mode in (*_MODE_LIMITS, Mode.AUTO)
+                or (mode == Mode.EVIDENCE and self.evidence is not None)
+                else "unavailable"
                 for mode in Mode
             },
             "source_types": {
@@ -188,16 +227,17 @@ class SearchService:
                 for kind in Modality
             },
             "network_scopes": {
-                scope: "available" if scope == Scope.PUBLIC else "unavailable" for scope in Scope
+                scope: "available"
+                if scope == Scope.PUBLIC or self.local_index is not None
+                else "unavailable"
+                for scope in Scope
             },
             "combinations": [
                 {"source_type": source, "modality": kind} for source, kind in sorted(pairs)
             ],
             "limits": {
-                "modes": {
-                    mode: {"max_latency_ms": latency, "max_results": count}
-                    for mode, (latency, count) in _MODE_LIMITS.items()
-                },
+                "modes": limits,
+                "evidence_max_pages": 8 if self.evidence else 0,
                 "tenant_requests_per_minute": self.settings.requests_per_minute,
                 "tenant_concurrency": self.tenant_concurrency,
                 "process_concurrency": self.settings.max_concurrent,
@@ -273,7 +313,14 @@ class SearchService:
                 retry_after_ms=int(retry_ms),
             )
 
-    def _cache_key(self, request: SearchRequest, tenant_id: str, mode: Mode) -> str:
+    def _cache_key(
+        self,
+        request: SearchRequest,
+        tenant_id: str,
+        mode: Mode,
+        routing: RoutingVersion,
+        epochs: dict[str, int],
+    ) -> str:
         filters = request.model_dump(
             mode="json",
             exclude={
@@ -290,19 +337,28 @@ class SearchService:
                 "max_image_results",
             },
         )
-        budget = _budget(request, mode)
+        budget = _budget(request, mode, routing.policy)
         filters.update(
             mode=mode,
             max_results=budget.max_results,
             max_image_results=budget.max_image_results,
             max_image_metadata_fetches=budget.max_image_metadata_fetches,
+            max_pages=budget.max_pages,
         )
         policies = sorted(
             (key, policy.enabled, policy.priority, policy.requests_per_minute)
             for key, policy in self.provider_policies.items()
         )
         payload = json.dumps(
-            [self.cache_signature, policies, filters], sort_keys=True, ensure_ascii=False
+            [
+                self.cache_signature,
+                policies,
+                routing.version,
+                cache_epoch_signature(request, epochs),
+                filters,
+            ],
+            sort_keys=True,
+            ensure_ascii=False,
         )
         digest = sha256(payload.encode()).hexdigest()
         return f"multisearch:search:v1:{tenant_id}:{digest}"
@@ -326,17 +382,13 @@ class SearchService:
         request: SearchRequest,
         response: SearchResponse,
         deadline: float,
+        rules: RoutingRules,
     ) -> None:
         if response.partial or monotonic() >= deadline:
             return
-        if not response.results:
-            ttl = 30
-        elif Source.NEWS in request.source_types:
-            ttl = 600
-        elif Modality.IMAGE in request.modalities:
-            ttl = 1800
-        else:
-            ttl = 3600
+        ttl = cache_ttl(rules, request, empty=not response.results)
+        if not ttl:
+            return
         try:
             async with asyncio.timeout(min(0.08, deadline - monotonic())):
                 value = response.model_dump_json(exclude={"provider_runs"})
@@ -363,10 +415,12 @@ class SearchService:
         tenant_id: str,
         budget: SearchBudget,
         deadline: float,
+        routing: RoutingVersion,
+        epochs: dict[str, int],
     ) -> SearchResponse:
         for cached_mode in (Mode.STANDARD, Mode.QUICK):
             cached = await self._cache_get(
-                self._cache_key(request, tenant_id, cached_mode), deadline
+                self._cache_key(request, tenant_id, cached_mode, routing, epochs), deadline
             )
             if cached is not None:
                 return self._cached_response(cached, Mode.LOCAL, budget)
@@ -507,6 +561,7 @@ class SearchService:
         mode: Mode,
         limit: int,
         deadline: float,
+        rules: RoutingRules,
     ) -> list[tuple[ProviderResult, ProviderRun]]:
         preferred = ("ddgs", "searxng") if mode == Mode.QUICK else ("searxng", "ddgs")
         eligible = [
@@ -521,7 +576,7 @@ class SearchService:
                 preferred.index(p.provider_id) if p.provider_id in preferred else len(preferred),
             )
         )
-        if mode == Mode.STANDARD:
+        if mode in {Mode.STANDARD, Mode.EVIDENCE}:
             return await asyncio.gather(
                 *(
                     self._run_provider(provider, request, pair, limit, deadline)
@@ -530,6 +585,8 @@ class SearchService:
             )
 
         runs = []
+        if not rules.quick_fallback:
+            eligible = eligible[:1]
         for index, provider in enumerate(eligible):
             now = monotonic()
             if now >= deadline:
@@ -545,6 +602,37 @@ class SearchService:
                 break
         return runs
 
+    async def _run_local_index(
+        self,
+        tenant_id: str,
+        request: SearchRequest,
+        limit: int,
+        deadline: float,
+    ) -> list[tuple[ProviderResult, ProviderRun]]:
+        started = monotonic()
+        results = []
+        try:
+            async with asyncio.timeout(deadline - started):
+                results = await self.local_index.search(tenant_id, request, limit)
+            status = "success" if results else "empty"
+        except TimeoutError:
+            status = "timeout"
+        except (SQLAlchemyError, OSError):
+            status = "failed"
+        return [
+            (
+                ProviderResult(results),
+                ProviderRun(
+                    provider_id="local_index",
+                    source_type=Source.LOCAL,
+                    modality=Modality.TEXT,
+                    status=status,
+                    elapsed_ms=int((monotonic() - started) * 1000),
+                    count=len(results),
+                ),
+            )
+        ]
+
     async def _execute(
         self,
         request: SearchRequest,
@@ -552,6 +640,8 @@ class SearchService:
         budget: SearchBudget,
         cache_key: str,
         deadline: float,
+        routing: RoutingVersion,
+        tenant_id: str,
     ) -> SearchResponse:
         if request.cache_policy == "use":
             cached = await self._cache_get(cache_key, deadline)
@@ -581,23 +671,34 @@ class SearchService:
                 }
             )
         provider_deadline = deadline
-        if self.attribution and budget.max_image_metadata_fetches:
+        if mode == Mode.EVIDENCE:
+            now = monotonic()
+            provider_deadline = min(deadline, now + min(12, max(0, deadline - now) * 0.55))
+        elif self.attribution and budget.max_image_metadata_fetches:
             provider_deadline -= min(2, max(0, deadline - monotonic()) * 0.25)
-        reports = await asyncio.gather(
-            *(
-                self._run_pair(
-                    provider_request,
-                    pair,
-                    mode,
-                    (max(budget.max_image_results, 10) if strict else budget.max_image_results)
-                    if pair[1] == Modality.IMAGE
-                    else budget.max_results,
-                    provider_deadline,
-                )
-                for pair in requested
-                if pair in supported
+        executions = [
+            self._run_pair(
+                provider_request,
+                pair,
+                mode,
+                (max(budget.max_image_results, 10) if strict else budget.max_image_results)
+                if pair[1] == Modality.IMAGE
+                else budget.max_results,
+                provider_deadline,
+                routing.policy,
             )
-        )
+            for pair in requested
+            if pair in supported and pair[0] != Source.LOCAL
+        ]
+        if (
+            Source.LOCAL in request.source_types
+            and (Source.LOCAL, Modality.TEXT) in supported
+            and Modality.TEXT in request.modalities
+        ):
+            executions.append(
+                self._run_local_index(tenant_id, request, budget.max_results, provider_deadline)
+            )
+        reports = await asyncio.gather(*executions)
         records = [record for pair_records in reports for record in pair_records]
         runs = [run for _, run in records]
         if not any(run.status in _SUCCESS for run in runs):
@@ -616,16 +717,24 @@ class SearchService:
             (result.results for result, _ in records), candidate_count, candidate_count
         )
         metadata_fetches = 0
-        if self.attribution and budget.max_image_metadata_fetches:
-            targets = [
-                (index, result)
-                for index, result in enumerate(candidates)
-                if isinstance(result, ImageSearchResult) and self.attribution.supports(result)
-            ][: budget.max_image_metadata_fetches]
+        resolve_public = mode == Mode.EVIDENCE and self.image_source is not None
+        if (self.attribution or resolve_public) and budget.max_image_metadata_fetches:
+            targets = []
+            for index, result in enumerate(candidates):
+                if not isinstance(result, ImageSearchResult):
+                    continue
+                first_party = self.attribution is not None and self.attribution.supports(result)
+                if first_party or (resolve_public and result.image.source_page_url):
+                    targets.append((index, result, first_party))
+            targets.sort(key=lambda target: not target[2])
+            targets = targets[: budget.max_image_metadata_fetches]
             outcomes = await asyncio.gather(
-                *(self._resolve_image(result, deadline) for _, result in targets)
+                *(
+                    self._resolve_image(result, deadline, first_party, request)
+                    for _, result, first_party in targets
+                )
             )
-            for (index, _), (resolved, attempted) in zip(targets, outcomes, strict=True):
+            for (index, _, _), (resolved, attempted) in zip(targets, outcomes, strict=True):
                 candidates[index] = resolved
                 metadata_fetches += attempted
             if not targets:
@@ -646,6 +755,18 @@ class SearchService:
             if not any(isinstance(result, ImageSearchResult) for result in candidates):
                 warnings.append("IMAGE_LICENSE_VERIFICATION_UNAVAILABLE")
         results = select_results(candidates, budget.max_results, budget.max_image_results)
+        evidence_records = []
+        pages_attempted = 0
+        if mode == Mode.EVIDENCE:
+            (
+                results,
+                evidence_records,
+                evidence_warnings,
+                pages_attempted,
+            ) = await self._extract_evidence(results, request, budget, deadline)
+            if evidence_warnings:
+                warnings.extend(evidence_warnings)
+                partial = True
         if partial:
             warnings.append("PARTIAL_RESULT")
         response = SearchResponse(
@@ -657,23 +778,91 @@ class SearchService:
             elapsed_ms=0,
             result_count=len(results),
             results=results,
+            evidence_records=evidence_records,
+            routing_policy_version=routing.version,
             warnings=list(dict.fromkeys(warnings)),
             provider_runs=runs,
             budget=budget.model_copy(
                 update={
                     "search_rounds": 1,
                     "image_metadata_fetches": metadata_fetches,
+                    "pages_fetched": len(evidence_records),
+                    "pages_attempted": pages_attempted,
                 }
             ),
         )
         if request.cache_policy != "bypass":
-            await self._cache_store(cache_key, request, response, deadline)
+            await self._cache_store(cache_key, request, response, deadline, routing.policy)
         return response
+
+    async def _extract_evidence(
+        self,
+        results: list,
+        request: SearchRequest,
+        budget: SearchBudget,
+        deadline: float,
+    ) -> tuple[list, list[EvidenceRecord], list[str], int]:
+        targets = [
+            (index, result)
+            for index, result in enumerate(results)
+            if isinstance(result, TextSearchResult)
+            and result.url
+            and result.source_type != Source.LOCAL
+        ]
+        warnings = []
+        if len(targets) > budget.max_pages:
+            warnings.append("EVIDENCE_PAGE_BUDGET_REACHED")
+
+        attempted = 0
+
+        async def extract(result: TextSearchResult) -> EvidenceRecord | None:
+            nonlocal attempted
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return None
+            attempted += 1
+            try:
+                return await self.evidence.extract(
+                    result.url,
+                    timeout_s=min(remaining, 12),
+                    result_id=result.result_id,
+                    query=request.query,
+                    network_scope=request.network_scope,
+                    domain_allowlist=request.domain_allowlist,
+                    domain_denylist=request.domain_denylist,
+                )
+            except (FetchError, TimeoutError):
+                return None
+
+        selected = targets[: budget.max_pages]
+        extracted = await asyncio.gather(*(extract(result) for _, result in selected))
+        records = []
+        for (index, result), record in zip(selected, extracted, strict=True):
+            if record is None:
+                warnings.append("EVIDENCE_EXTRACTION_INCOMPLETE")
+                continue
+            records.append(record)
+            results[index] = result.model_copy(
+                update={
+                    "evidence_status": "content_extracted",
+                    "evidence_refs": [record.evidence_id],
+                }
+            )
+        if Modality.TEXT in request.modalities and not records:
+            warnings.append("EVIDENCE_UNAVAILABLE")
+        if Modality.IMAGE in request.modalities and not any(
+            isinstance(result, ImageSearchResult) and result.image.source_page_verified
+            for result in results
+        ):
+            warnings.append("IMAGE_EVIDENCE_UNAVAILABLE")
+        return results, records, warnings, attempted
 
     async def _resolve_image(
         self,
         result: ImageSearchResult,
         deadline: float,
+        first_party: bool,
+        request: SearchRequest,
     ) -> tuple[ImageSearchResult, int]:
         attempted = 0
         try:
@@ -681,7 +870,16 @@ class SearchService:
                 remaining = deadline - monotonic()
                 if remaining > 0:
                     attempted = 1
-                    return await self.attribution.resolve(result, remaining), attempted
+                    if first_party:
+                        resolved = await self.attribution.resolve(result, remaining)
+                    else:
+                        resolved = await self.image_source.resolve(
+                            result,
+                            timeout_s=min(remaining, 12),
+                            domain_allowlist=request.domain_allowlist,
+                            domain_denylist=request.domain_denylist,
+                        )
+                    return resolved, attempted
         except TimeoutError:
             pass
         return result, attempted
@@ -693,14 +891,20 @@ class SearchService:
         budget: SearchBudget,
         cache_key: str,
         deadline: float,
+        routing: RoutingVersion,
+        tenant_id: str,
     ) -> SearchResponse:
         if request.cache_policy == "bypass":
-            return await self._execute(request, mode, budget, cache_key, deadline)
+            return await self._execute(
+                request, mode, budget, cache_key, deadline, routing, tenant_id
+            )
         key = f"{cache_key}:{budget.max_latency_ms}:{request.cache_policy}"
         flight = self.flights.get(key)
         if flight is None:
             flight = Flight(
-                asyncio.create_task(self._execute(request, mode, budget, cache_key, deadline))
+                asyncio.create_task(
+                    self._execute(request, mode, budget, cache_key, deadline, routing, tenant_id)
+                )
             )
             self.flights[key] = flight
         flight.waiters += 1
@@ -714,22 +918,35 @@ class SearchService:
                     flight.task.cancel()
                     await asyncio.gather(flight.task, return_exceptions=True)
 
-    def plan(self, request: SearchRequest) -> tuple[Mode, SearchBudget]:
-        if request.require_evidence or request.mode == Mode.EVIDENCE:
-            raise ApiError(422, "EVIDENCE_UNAVAILABLE", "当前版本未启用证据提取")
+    def plan(
+        self, request: SearchRequest, *, routing: RoutingVersion | None = None
+    ) -> tuple[Mode, SearchBudget]:
+        policy = (routing or self.routing).policy
+        needs_evidence = request.require_evidence or request.mode == Mode.EVIDENCE
+        if needs_evidence and (
+            self.evidence is None or request.mode not in {Mode.AUTO, Mode.EVIDENCE}
+        ):
+            raise ApiError(422, "EVIDENCE_UNAVAILABLE", "所选模式无法提取证据")
         if request.mode == Mode.DEEP:
             raise ApiError(422, "MODE_UNAVAILABLE", "当前版本未启用深度研究")
-        if request.network_scope != Scope.PUBLIC:
+        local_only = request.source_types == [Source.LOCAL] and self.local_index is not None
+        if Source.LOCAL in request.source_types and len(request.source_types) != 1:
+            raise ApiError(422, "SOURCE_UNAVAILABLE", "本地索引请求必须单独指定 local 来源")
+        if request.network_scope != Scope.PUBLIC and not local_only:
             raise ApiError(422, "SOURCE_UNAVAILABLE", "当前版本没有获准使用的内部检索来源")
+        if local_only and needs_evidence:
+            raise ApiError(422, "EVIDENCE_UNAVAILABLE", "本地索引不执行公网证据抓取")
         supported = self._supported_pairs()
         if not supported.intersection(
             (source, kind) for source in request.source_types for kind in request.modalities
         ):
             raise ApiError(422, "SOURCE_MODALITY_UNAVAILABLE", "请求的来源与模态组合不可用")
-        mode = _resolve_mode(request)
-        if mode == Mode.LOCAL and request.cache_policy != "use":
+        mode = Mode.EVIDENCE if needs_evidence else resolve_mode(request, policy)
+        if local_only and request.mode == Mode.AUTO:
+            mode = Mode.LOCAL
+        if mode == Mode.LOCAL and not local_only and request.cache_policy != "use":
             raise ApiError(422, "INVALID_REQUEST", "local 模式只支持 cache_policy=use")
-        return mode, _budget(request, mode)
+        return mode, _budget(request, mode, policy)
 
     async def search(
         self,
@@ -739,11 +956,13 @@ class SearchService:
         *,
         metered: bool = False,
         deadline: float | None = None,
+        routing: RoutingVersion | None = None,
     ) -> SearchResponse:
         started = monotonic()
         if request.idempotency_key is not None and not metered:
             raise ApiError(422, "INVALID_REQUEST", "幂等请求需要启用用量计量")
-        mode, budget = self.plan(request)
+        routing = routing or self.routing
+        mode, budget = self.plan(request, routing=routing)
         deadline = deadline if deadline is not None else started + budget.max_latency_ms / 1000
         if started >= deadline:
             raise _time_error()
@@ -760,15 +979,33 @@ class SearchService:
         try:
             if not metered:
                 await self._rate_limit(tenant_id, deadline)
-            if mode == Mode.LOCAL:
-                response = await self._local(request, tenant_id, budget, deadline)
+            epochs = {}
+            effective_request = request
+            has_local_index = Source.LOCAL in request.source_types and self.local_index is not None
+            if has_local_index:
+                effective_request = request.model_copy(update={"cache_policy": "bypass"})
+            elif self.load_cache_epochs and request.cache_policy != "bypass":
+                try:
+                    async with asyncio.timeout(min(0.08, deadline - monotonic())):
+                        epochs = await self.load_cache_epochs(tenant_id)
+                except (SQLAlchemyError, RedisError, TimeoutError, OSError):
+                    if mode == Mode.LOCAL:
+                        raise ApiError(
+                            503, "CACHE_UNAVAILABLE", "租户缓存版本暂不可用", retryable=True
+                        ) from None
+                    effective_request = request.model_copy(update={"cache_policy": "bypass"})
+            if mode == Mode.LOCAL and not has_local_index:
+                response = await self._local(request, tenant_id, budget, deadline, routing, epochs)
             else:
-                cache_key = self._cache_key(request, tenant_id, mode)
-                response = await self._join(request, mode, budget, cache_key, deadline)
+                cache_key = self._cache_key(effective_request, tenant_id, mode, routing, epochs)
+                response = await self._join(
+                    effective_request, mode, budget, cache_key, deadline, routing, tenant_id
+                )
             return response.model_copy(
                 update={
                     "request_id": request_id,
                     "mode_requested": request.mode,
+                    "routing_policy_version": routing.version,
                     "elapsed_ms": int((monotonic() - started) * 1000),
                 }
             )

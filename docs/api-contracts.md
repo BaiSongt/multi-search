@@ -10,6 +10,10 @@
 | `GET /api/v1/providers` | API Key | Provider 能力与运行状态 |
 | `POST /api/v1/search` | API Key | 统一文字与图片检索 |
 | `POST /api/v1/playground` | Console 会话与 CSRF | 使用同一搜索契约并按当前租户计量 |
+| `POST /api/v1/fetch` | API Key 的 `fetch` | 批量网页提取，返回 202 和任务标识 |
+| `GET /api/v1/jobs/{id}` | 对应任务作用域 | 查看当前租户的任务状态与结果 |
+| `POST /api/v1/jobs/{id}/cancel` | 对应任务作用域 | 取消当前租户的非终态任务 |
+| `GET /api/v1/evidence/{id}` | API Key 的 `fetch` 或 `research` | 读取当前租户的证据 |
 
 搜索凭据使用 `Authorization: Bearer <API_KEY>`。文字需要 `search:text`，图片需要 `search:image`，混合请求需要两者。按 [部署文档](deployment.md#签发测试凭据) 签发凭据后，在当前终端将明文存入 `MULTISEARCH_KEY`。以下 POSIX shell 示例将同一个 Web 查询同时用于文字和图片。
 
@@ -30,8 +34,11 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 | `local` | 读取当前租户的兼容缓存 | 2000 ms | 30 |
 | `quick` | 首选 DDGS，按需回退 SearXNG | 4000 ms | 10 |
 | `standard` | 可用 Provider 并行检索与融合 | 12000 ms | 30 |
+| `evidence` | 并行发现候选并提取有定位的正文或核查图片来源 | 45000 ms | 30，最多 8 页正文 |
 
-请求可通过 `max_latency_ms`、`max_results`、`max_image_results` 收紧预算。首轮正文提取与模型调用均为零。请求同时包含可用和不可用的来源模态组合时，返回部分结果并为跳过的组合给出告警。要求证据时返回 `EVIDENCE_UNAVAILABLE`，指定深度研究时返回 `MODE_UNAVAILABLE`。私网与离线请求需要受批准的内部来源，首轮实例无此配置。对应请求返回 `SOURCE_UNAVAILABLE`，请求内容不会送往公网或复用公网缓存。
+请求可通过 `max_latency_ms`、`max_results`、`max_image_results` 和 `max_pages` 收紧预算。请求同时包含可用和不可用的来源模态组合时，返回部分结果及告警。`mode=auto` 配合 `require_evidence=true` 使用 L3。机器身份执行证据检索需要 `fetch` 和相应搜索作用域。显式指定快速、标准或本地模式并要求证据时返回 `EVIDENCE_UNAVAILABLE`。指定深度研究时返回 `MODE_UNAVAILABLE`。
+
+私网与离线检索只接受已启用的 `source_types=["local"]`，请求直接进入当前租户的本地索引。未启用或混入公网来源时返回 `SOURCE_UNAVAILABLE`，请求内容不会送往公网。
 
 `language` 和 `region` 按上游能力尽力处理。`time_range` 使用 `{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}`，保留已知发布日期在范围内的候选。`domain_allowlist` 和 `domain_denylist` 用于过滤结果来源域名。请求的域名字段不会授予访问内网的权限。
 
@@ -58,6 +65,12 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 | 502 | `PROVIDER_UNAVAILABLE` | 上游不可用时按预算与重试提示处理 |
 | 503 | `AUTH_UNAVAILABLE`、`USAGE_UNAVAILABLE` | 检查数据库或 Redis |
 | 504 | `TIME_BUDGET_EXCEEDED` | 可缩小搜索范围或检查上游 |
+
+### 证据与任务
+
+正文提取成功时，`evidence_records` 返回来源、取得时间、实际摘录、规范化正文 SHA-256 和字符偏移。结果以 `evidence_refs` 指向记录，并标记为 `content_extracted`。摘要、提取失败或预算外结果保持 `unverified`。L3 图片区分来源页访问、原图匹配与许可核验。
+
+`POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。
 
 ### 管理面
 

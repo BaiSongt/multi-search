@@ -3,7 +3,7 @@ from time import monotonic
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from .contracts import SearchRequest, SearchResponse
+from .contracts import Mode, SearchRequest, SearchResponse
 from .errors import ApiError
 from .identity import MachineIdentity
 from .metering import SearchPrincipal, UsageMeter
@@ -19,6 +19,8 @@ class SearchApplication:
         self, body: SearchRequest, identity: MachineIdentity, request_id: str
     ) -> SearchResponse:
         identity.require_search(body.modalities)
+        if (body.require_evidence or body.mode == Mode.EVIDENCE) and "fetch" not in identity.scopes:
+            raise ApiError(403, "FORBIDDEN", "证据检索需要 fetch 作用域")
         return await self.search(
             body,
             SearchPrincipal(
@@ -31,7 +33,8 @@ class SearchApplication:
         self, body: SearchRequest, principal: SearchPrincipal, request_id: str
     ) -> SearchResponse:
         started = monotonic()
-        mode, budget = self.service.plan(body)
+        routing = self.service.routing
+        mode, budget = self.service.plan(body, routing=routing)
         deadline = started + budget.max_latency_ms / 1000
         try:
             async with timeout_at(deadline):
@@ -49,7 +52,12 @@ class SearchApplication:
 
         try:
             response = await self.service.search(
-                body, str(principal.tenant_id), request_id, metered=True, deadline=deadline
+                body,
+                str(principal.tenant_id),
+                request_id,
+                metered=True,
+                deadline=deadline,
+                routing=routing,
             )
         except CancelledError:
             try:
