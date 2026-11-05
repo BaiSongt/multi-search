@@ -6,8 +6,18 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
+from benchmark_search import parse_time_range, publication_status
+
 TEMPLATE = Path(__file__).with_suffix(".html")
-QUERY_FIELDS = ("query", "category", "modality", "language", "region", "source_type")
+QUERY_FIELDS = (
+    "query",
+    "category",
+    "modality",
+    "language",
+    "region",
+    "source_type",
+    "reference_url",
+)
 RESULT_FIELDS = (
     "title",
     "url",
@@ -48,6 +58,10 @@ def review_data(raw_report: bytes) -> dict:
             or any(value is not None and not isinstance(value, str) for value in query.values())
         ):
             raise ValueError(f"检索样本 {key} 的查询字段无效")
+        time_range = row.get("time_range")
+        window = parse_time_range(time_range)
+        if window is not None:
+            query["time_range"] = time_range
         if queries.setdefault(case_id, query) != query:
             raise ValueError(f"样本 {case_id} 在两种模式中的查询条件不一致")
         status, code, results = row.get("http_status"), row.get("code"), row.get("results")
@@ -66,10 +80,15 @@ def review_data(raw_report: bytes) -> dict:
             if not isinstance(result, dict) or result.get("kind") != query["modality"]:
                 raise ValueError(f"检索样本 {key} 的候选模态不匹配")
             candidate = {field: result.get(field) for field in RESULT_FIELDS}
+            for field in ("published_at", "retrieved_at"):
+                if not isinstance(candidate[field], str):
+                    candidate[field] = None
             if any(
                 value is not None and not isinstance(value, str) for value in candidate.values()
             ):
                 raise ValueError(f"检索样本 {key} 的候选字段无效")
+            if window is not None:
+                candidate["publication_status"] = publication_status(result, window)
             candidates.append(candidate)
         samples.append(
             {

@@ -116,6 +116,15 @@ python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.jso
 
 将工作区导出的标注 JSON 保存为 `public-labels.json` 后运行第二条命令。标注与原始报告的 SHA-256 和返回顺序绑定，全组有候选且标注齐全后才计算该组的 Top-10 有效率。工作区只在评审者主动点击时打开候选链接。可使用 `--review-template` 生成原有 JSON 模板，直接按返回顺序填写 `true`、`false` 或待复核的 `null`。离线命令无需 Key，也不会重新检索。
 
+20 条新闻样本各有固定 UTC 日期窗口。报告按模式统计发出日期过滤的请求、成功但没有候选的请求，以及上游因发布日期未知而被过滤的候选。`observable_error_ratio` 的分子是返回候选中发布日期越界、缺失或无效的数量。工作区还要求对范围内候选核对来源页上的真实发布日期，这一判定与 Top-10 判定独立。只有待复核候选全部判定后才输出 `temporal_error_ratio`。发布日期与检索时间相同只列为待查线索。可用 `--case-id` 选择单个或多个样本做复验。
+
+本地日期研究探针使用独立测试租户和五份夹具文档，验证 REST 和 MCP 重用同一持久任务，并按 UTC 保留首尾两天。启用本地索引和 `research` 配置后执行。
+
+```sh
+docker compose --profile research exec -T multisearch-api python - --local-date-window \
+  < scripts/probe_research.py
+```
+
 学术来源使用独立的 12 条标题、DOI 和 arXiv ID 样本。启用 Crossref 与 arXiv 后，使用具备 `search:text` 作用域的临时 Key。报告保留每条样本的原始文献链接，以及候选的 DOI、arXiv ID 和版本，便于复核同一论文。 [学术样本](../scripts/ops/academic_cases.jsonl)
 
 ```sh

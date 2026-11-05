@@ -30,6 +30,7 @@
     <h1>MultiSearch 公网基准人工评审</h1>
     <p>请独立检查候选是否直接相关、当前可访问、页面正文或原图是否与查询匹配。任一项为「否」即无效，三项均为「是」才有效。</p>
     <p>查询审定单独记录。请判断查询是否明确、可复查，并符合其样本类别。页面不自动打开外部链接，也不自动判断结果。</p>
+    <p>对通过日期筛选的候选，请查阅来源页核对发布日期。事件发生日期和检索时间另行记录，无法核实时保留「待复核」。</p>
     <p>原始报告 SHA-256 <code id="digest"></code></p>
     <p id="progress" role="status"></p>
     <div class="controls">
@@ -56,9 +57,19 @@
     const byKey = new Map(report.samples.map(sample => [sample.key, sample]));
     const queryKeys = Object.keys(report.queries);
     const reviewable = report.samples.filter(sample => sample.results.length);
+    const temporalReviewable = reviewable.filter(sample => sample.results.some(result => result.publication_status === "within_range"));
+    const publicationCount = temporalReviewable.flatMap(sample => sample.results).filter(result => result.publication_status === "within_range").length;
+    const publicationStatuses = {
+      within_range: "在范围内",
+      out_of_range: "超出范围",
+      missing_published_at: "缺少发布日期",
+      invalid_published_at: "发布日期格式无效",
+    };
     const totalResults = reviewable.reduce((count, sample) => count + sample.results.length, 0);
     let queryDecisions = new Map(queryKeys.map(key => [key, null]));
     let criteria = new Map(reviewable.map(sample => [sample.key, sample.results.map(() => checks.map(() => null))]));
+    const blankPublications = () => new Map(temporalReviewable.map(sample => [sample.key, sample.results.map(() => null)]));
+    let publications = blankPublications();
 
     function make(tag, text) {
       const element = document.createElement(tag);
@@ -105,7 +116,9 @@
       const judged = [...criteria.values()].flat().filter(values => verdict(values) !== null).length;
       const reviewedQueries = [...queryDecisions.values()].filter(value => value !== null).length;
       const progress = totalResults ? `候选已判定 ${judged}/${totalResults}` : "报告无返回候选，无法计算 Top-10 有效率";
-      find("#progress").textContent = `查询已审定 ${reviewedQueries}/${queryKeys.length} · ${progress}`;
+      const publicationReviewed = [...publications.values()].flat().filter(value => value !== null).length;
+      const temporalProgress = publicationCount ? ` · 发布日期已核对 ${publicationReviewed}/${publicationCount}` : "";
+      find("#progress").textContent = `查询已审定 ${reviewedQueries}/${queryKeys.length} · ${progress}${temporalProgress}`;
     }
 
     function show() {
@@ -118,6 +131,8 @@
       const target = find("#sample");
       target.replaceChildren(heading, metadata, choice("查询适合作为本类别样本", queryDecisions.get(sample.case_id),
         value => queryDecisions.set(sample.case_id, value)));
+      if (query.time_range) target.append(make("p", `发布日期范围（UTC） ${query.time_range.from} 至 ${query.time_range.to}`));
+      if (query.reference_url) target.append(link("查询参考来源", query.reference_url));
       find("#previous").disabled = select.selectedIndex <= 0;
       find("#next").disabled = select.selectedIndex >= report.samples.length - 1;
 
@@ -142,6 +157,13 @@
         if (result.published_at || result.retrieved_at) {
           candidate.append(make("p", `发布日期 ${result.published_at || "未知"} · 检索时间 ${result.retrieved_at || "未知"}`));
         }
+        if (result.publication_status) {
+          candidate.append(make("p", `日期检查 ${publicationStatuses[result.publication_status]}`));
+          if (result.publication_status === "within_range") {
+            const values = publications.get(sample.key);
+            candidate.append(choice("来源页确认发布日期", values[index], value => { values[index] = value; }));
+          }
+        }
         const row = make("div");
         row.className = "criteria";
         const values = criteria.get(sample.key)[index];
@@ -160,6 +182,7 @@
         criteria: Object.fromEntries(criteria),
         query_decisions: Object.fromEntries(queryDecisions),
       };
+      if (publications.size) data.publication_decisions = Object.fromEntries(publications);
       const file = new Blob([JSON.stringify(data, null, 2) + "\n"], { type: "application/json" });
       const url = URL.createObjectURL(file);
       const anchor = make("a");
@@ -198,8 +221,23 @@
             throw new Error(`评审 ${sample.key} 的候选顺序或标注无效。`);
           }
         }
+        const loadedPublications = blankPublications();
+        if (saved.publication_decisions !== undefined) {
+          if (!exactKeys(saved.publication_decisions, [...loadedPublications.keys()])) {
+            throw new Error("发布日期评审的样本与原始报告不匹配。");
+          }
+          for (const sample of temporalReviewable) {
+            const values = saved.publication_decisions[sample.key];
+            if (!Array.isArray(values) || values.length !== sample.results.length || values.some((value, index) =>
+              !validChoice(value) || (value !== null && sample.results[index].publication_status !== "within_range"))) {
+              throw new Error(`发布日期评审 ${sample.key} 的候选顺序或标注无效。`);
+            }
+            loadedPublications.set(sample.key, values);
+          }
+        }
         criteria = new Map(Object.entries(saved.criteria));
         queryDecisions = new Map(Object.entries(saved.query_decisions));
+        publications = loadedPublications;
         show();
         updateProgress();
         find("#notice").textContent = "已导入评审。";

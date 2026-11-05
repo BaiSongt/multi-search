@@ -38,26 +38,26 @@
 {"id":"q038","category":"developer","query":"Apache Arrow IPC format specification","language":"en","region":"US","source_type":"web","modality":"text"}
 {"id":"q039","category":"developer","query":"SQLite explain query plan documentation","language":"en","region":"US","source_type":"web","modality":"text"}
 {"id":"q040","category":"developer","query":"React useEffect dependency cleanup 文档","language":"zh-CN","region":"CN","source_type":"web","modality":"text"}
-{"id":"q041","category":"news","query":"COP30 Belém climate summit announcements","language":"en","region":"GB","source_type":"news","modality":"text"}
-{"id":"q042","category":"news","query":"Expo 2025 Osaka opening April 2025 news","language":"en","region":"JP","source_type":"news","modality":"text"}
-{"id":"q043","category":"news","query":"2025 Nobel Prize physics announcement","language":"en","region":"SE","source_type":"news","modality":"text"}
-{"id":"q044","category":"news","query":"Artemis II mission launch NASA news","language":"en","region":"US","source_type":"news","modality":"text"}
-{"id":"q045","category":"news","query":"Hong Kong Northern Metropolis housing announcement news","language":"en","region":"HK","source_type":"news","modality":"text"}
-{"id":"q046","category":"news","query":"台北捷運環狀線工程最新消息","language":"zh-TW","region":"TW","source_type":"news","modality":"text"}
-{"id":"q047","category":"news","query":"新加坡地铁汤申东海岸线通车新闻","language":"zh-CN","region":"SG","source_type":"news","modality":"text"}
-{"id":"q048","category":"news","query":"日本 気象庁 梅雨入り 報道","language":"ja","region":"JP","source_type":"news","modality":"text"}
-{"id":"q049","category":"news","query":"New Zealand renewable energy project news","language":"en","region":"NZ","source_type":"news","modality":"text"}
-{"id":"q050","category":"news","query":"Australia Great Barrier Reef coral bleaching report news","language":"en","region":"AU","source_type":"news","modality":"text"}
-{"id":"q051","category":"news","query":"European Space Agency Ariane 6 launch news","language":"en","region":"FR","source_type":"news","modality":"text"}
-{"id":"q052","category":"news","query":"European Union AI Act implementation milestones news","language":"en","region":"BE","source_type":"news","modality":"text"}
-{"id":"q053","category":"news","query":"Canada wildfire season response news","language":"en","region":"CA","source_type":"news","modality":"text"}
-{"id":"q054","category":"news","query":"Google Chrome security update stable channel news","language":"en","region":"US","source_type":"news","modality":"text"}
-{"id":"q055","category":"news","query":"World Meteorological Organization global climate report news","language":"en","region":"GB","source_type":"news","modality":"text"}
-{"id":"q056","category":"news","query":"Bibliothèque nationale de France exposition actualité","language":"fr","region":"FR","source_type":"news","modality":"text"}
-{"id":"q057","category":"news","query":"Energía solar en Chile nuevas plantas noticias","language":"es","region":"CL","source_type":"news","modality":"text"}
-{"id":"q058","category":"news","query":"Deutschland Bahn Fahrplanwechsel Nachrichten","language":"de","region":"DE","source_type":"news","modality":"text"}
-{"id":"q059","category":"news","query":"Indonesia transportasi publik Jakarta berita","language":"id","region":"ID","source_type":"news","modality":"text"}
-{"id":"q060","category":"news","query":"대한민국 기상청 폭염 대책 뉴스","language":"ko","region":"KR","source_type":"news","modality":"text"}
+{"id":"q041","category":"news","query":"COP30 Belém climate summit announcements","language":"en","region":"GB","source_type":"news","modality":"text","time_range":{"from":"2025-11-01","to":"2025-11-30"},"reference_url":"https://unfccc.int/cop30/ifp"}
+{"id":"q042","category":"news","query":"Expo 2025 Osaka opening April 2025 news","language":"en","region":"JP","source_type":"news","modality":"text","time_range":{"from":"2025-02-01","to":"2025-04-30"},"reference_url":"https://www.expo2025.or.jp/en/news/news-20250225-07/"}
+{"id":"q043","category":"news","query":"2025 Nobel Prize physics announcement","language":"en","region":"SE","source_type":"news","modality":"text","time_range":{"from":"2025-10-01","to":"2025-10-31"},"reference_url":"https://www.nobelprize.org/prizes/physics/2025/press-release/"}
+{"id":"q044","category":"news","query":"Artemis II mission launch NASA news","language":"en","region":"US","source_type":"news","modality":"text","time_range":{"from":"2026-03-01","to":"2026-04-30"},"reference_url":"https://www.nasa.gov/news-release/liftoff-nasa-launches-astronauts-on-historic-artemis-moon-mission/"}
+{"id":"q045","category":"news","query":"Hong Kong Northern Metropolis housing announcement news","language":"en","region":"HK","source_type":"news","modality":"text","time_range":{"from":"2025-01-01","to":"2025-12-31"}}
+{"id":"q046","category":"news","query":"2026 台北捷運環狀線工程消息","language":"zh-TW","region":"TW","source_type":"news","modality":"text","time_range":{"from":"2026-01-01","to":"2026-10-31"}}
+{"id":"q047","category":"news","query":"新加坡地铁汤申东海岸线第四阶段通车新闻","language":"zh-CN","region":"SG","source_type":"news","modality":"text","time_range":{"from":"2024-03-01","to":"2024-06-30"},"reference_url":"https://www.lta.gov.sg/content/ltagov/en/newsroom/2024/3/news-releases/TEL4_to_welcome_commuters.html"}
+{"id":"q048","category":"news","query":"2025年 日本 気象庁 梅雨入り 報道","language":"ja","region":"JP","source_type":"news","modality":"text","time_range":{"from":"2025-05-01","to":"2025-07-31"}}
+{"id":"q049","category":"news","query":"New Zealand renewable energy project news","language":"en","region":"NZ","source_type":"news","modality":"text","time_range":{"from":"2025-01-01","to":"2025-12-31"}}
+{"id":"q050","category":"news","query":"Australia Great Barrier Reef coral bleaching 2024/25 report news","language":"en","region":"AU","source_type":"news","modality":"text","time_range":{"from":"2025-08-01","to":"2025-08-31"},"reference_url":"https://www.aims.gov.au/monitoring-great-barrier-reef/gbr-condition-summary-2024-25"}
+{"id":"q051","category":"news","query":"European Space Agency Ariane 6 inaugural launch news","language":"en","region":"FR","source_type":"news","modality":"text","time_range":{"from":"2024-07-01","to":"2024-07-31"},"reference_url":"https://www.esa.int/Newsroom/Press_Releases/Europe_s_new_Ariane_6_rocket_powers_into_space"}
+{"id":"q052","category":"news","query":"European Union AI Act implementation milestones news","language":"en","region":"BE","source_type":"news","modality":"text","time_range":{"from":"2025-01-01","to":"2025-12-31"},"reference_url":"https://digital-strategy.ec.europa.eu/en/faqs/navigating-ai-act"}
+{"id":"q053","category":"news","query":"Canada wildfire season response news","language":"en","region":"CA","source_type":"news","modality":"text","time_range":{"from":"2025-05-01","to":"2025-10-31"}}
+{"id":"q054","category":"news","query":"Google Chrome security update stable channel news","language":"en","region":"US","source_type":"news","modality":"text","time_range":{"from":"2026-05-01","to":"2026-07-31"}}
+{"id":"q055","category":"news","query":"World Meteorological Organization State of the Global Climate 2024 report news","language":"en","region":"GB","source_type":"news","modality":"text","time_range":{"from":"2025-03-01","to":"2025-04-30"},"reference_url":"https://wmo.int/publication-series/state-of-global-climate/state-of-global-climate-2024"}
+{"id":"q056","category":"news","query":"Bibliothèque nationale de France exposition actualité","language":"fr","region":"FR","source_type":"news","modality":"text","time_range":{"from":"2025-01-01","to":"2025-12-31"}}
+{"id":"q057","category":"news","query":"Energía solar en Chile nuevas plantas noticias","language":"es","region":"CL","source_type":"news","modality":"text","time_range":{"from":"2025-01-01","to":"2025-12-31"}}
+{"id":"q058","category":"news","query":"Deutschland Bahn Fahrplanwechsel Dezember 2025 Nachrichten","language":"de","region":"DE","source_type":"news","modality":"text","time_range":{"from":"2025-11-01","to":"2026-01-31"}}
+{"id":"q059","category":"news","query":"Indonesia transportasi publik Jakarta berita","language":"id","region":"ID","source_type":"news","modality":"text","time_range":{"from":"2025-01-01","to":"2025-12-31"}}
+{"id":"q060","category":"news","query":"대한민국 기상청 폭염 대책 뉴스","language":"ko","region":"KR","source_type":"news","modality":"text","time_range":{"from":"2025-06-01","to":"2025-08-31"}}
 {"id":"q061","category":"photo","query":"Golden Gate Bridge fog photo","language":"en","region":"US","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
 {"id":"q062","category":"photo","query":"Northern lights over Iceland photograph","language":"en","region":"IS","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
 {"id":"q063","category":"photo","query":"京都 伏見稲荷大社 鳥居 写真","language":"ja","region":"JP","source_type":"web","modality":"image","image_options":{"source_page_required":false}}

@@ -8,7 +8,7 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
@@ -20,6 +20,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 ROOT = Path(__file__).resolve().parents[2]
 CASES = Path(__file__).with_name("benchmark_cases.jsonl")
 MAX_RESPONSE_BYTES = 2_000_000
+_MISSING_DATE_WARNING = re.compile(r"[a-z0-9_]+:publication_date_missing:([1-9][0-9]{0,8})")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -49,6 +50,41 @@ def open_response(request: Request, timeout: float):
     return build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout)
 
 
+def parse_time_range(value: object) -> tuple[date, date] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict) and value.keys() == {"from", "to"}:
+        start, end = value["from"], value["to"]
+        if all(
+            isinstance(day, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day)
+            for day in (start, end)
+        ):
+            first, last = date.fromisoformat(start), date.fromisoformat(end)
+            if first <= last:
+                return first, last
+    raise ValueError("time_range 须为按顺序排列的 ISO 日期 from 与 to")
+
+
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+    except (OverflowError, ValueError):
+        return None
+
+
+def publication_status(result: dict, window: tuple[date, date]) -> str:
+    raw = result.get("published_at")
+    if raw is None:
+        return "missing_published_at"
+    published = _timestamp(raw)
+    if published is None:
+        return "invalid_published_at"
+    return "within_range" if window[0] <= published.date() <= window[1] else "out_of_range"
+
+
 def run_case(base: str, key: str, mode: str, case: dict) -> dict:
     payload = {
         "query": case["query"],
@@ -60,8 +96,9 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
         "cache_policy": "bypass",
         "max_results": 10,
     }
-    if "image_options" in case:
-        payload["image_options"] = case["image_options"]
+    for name in ("image_options", "time_range"):
+        if case.get(name) is not None:
+            payload[name] = case[name]
     request = Request(
         f"{base}/api/v1/search",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -121,7 +158,16 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
         "language": case["language"],
         "region": case["region"],
         "source_type": case["source_type"],
-        **{name: case[name] for name in ("query_kind", "reference_url") if name in case},
+        **{
+            name: case[name]
+            for name in ("query_kind", "reference_url", "time_range")
+            if name in case
+        },
+        "provider_missing_publication_date_candidates": sum(
+            int(match[1])
+            for warning in data.get("warnings") or ()
+            if isinstance(warning, str) and (match := _MISSING_DATE_WARNING.fullmatch(warning))
+        ),
         "trace_id": trace_id,
         "http_status": status,
         "code": data.get("code"),
@@ -152,7 +198,56 @@ def percentile(values: list[float], fraction: float) -> float | None:
     return sorted(values)[math.ceil(fraction * len(values)) - 1] if values else None
 
 
-def summaries(rows: list[dict], review: dict) -> dict:
+def temporal_summary(records: list[dict], publication_decisions: dict) -> dict | None:
+    filtered = [row for row in records if row.get("time_range") is not None]
+    if not filtered:
+        return None
+    observed = Counter()
+    successful = empty = reviewed = incorrect = equal_to_retrieved = 0
+    for row in filtered:
+        window = parse_time_range(row["time_range"])
+        if row["http_status"] != 200 or row["code"] is not None:
+            continue
+        successful += 1
+        empty += not row["results"]
+        judgments = publication_decisions.get(f"{row['case_id']}:{row['mode']}")
+        for index, result in enumerate(row["results"]):
+            status = publication_status(result, window)
+            observed[status] += 1
+            published = _timestamp(result.get("published_at"))
+            equal_to_retrieved += published is not None and published == _timestamp(
+                result.get("retrieved_at")
+            )
+            if status == "within_range" and judgments is not None:
+                reviewed += judgments[index] is not None
+                incorrect += judgments[index] is False
+    returned = sum(observed.values())
+    within = observed["within_range"]
+    observable_errors = returned - within
+    return {
+        "filtered_requests": len(filtered),
+        "successful_filtered_requests": successful,
+        "successful_empty_filtered_requests": empty,
+        "provider_missing_publication_date_candidates": sum(
+            row.get("provider_missing_publication_date_candidates", 0) for row in filtered
+        ),
+        "returned": returned,
+        "within_range": within,
+        "out_of_range": observed["out_of_range"],
+        "missing_published_at": observed["missing_published_at"],
+        "invalid_published_at": observed["invalid_published_at"],
+        "published_at_equals_retrieved_at": equal_to_retrieved,
+        "observable_error_ratio": observable_errors / returned if returned else None,
+        "publication_reviewed": reviewed,
+        "publication_incorrect": incorrect,
+        "publication_review_coverage": reviewed / within if within else None,
+        "temporal_error_ratio": (
+            (observable_errors + incorrect) / returned if returned and reviewed == within else None
+        ),
+    }
+
+
+def summaries(rows: list[dict], review: dict, publication_decisions: dict | None = None) -> dict:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         grouped[f"{row['mode']}:{row['modality']}"].append(row)
@@ -217,6 +312,8 @@ def summaries(rows: list[dict], review: dict) -> dict:
             "review_coverage": reviewed / n if n else None,
             "top10_valid_ratio": valid / n if n and reviewed == n else None,
         }
+        if temporal := temporal_summary(records, publication_decisions or {}):
+            result[group]["temporality"] = temporal
     return result
 
 
@@ -253,8 +350,30 @@ def review_report(path: Path, review: Path | None) -> dict:
         for row in rows
         if row["http_status"] == 200 and row["code"] is None and row["results"]
     }
+    publication_reviewable = {}
+    for row in rows:
+        key = f"{row['case_id']}:{row['mode']}"
+        if key in labels and (window := parse_time_range(row.get("time_range"))) is not None:
+            positions = [
+                publication_status(item, window) == "within_range" for item in row["results"]
+            ]
+            if any(positions):
+                publication_reviewable[key] = positions
     if review is None:
-        return {"report_sha256": digest, "labels": labels}
+        return {
+            "report_sha256": digest,
+            "labels": labels,
+            **(
+                {
+                    "publication_decisions": {
+                        key: [None] * len(positions)
+                        for key, positions in publication_reviewable.items()
+                    }
+                }
+                if publication_reviewable
+                else {}
+            ),
+        }
     review_bytes = review.read_bytes()
     judgments = json.loads(review_bytes.decode("utf-8-sig"))
     if not isinstance(judgments, dict) or judgments.get("report_sha256") != digest:
@@ -264,6 +383,22 @@ def review_report(path: Path, review: Path | None) -> dict:
         raise ValueError("评审包含不存在的样本键")
     if "criteria" in judgments:
         validate_criteria(judgments["criteria"], labels, submitted)
+    publication_decisions = judgments.get("publication_decisions", {})
+    if (
+        not isinstance(publication_decisions, dict)
+        or publication_decisions.keys() - publication_reviewable.keys()
+    ):
+        raise ValueError("发布日期评审包含不适用的样本键")
+    for key, decisions in publication_decisions.items():
+        if (
+            not isinstance(decisions, list)
+            or len(decisions) != len(publication_reviewable[key])
+            or any(
+                value is not None and (type(value) is not bool or not reviewable)
+                for value, reviewable in zip(decisions, publication_reviewable[key], strict=True)
+            )
+        ):
+            raise ValueError(f"发布日期评审与候选顺序或时效状态不匹配：{key}")
     report.pop("query_review", None)
     if "query_decisions" in judgments:
         decisions = judgments["query_decisions"]
@@ -283,7 +418,7 @@ def review_report(path: Path, review: Path | None) -> dict:
         **report,
         "reviewed_report_sha256": digest,
         "review_sha256": sha256(review_bytes).hexdigest(),
-        "summary": summaries(rows, submitted),
+        "summary": summaries(rows, submitted, publication_decisions),
     }
 
 
@@ -369,6 +504,11 @@ def main() -> None:
     cases = cases[: options.case_limit]
     if not cases or len({case["id"] for case in cases}) != len(cases):
         parser.error("样本不能为空且 case ID 必须唯一")
+    for case in cases:
+        try:
+            parse_time_range(case.get("time_range"))
+        except ValueError as error:
+            parser.error(f"{case['id']}：{error}")
     modes = list(dict.fromkeys(options.mode or ("quick", "standard")))
     started = datetime.now(UTC)
     before = container_stats(options.project) if options.compose_stats else None
