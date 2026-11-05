@@ -84,7 +84,7 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 
 `POST /api/v1/fetch` 与 MCP `web_fetch` 接受 `extraction_mode`，默认 `static`。设置 `dynamic` 时，仅对部署允许的 HTTPS 域名执行隔离渲染，重定向逐跳应用同一授权。`GET /api/v1/capabilities` 的 `fetch_dynamic` 表示配置和渲染 Worker 就绪状态。部署未授权动态抓取时返回 `MODE_UNAVAILABLE`，已授权但暂时无可用 Worker 时返回 `WORKER_UNAVAILABLE`。同一幂等标识从静态模式改为动态模式会产生冲突。
 
-动态证据使用 `extraction_method=browser_dom`、`locator.kind=rendered_html_text`。偏移和 SHA-256 基于规范化的渲染正文，`extraction_version` 记录 Chromium 和规范化器版本。标题、DOI 和发布日期使用原始响应的元数据。动态抓取适用于通过页面内嵌脚本生成内容的 UTF-8 或 ASCII HTML。依赖外部脚本或接口的页面可能返回 `FETCH_NO_EXCERPT`。来源摘录限制、实际渲染失败与时限耗尽分别作为任务错误或逐页诊断返回。
+动态证据使用 `extraction_method=browser_dom`、`locator.kind=rendered_html_text`。偏移和 `content_sha256` 基于规范化的渲染正文，`extraction_version` 记录 Chromium 和规范化器版本。标题、DOI 和发布日期使用原始响应的元数据。动态抓取支持 UTF-8 或 ASCII HTML 的内嵌脚本，以及部署方为该页面逐项授权的同源 JavaScript 和 JSON GET 资源。使用资源清单时，`render_bundle_sha256` 对按 URL 排序的资源 URL、种类、MIME 和响应体 SHA-256 计算指纹，表示预取输入集合。资源预取失败时任务返回实际诊断，包括 `FETCH_RESOURCE_REDIRECT`、`FETCH_ROBOTS_DENIED`、`FETCH_CONTENT_UNSUPPORTED` 或 `FETCH_BODY_TOO_LARGE`。 [部署配置](deployment.md#可选动态-html-渲染)
 
 抓取任务遇到图像型 PDF 时会进入 `partial` 终态，并在 `result.ocr_pending` 中返回待 OCR 的原始 URL 序号，从 0 开始。这些条目消耗抓取尝试预算，已提取页数仅统计实际生成证据的条目。当前 OCR 由外部授权适配器扩展。
 

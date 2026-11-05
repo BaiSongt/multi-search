@@ -312,6 +312,7 @@ export type EvidenceRecord = {
   content_sha256: string;
   extraction_method: string;
   extraction_version: string;
+  render_bundle_sha256?: string;
   verification_status: string;
   access_policy: string;
 };

@@ -148,6 +148,7 @@ function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () 
           {record.document_identifier && <><dt>文档标识</dt><dd>{record.document_identifier.type} · {record.document_identifier.value}</dd></>}
           <dt>提取方式</dt><dd>{record.extraction_method} / {record.extraction_version}</dd>
           <dt>内容 SHA-256</dt><dd><CopyId value={record.content_sha256} /></dd>
+          {record.render_bundle_sha256 && <><dt>动态资源包 SHA-256</dt><dd><CopyId value={record.render_bundle_sha256} /></dd></>}
           <dt>证据状态</dt><dd>{record.verification_status}</dd>
         </dl>
         <p className="muted">字符偏移定位到本次抓取所提取的文本。</p>

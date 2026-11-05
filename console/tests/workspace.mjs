@@ -147,8 +147,9 @@ async function evidenceResult(page) {
         evidence_id: "evidence-fixture-1", result_id: null, origin_url: origin, canonical_url: origin,
         document_identifier: null, retrieved_at: "2026-11-05T00:00:00Z", published_at: null,
         title: "示例来源", content_type: "text/html", evidence_text: "用于核对的证据摘录。",
-        locator: { kind: "html_text", section: "检索范围", text_offset_start: 10, text_offset_end: 20, page_number: null },
-        content_sha256: "0".repeat(64), extraction_method: "static_html", extraction_version: "1",
+        locator: { kind: "rendered_html_text", section: "检索范围", text_offset_start: 10, text_offset_end: 20, page_number: null },
+        content_sha256: "0".repeat(64), extraction_method: "browser_dom", extraction_version: "chromium.157.renderer.2+normalizer.1",
+        render_bundle_sha256: "a".repeat(64),
         verification_status: "content_extracted", access_policy: "metadata_and_excerpt",
       }],
     } });
@@ -171,6 +172,8 @@ async function evidenceResult(page) {
   await page.getByRole("button", { name: "证据详情" }).click();
   const dialog = page.getByRole("dialog", { name: "可定位证据" });
   await dialog.getByText("用于核对的证据摘录。").waitFor();
+  await dialog.getByText("动态资源包 SHA-256", { exact: true }).waitFor();
+  await dialog.getByText("a".repeat(64), { exact: true }).waitFor();
   await dialog.getByText("10–20", { exact: true }).waitFor();
   assert.equal(await dialog.getByRole("link", { name: origin }).getAttribute("href"), origin);
   await page.keyboard.press("Escape");

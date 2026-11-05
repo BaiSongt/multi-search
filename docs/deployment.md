@@ -96,14 +96,23 @@ Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心�
 
 ### 可选动态 HTML 渲染
 
-动态模式用于公开 HTML 内嵌脚本生成正文的场景。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。每个允许的重定向域名也需单独列入。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。
+动态模式用于公开 HTML 由脚本生成正文的场景。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。每个允许的重定向域名也需单独列入。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。
 
 ```sh
 python scripts/init-secrets.py
 docker compose -f compose.yml -f compose.dynamic.yml --profile dynamic up -d --build --wait
 ```
 
-Worker 通过 Unix socket 向断网 Chromium 容器传递已授权的 HTML。浏览器仅加载该响应，阻断其他资源请求。来源 CSP、原始和渲染后的 robots 摘录限制继续生效。动态镜像面向 Linux x86-64，构建使用 Docker BuildKit。宿主 Linux 需允许非特权用户命名空间，渲染器在启动时确认 Chromium 的命名空间和 Seccomp-BPF 沙箱。渲染器健康检查失败时，动态能力保持不可用。静态 L3 与动态 `fetch` 分别通过各自入口使用。 [抓取接口](api-contracts.md#证据与任务)
+默认动态模式向断网 Chromium 传递获准 HTML，执行内嵌脚本。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权公开的同源资源，查询字符串按原样匹配。
+
+```dotenv
+MULTISEARCH_DYNAMIC_FETCH_DOMAINS=docs.example.org
+MULTISEARCH_DYNAMIC_FETCH_RESOURCES='{"https://docs.example.org/guide":[{"url":"https://docs.example.org/app.js","kind":"script"},{"url":"https://docs.example.org/api/guide","kind":"json"}]}'
+```
+
+Worker 对清单中的每个资源重新执行 DNS 固定、域名检查、robots 和访问限速。资源仅支持同源 HTTPS GET，每页最多 8 个，每个 256 KiB，合计 512 KiB，资源重定向返回错误。资源与页面共享抓取时限。Worker 通过 Unix socket 传递已验证的快照。Chromium 依据资源类型在原始页面地址回放这些响应，保持断网并执行来源 CSP。页面和资源的摘录限制共同约束返回证据。
+
+动态镜像面向 Linux x86-64，构建使用 Docker BuildKit。宿主 Linux 需允许非特权用户命名空间，渲染器在启动时确认 Chromium 的命名空间和 Seccomp-BPF 沙箱。渲染器健康检查失败时，动态能力保持不可用。静态 L3 与动态 `fetch` 分别通过各自入口使用。 [抓取接口](api-contracts.md#证据与任务) · [CSP 规范](https://www.w3.org/TR/CSP3/)
 
 PDF 需要匹配 MIME 和文件签名，输入上限为 1 MiB。每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。当前镜像提取 PDF 文本层，将需要 OCR 的图像型 PDF 标记为待处理。部署方可通过 OCR 契约接入获准的引擎。
 
