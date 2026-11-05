@@ -205,3 +205,12 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 真实 Uvicorn 的 REST 和 MCP 均验证直连地址、可信代理的 IPv4／IPv6、伪造或重复转发头拒绝、Console 网关无法核验地址时的拒绝，以及轮换宽限期内新旧 Key 的白名单继承。独立 PostgreSQL 验证已有 Key 迁移兼容、吊销和降级保护。 [IP 白名单部署](deployment.md#api-key-的-ip-白名单)
 - Chromium 验证创建和轮换时的 IP 白名单及一次性密钥示例。账户会话列表和撤销经过真实 Cookie、Origin 和 CSRF 检查。独立 PostgreSQL 验证旧 Cookie 迁移、分页、租户与所有者隔离，以及续期与撤销并发时撤销仍能定位对应会话。 [会话契约](api-contracts.md#管理面)
 - 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。公网 RFC Editor 正文探针在同版本再次收到 `FETCH_TARGET_BLOCKED`，Worker DNS 返回了非公网地址。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
+
+### `0.3.0-alpha.13` 复验
+
+- 421 项后端测试、9 项 SDK 测试与 Console 类型检查通过。隔离 Compose 的八个服务健康，动态抓取与本地研究探针通过 REST／MCP、证据归档、租户隔离和单次计量复验。Chromium 验证总览指标错误时独立状态仍可见、按角色显示审计提示、受邀账户切换及中断轮次展示。
+- 分别停止并恢复隔离 Compose 的 Redis 和 PostgreSQL。Redis 停止时三个 Worker 状态为未确认，PostgreSQL 停止时 API 就绪检查返回 HTTP 503，Console 网关仍返回独立依赖状态。两项依赖恢复后八项检查均回到健康。 [服务状态](operations.md#服务状态与审计提示)
+- 真实 PostgreSQL 覆盖审计风险提示的 7 天窗口、稳定排序、最小字段和双租户隔离。角色切换覆盖双向并发、目标成员停用、原 Cookie 失效、会话期限和其他浏览器隔离。 [管理面契约](api-contracts.md#管理面)
+- 研究 Worker 在第二轮检索中断后，独立 PostgreSQL 分别验证末次租约结束和租约重领。两条路径保留候选、预算和中断轮次，返回部分完成并计量一次，未观测的轮次指标保持未知。
+- 四租户的 20 并发 Mock Provider 基准完成 40 次冷请求和 40 次租户内缓存命中，80 条完成事件与实际调用一致。冷请求 P50 为 132.633 ms，P95 为 178.352 ms，P99 为 183.009 ms。 [基准方法](operations.md#性能与质量基线)
+- 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。公网 RFC Editor 正文探针仍因 Worker DNS 返回非公网地址而收到 `FETCH_TARGET_BLOCKED`。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
