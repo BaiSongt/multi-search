@@ -222,3 +222,11 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 真实 REST／MCP 验证同步与研究首次计量时才写原文，跨入口重放不会补采。关闭或更改策略、重新启用、到期、其他租户或未授权会话均无法获取不适用的原文。后台清理移除已到期或作废的原文，保留用量记录。真实逻辑备份恢复验证原文表数据为空，策略、审计、用量与早期归档兼容。 [备份边界](operations.md#逻辑备份与恢复演练)
 - 20 并发 Mock Provider 基准完成四租户 40 次冷请求、40 次缓存命中和 80 条计量记录。冷请求 P50 为 142.573 ms，P95 为 185.1 ms，P99 为 204.501 ms。
 - 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。公网 RFC Editor 正文探针在同版本仍因 Worker DNS 返回非公网地址而收到 `FETCH_TARGET_BLOCKED`。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
+
+### `0.3.0-alpha.15` 复验
+
+- 464 项后端测试、9 项 SDK 测试、Console 类型检查及 Chromium 工作区回归通过。隔离 Compose 的八个服务健康。同源与跨源动态抓取、本地研究日期边界、证据归档和 REST／MCP 单次计量复验通过。
+- 受控上游限流探针经过真实 PostgreSQL 和 Redis，验证 REST 502 的 `Retry-After`、MCP 冷却期间沿用的原因，以及追踪中实际尝试 1 次和跳过 0 次的记录。Chromium 同时验证旧追踪的未知次数保持可区分。 [追踪契约](api-contracts.md#管理面)
+- 用相同八条文字查询和 3.1 秒请求间隔各测 L1、L2。`0.3.0-alpha.10` 基线返回候选 4／16，`0.3.0-alpha.15` 返回候选 8／16，均为开发文档样本。通用知识两版均为 0／8。实际来源尝试由 9 次变为 16 次，因熔断跳过的来源从 23 次变为 16 次。候选版的 8 次 502 中，6 次带冷却重试提示。两轮从不同熔断状态启动，公网结果属于小样本观测。 [基准方法](operations.md#性能与质量基线)
+- 四租户的 20 并发 Mock Provider 基准完成 40 次冷请求、40 次缓存命中和 80 条完成记录。冷请求 P50 为 138.544 ms，P95 为 193.481 ms，P99 为 201.392 ms。
+- 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。RFC Editor 公网正文探针收到 `FETCH_TARGET_BLOCKED`，Worker DNS 返回了非公网地址。完整公网覆盖、正向公网正文和人工 Top-10 有效率待验收。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描) · [公网探针](operations.md#公网正文验收)
