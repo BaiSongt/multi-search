@@ -1,6 +1,6 @@
 # Console 设计与当前交付
 
-首轮 Next.js Console 在 `/` 展示真实 API 就绪状态与 OpenAPI 文档入口。由 Console 服务端读取 API 健康接口，数据库、Redis 和检索引擎保留在后端服务网络。当前页面用于容器与 API 联调。
+Next.js Console 在 `/` 展示真实 API 就绪状态与 OpenAPI 文档入口。由 Console 服务端读取 API，数据库、Redis 和检索引擎保留在后端服务网络。
 
 WP-08 在同一 Console 中交付登录入口和两个角色工作区。
 

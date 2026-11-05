@@ -1,13 +1,14 @@
 {
   "name": "multisearch-console",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "license": "Apache-2.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:workspace": "node --test tests/workspace.mjs"
   },
   "dependencies": {
     "next": "16.4.5",
@@ -18,6 +19,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "playwright": "1.58.2",
     "typescript": "~6.0.0"
   }
 }

@@ -19,6 +19,7 @@ redis-py — MIT — https://github.com/redis/redis-py/blob/master/LICENSE
 Next.js — MIT — https://github.com/vercel/next.js/blob/canary/license.md
 React and React DOM — MIT — https://github.com/facebook/react/blob/main/LICENSE
 TypeScript — Apache-2.0 — https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt
+Playwright — Apache-2.0 — https://github.com/microsoft/playwright/blob/v1.58.2/LICENSE
 PostgreSQL — PostgreSQL License — https://www.postgresql.org/about/licence/
 SearXNG — AGPL-3.0 — https://github.com/searxng/searxng/blob/cccbc9e15/LICENSE
 Redis 8 — AGPL-3.0 option — https://redis.io/legal/licenses/

@@ -1,6 +1,6 @@
-# 首轮验收
+# 阶段 I 验收
 
-本轮对应 WP-01 至 WP-04，完成后进入人工验收。WP-05 至 WP-08 完成后再验收阶段 I 产品。
+阶段 I 覆盖 WP-01 至 WP-08。`v0.1.0-alpha.1` 为工程与检索基线，`v0.1.0-alpha.2` 加入图片核验、MCP、账户与用量及角色工作区。
 
 ## 本地质量检查
 
@@ -18,12 +18,21 @@ npm --prefix console run check
 npm --prefix console run build
 ```
 
+Console 浏览器回归需要先安装 Playwright Chromium，再启动本地 Compose 服务。
+
+```sh
+cd console
+npx playwright install chromium
+npm run test:workspace
+```
+
 ## Compose 冒烟
 
 按 [部署文档](deployment.md) 启动服务，然后运行以下命令。
 
 ```sh
 python scripts/smoke.py
+python scripts/smoke_management.py
 ```
 
 脚本验证 API 存活与就绪、Console 首页、公开能力发现、搜索权限、图片作用域、请求校验、离线边界以及吊销生效。它在两个固定的本地验收租户中签发短期测试 Key，并在结束时吊销。公开检索探测仅发送通用测试关键词。脚本使用本地回环地址，密钥不会出现在输出中。
@@ -36,7 +45,7 @@ python scripts/smoke.py
 python scripts/smoke.py --api-url http://127.0.0.1:18765 --console-url http://127.0.0.1:13000
 ```
 
-## 本机验收记录
+## 首轮本机验收记录
 
 2026-11-05 在 Docker Desktop 的 Linux 容器环境中验证。
 
@@ -51,11 +60,16 @@ python scripts/smoke.py --api-url http://127.0.0.1:18765 --console-url http://12
 
 公网部分响应跳过缓存。缓存验收使用 Mock Provider 与真实 Redis。本轮对 `NASA` 和 `Golden Gate Bridge` 取得了候选，一次开发者文档查询曾因上游不可用返回 HTTP 502。此记录反映当时的出口与上游状态。
 
-## 当前边界
+## 阶段 I 本机验收记录
 
-- WP-05 扩充图片归属与许可核查。首轮只输出未知授权状态，服务端不跟随候选 URL。
-- WP-06 交付 MCP Streamable HTTP 和实际客户端契约验证。
-- WP-07 交付开发者 Key 生命周期 API、用量计量与完整配额。首轮通过本地 CLI 签发和吊销，平台实施作用域、有效期及基础限流。
-- WP-08 交付角色工作区、登录会话与 Playground。首轮 Console 只提供状态和文档入口。
+- 97 项阶段 I 后端测试通过，Ruff 与 TypeScript 检查通过。
+- Compose 生产构建通过，真实 PostgreSQL 与 Redis 管理面冒烟通过，覆盖 CSRF、角色隔离、租户创建、幂等扣额、超额拒绝、密钥轮换吊销和审计。
+- 官方 MCP 客户端对 Compose 实例发现并调用两个工具，验证各计一次和吊销即时生效。
+- Chromium 验证真实登录、角色页面隔离、一次性密钥、分页、用量、租户额度审计、主题和会话生命周期。图片未知授权提示使用可重复的夹具验证。
+- Commons 样本核验到 CC BY-SA 2.5 声明与文件页固定版本。 [来源证据](https://commons.wikimedia.org/w/index.php?oldid=1265385258)
+- 公网冒烟返回真实文字和图片候选。两种模态均有部分上游失败，公网部分结果跳过缓存。缓存与租户隔离已有 Mock Provider 加真实 Redis 验收。
+
+## 后续阶段
+
 - Crawl4AI、专业来源、本地索引和 L4 研究属于后续阶段。离线或私网请求在没有获准的内部来源时显式拒绝。
 - 真实引擎可用性受出口网络、限流和搜索区域影响。测试须区分 JSON 接口可达、上游返回候选、契约与来源字段合格。公网延迟和质量基准需在固定环境下单独测定。
