@@ -29,7 +29,9 @@ class Settings:
                 raise ValueError("缺少 PostgreSQL 连接配置")
             from urllib.parse import quote
 
-            database_url = f"postgresql+asyncpg://multisearch:{quote(password, safe='')}@postgres/multisearch"
+            database_url = (
+                f"postgresql+asyncpg://multisearch:{quote(password, safe='')}@postgres/multisearch"
+            )
         pepper = secret("API_KEY_HASH_PEPPER")
         if len(pepper.encode()) < 32:
             raise ValueError("API Key pepper 至少需要 32 字节")

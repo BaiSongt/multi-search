@@ -8,4 +8,4 @@ COPY VERSION /app/VERSION
 COPY backend/ ./
 USER 1000:1000
 EXPOSE 8765
-CMD ["python", "-m", "uvicorn", "multisearch.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765", "--no-access-log"]
+CMD ["sh", "-c", "alembic upgrade head && exec python -m uvicorn multisearch.main:create_app --factory --host 0.0.0.0 --port 8765 --no-access-log"]
