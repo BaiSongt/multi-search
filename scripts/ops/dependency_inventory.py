@@ -14,6 +14,7 @@ IMAGE_FILES = (
     "backend/Dockerfile",
     "console/Dockerfile",
     "deploy/crawl4ai/Dockerfile",
+    "deploy/postgres/Dockerfile",
 )
 IMAGE_LINE = re.compile(r"^\s*(?:FROM\s+|image:\s*)(\S+)\s*", re.MULTILINE)
 IMAGE_REF = re.compile(r"(?P<name>\S+):(?P<tag>[^:@/]+)@sha256:(?P<digest>[a-f0-9]{64})")

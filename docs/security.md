@@ -71,3 +71,7 @@ python scripts/ops/image_security.py --profile research --output .secrets/ops/im
 本轮未在识别到的 Python 或 npm 包中发现严重或高危记录。API、Worker、Crawl4AI 和 Console 的剩余高危记录来自 Debian 软件包，当前报告未列修复版本。Console 的 `CVE-2023-45853` 是 Debian 12 `zlib1g` 的版本匹配。Debian 说明该漏洞位于旧版本 `zlib` 源包未构建的 MiniZip 代码，本机 Console 镜像也未安装 `libminizip1`。原始记录保留。 [Debian CVE 记录](https://security-tracker.debian.org/tracker/CVE-2023-45853)
 
 PostgreSQL 的严重和高危记录来自 `gosu` 嵌入的 Go 标准库，表中的修复版本指 Go 版本。对该镜像内的 `gosu` 运行 `govulncheck -mode binary`，未匹配到严重项 `CVE-2025-68121` 的 TLS 易受攻击符号，另检出 `moby/sys/user` 的中危 `CVE-2026-61801`，其利用前提是输入可被攻击者控制的用户或组数据库文件。本 Compose 配置的 PostgreSQL 根文件系统为只读，且不挂载替代的 `/etc/passwd` 或 `/etc/group`。原始 Trivy 高危门禁仍返回 2。 [Go CVE 记录](https://pkg.go.dev/vuln/GO-2026-4337) · [gosu 复核方法](https://github.com/tianon/gosu/security) · [Moby 安全公告](https://github.com/moby/sys/security/advisories/GHSA-mjcv-p78q-w5fw)
+
+`0.3.0-alpha.3` 保留固定的官方 PostgreSQL 基础镜像与入口脚本，用 Alpine `su-exec 0.3-r0` 完成降权。镜像附带 su-exec 的 MIT 许可证。通过新库初始化、原卷兼容、重启和优雅停库验收，实际数据库进程 UID/GID 为 70、有效能力为零。 [官方入口脚本](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh) · [su-exec 许可证](https://github.com/ncopa/su-exec/blob/v0.3/LICENSE)
+
+同一 Trivy 0.76.1 与漏洞库快照复扫七个 `linux/amd64` 运行镜像，PostgreSQL 子清单 `sha256:1c8fc61d0b1971337487353237aaa6bfa4a0c89063d8d7cf6ea953453e907e62` 的严重与高危记录从 1／25 降为 0／0。其余镜像的严重与高危计数与上一轮相同，整体门禁仍返回 2。

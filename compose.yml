@@ -126,7 +126,8 @@ services:
       retries: 12
 
   postgres:
-    image: postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+    build:
+      context: ./deploy/postgres
     environment:
       POSTGRES_DB: multisearch
       POSTGRES_USER: multisearch
@@ -135,6 +136,9 @@ services:
     volumes: [postgres_data:/var/lib/postgresql/data]
     networks: [data]
     read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
     tmpfs: [/tmp, /var/run/postgresql]
     mem_limit: 384m
     healthcheck:
