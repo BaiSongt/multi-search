@@ -1,6 +1,8 @@
 import json
 from collections.abc import Awaitable, Callable
-from uuid import uuid4
+from dataclasses import dataclass
+from typing import Literal
+from uuid import UUID, uuid4
 
 from fastapi.security.utils import get_authorization_scheme_param
 from mcp.server import Server, ServerRequestContext
@@ -14,21 +16,49 @@ from mcp_types import (
     Tool,
     ToolAnnotations,
 )
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import ErrorBody, Modality, SearchRequest, SearchResponse
+from .contracts import ErrorBody, InputModel, Modality, Mode, SearchRequest, SearchResponse
 from .errors import ApiError
 from .identity import MachineIdentity
+from .job_contracts import FetchRequest, JobAccepted, JobView
 
 type SearchCallback = Callable[[SearchRequest, MachineIdentity, str], Awaitable[SearchResponse]]
 type AuthenticateCallback = Callable[[str], Awaitable[MachineIdentity]]
+type FetchCallback = Callable[[FetchRequest, MachineIdentity, str], Awaitable[JobAccepted]]
+type ResearchCallback = Callable[[SearchRequest, MachineIdentity, str], Awaitable[JobAccepted]]
+type JobCallback = Callable[[UUID, MachineIdentity], Awaitable[JobView]]
+type ToolOutput = SearchResponse | JobAccepted | JobView
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 _MAX_REQUEST_BYTES = 32_768
 _MAX_TOOL_TEXT_BYTES = 16_384
+
+
+@dataclass(frozen=True)
+class MCPJobs:
+    fetch: FetchCallback
+    research: ResearchCallback
+    get: JobCallback
+    cancel: JobCallback
+
+
+class _JobReference(InputModel):
+    job_id: UUID
+
+
+class _StartResearch(SearchRequest):
+    mode: Literal[Mode.DEEP] = Mode.DEEP
+
+
+def _tool_input[Model: InputModel](model: type[Model], arguments: dict[str, object]) -> Model:
+    try:
+        return model.model_validate(arguments)
+    except ValidationError:
+        raise ApiError(422, "INVALID_REQUEST", "请求参数验证失败") from None
 
 
 def _error_body(error: ApiError, request_id: str) -> ErrorBody:
@@ -50,13 +80,13 @@ def _tool_error(error: ApiError, request_id: str) -> CallToolResult:
     )
 
 
-def _tool_result(response: SearchResponse) -> CallToolResult:
+def _tool_result(response: ToolOutput) -> CallToolResult:
     data = response.model_dump(mode="json")
     model_text = response.model_dump_json()
     if len(model_text.encode("utf-8")) > _MAX_TOOL_TEXT_BYTES:
         # 将较长的结果保留在 structuredContent，避免为模型复制大量摘要和链接。
-        model_text = json.dumps(
-            {
+        if isinstance(response, SearchResponse):
+            preview = {
                 "request_id": response.request_id,
                 "status": response.status,
                 "result_count": response.result_count,
@@ -65,36 +95,82 @@ def _tool_result(response: SearchResponse) -> CallToolResult:
                     for hit in response.results[:5]
                 ],
                 "message": "完整结果见 structuredContent。图片候选不代表获得使用授权。",
-            },
-            ensure_ascii=False,
-        )
+            }
+        else:
+            preview = {
+                "job_id": str(response.job_id),
+                "status": response.status,
+                "message": "完整任务状态和结果见 structuredContent。",
+            }
+        model_text = json.dumps(preview, ensure_ascii=False)
     return CallToolResult(
         content=[TextContent(type="text", text=model_text)],
         structured_content=data,
     )
 
 
-def create_mcp(search: SearchCallback, *, version: str) -> Server:
-    output_schema = SearchResponse.model_json_schema()
+def create_mcp(search: SearchCallback, *, version: str, jobs: MCPJobs | None = None) -> Server:
+    output_schema = (
+        {"type": "object", **TypeAdapter(SearchResponse | JobAccepted).json_schema()}
+        if jobs is not None
+        else SearchResponse.model_json_schema()
+    )
     image_schema = SearchRequest.model_json_schema()
     del image_schema["properties"]["modalities"]
-    annotations = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+    read_search = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+    enqueue = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+    annotations = enqueue if jobs is not None else read_search
+    deep_note = " 深度模式提交异步任务。" if jobs is not None else ""
     tools = {
         "multi_search": Tool(
             name="multi_search",
-            description="检索网页、新闻和图片，返回候选、来源和追溯 ID。",
+            description="检索网页、新闻和图片，返回候选、来源和追溯 ID。" + deep_note,
             input_schema=SearchRequest.model_json_schema(),
             output_schema=output_schema,
             annotations=annotations,
         ),
         "image_search": Tool(
             name="image_search",
-            description="检索图片，返回原图、预览、来源页和版权状态。搜索结果不代表获得使用授权。",
+            description="检索图片，返回原图、预览、来源页和版权状态。搜索结果不代表获得使用授权。"
+            + deep_note,
             input_schema=image_schema,
             output_schema=output_schema,
             annotations=annotations,
         ),
     }
+    if jobs is not None:
+        tools.update(
+            web_fetch=Tool(
+                name="web_fetch",
+                description="提交公开来源提取任务，返回任务标识与预算。",
+                input_schema=FetchRequest.model_json_schema(),
+                output_schema=JobAccepted.model_json_schema(),
+                annotations=enqueue,
+            ),
+            start_deep_research=Tool(
+                name="start_deep_research",
+                description="提交有预算上限的深度研究任务，返回任务标识。",
+                input_schema=_StartResearch.model_json_schema(),
+                output_schema=JobAccepted.model_json_schema(),
+                annotations=enqueue,
+            ),
+            get_search_job=Tool(
+                name="get_search_job",
+                description="查询当前租户内、当前 API Key 获准访问的任务。",
+                input_schema=_JobReference.model_json_schema(),
+                output_schema=JobView.model_json_schema(),
+                annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+            ),
+            cancel_search_job=Tool(
+                name="cancel_search_job",
+                description="取消当前租户内、当前 API Key 获准管理的任务。",
+                input_schema=_JobReference.model_json_schema(),
+                output_schema=JobView.model_json_schema(),
+                annotations=ToolAnnotations(
+                    read_only_hint=False, destructive_hint=True, open_world_hint=False
+                ),
+            ),
+        )
 
     async def list_tools(
         context: ServerRequestContext, params: PaginatedRequestParams | None
@@ -115,16 +191,28 @@ def create_mcp(search: SearchCallback, *, version: str) -> Server:
         if params.name == "image_search":
             args = {**args, "modalities": [Modality.IMAGE]}
         try:
-            body = SearchRequest.model_validate(args)
-        except ValidationError:
-            return _tool_error(ApiError(422, "INVALID_REQUEST", "请求参数验证失败"), request_id)
-        request_id = body.request_id or request_id
-        http.state.request_id = request_id
-        try:
-            response = await search(body, identity, request_id)
+            if jobs is not None and params.name in {"get_search_job", "cancel_search_job"}:
+                reference = _tool_input(_JobReference, args)
+                lookup = jobs.get if params.name == "get_search_job" else jobs.cancel
+                response = await lookup(reference.job_id, identity)
+            elif jobs is not None and params.name == "web_fetch":
+                fetch = _tool_input(FetchRequest, args)
+                request_id = fetch.request_id or request_id
+                http.state.request_id = request_id
+                response = await jobs.fetch(fetch, identity, request_id)
+            else:
+                request_model = (
+                    _StartResearch if params.name == "start_deep_research" else SearchRequest
+                )
+                body = _tool_input(request_model, args)
+                request_id = body.request_id or request_id
+                http.state.request_id = request_id
+                dispatch = jobs.research if jobs is not None and body.mode == Mode.DEEP else search
+                response = await dispatch(body, identity, request_id)
         except ApiError as error:
             return _tool_error(error, request_id)
-        http.state.request_id = response.request_id
+        if isinstance(response, SearchResponse):
+            http.state.request_id = response.request_id
         return _tool_result(response)
 
     return Server("MultiSearch", version=version, on_list_tools=list_tools, on_call_tool=call_tool)
