@@ -1,0 +1,100 @@
+{"id":"q001","category":"general","query":"How do tides work?","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q002","category":"general","query":"What causes auroras?","language":"en","region":"CA","source_type":"web","modality":"text"}
+{"id":"q003","category":"general","query":"京都の公共交通機関の使い方","language":"ja","region":"JP","source_type":"web","modality":"text"}
+{"id":"q004","category":"general","query":"故宫博物院开放时间","language":"zh-CN","region":"CN","source_type":"web","modality":"text"}
+{"id":"q005","category":"general","query":"香港公共圖書館借閱服務","language":"zh-TW","region":"HK","source_type":"web","modality":"text"}
+{"id":"q006","category":"general","query":"Cómo funciona una bomba de calor","language":"es","region":"ES","source_type":"web","modality":"text"}
+{"id":"q007","category":"general","query":"Was ist ein Stromspeicher für Solaranlagen","language":"de","region":"DE","source_type":"web","modality":"text"}
+{"id":"q008","category":"general","query":"Les musées gratuits à Paris premier dimanche","language":"fr","region":"FR","source_type":"web","modality":"text"}
+{"id":"q009","category":"general","query":"Taipei metro airport transfer guide","language":"en","region":"TW","source_type":"web","modality":"text"}
+{"id":"q010","category":"general","query":"Ocean salinity measurement methods","language":"en","region":"AU","source_type":"web","modality":"text"}
+{"id":"q011","category":"general","query":"台风路径预报的原理","language":"zh-CN","region":"CN","source_type":"web","modality":"text"}
+{"id":"q012","category":"general","query":"韓國首爾地鐵轉乘方法","language":"zh-TW","region":"TW","source_type":"web","modality":"text"}
+{"id":"q013","category":"general","query":"Architecture of Antoni Gaudí in Barcelona","language":"en","region":"ES","source_type":"web","modality":"text"}
+{"id":"q014","category":"general","query":"How a bicycle derailleur works","language":"en","region":"GB","source_type":"web","modality":"text"}
+{"id":"q015","category":"general","query":"Pěstování rajčat na balkoně","language":"cs","region":"CZ","source_type":"web","modality":"text"}
+{"id":"q016","category":"general","query":"Origine du calendrier grégorien","language":"fr","region":"FR","source_type":"web","modality":"text"}
+{"id":"q017","category":"general","query":"Cómo encontrar cursos gratuitos del SENA","language":"es","region":"CO","source_type":"web","modality":"text"}
+{"id":"q018","category":"general","query":"National parks in New Zealand conservation programme","language":"en","region":"NZ","source_type":"web","modality":"text"}
+{"id":"q019","category":"general","query":"ブラウザのアクセシビリティ設定","language":"ja","region":"JP","source_type":"web","modality":"text"}
+{"id":"q020","category":"general","query":"Makanan tradisional Indonesia berbahan tempe","language":"id","region":"ID","source_type":"web","modality":"text"}
+{"id":"q021","category":"developer","query":"Python asyncio TaskGroup exception handling","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q022","category":"developer","query":"TypeScript satisfies operator official handbook","language":"en","region":"GB","source_type":"web","modality":"text"}
+{"id":"q023","category":"developer","query":"Rust ownership borrowing book","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q024","category":"developer","query":"PostgreSQL MVCC visibility documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q025","category":"developer","query":"Linux systemd service restart limits documentation","language":"en","region":"GB","source_type":"web","modality":"text"}
+{"id":"q026","category":"developer","query":"Docker Compose healthcheck depends_on documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q027","category":"developer","query":"Kubernetes StatefulSet rolling update documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q028","category":"developer","query":"Redis Lua script atomicity documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q029","category":"developer","query":"FastAPI Pydantic request body validation tutorial","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q030","category":"developer","query":"Next.js App Router route handlers documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q031","category":"developer","query":"Git bisect skip documentation","language":"en","region":"GB","source_type":"web","modality":"text"}
+{"id":"q032","category":"developer","query":"OpenTelemetry trace context propagation specification","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q033","category":"developer","query":"GitHub actions reusable workflow permissions","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q034","category":"developer","query":"Playwright locator accessibility documentation","language":"en","region":"GB","source_type":"web","modality":"text"}
+{"id":"q035","category":"developer","query":"Vite TypeScript path aliases documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q036","category":"developer","query":"W3C WCAG focus appearance understanding","language":"en","region":"GB","source_type":"web","modality":"text"}
+{"id":"q037","category":"developer","query":"Go net/http context cancellation example","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q038","category":"developer","query":"Apache Arrow IPC format specification","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q039","category":"developer","query":"SQLite explain query plan documentation","language":"en","region":"US","source_type":"web","modality":"text"}
+{"id":"q040","category":"developer","query":"React useEffect dependency cleanup 文档","language":"zh-CN","region":"CN","source_type":"web","modality":"text"}
+{"id":"q041","category":"news","query":"COP30 Belém climate summit announcements","language":"en","region":"GB","source_type":"news","modality":"text"}
+{"id":"q042","category":"news","query":"Expo 2025 Osaka opening April 2025 news","language":"en","region":"JP","source_type":"news","modality":"text"}
+{"id":"q043","category":"news","query":"2025 Nobel Prize physics announcement","language":"en","region":"SE","source_type":"news","modality":"text"}
+{"id":"q044","category":"news","query":"Artemis II mission launch NASA news","language":"en","region":"US","source_type":"news","modality":"text"}
+{"id":"q045","category":"news","query":"Hong Kong Northern Metropolis housing announcement news","language":"en","region":"HK","source_type":"news","modality":"text"}
+{"id":"q046","category":"news","query":"台北捷運環狀線工程最新消息","language":"zh-TW","region":"TW","source_type":"news","modality":"text"}
+{"id":"q047","category":"news","query":"新加坡地铁汤申东海岸线通车新闻","language":"zh-CN","region":"SG","source_type":"news","modality":"text"}
+{"id":"q048","category":"news","query":"日本 気象庁 梅雨入り 報道","language":"ja","region":"JP","source_type":"news","modality":"text"}
+{"id":"q049","category":"news","query":"New Zealand renewable energy project news","language":"en","region":"NZ","source_type":"news","modality":"text"}
+{"id":"q050","category":"news","query":"Australia Great Barrier Reef coral bleaching report news","language":"en","region":"AU","source_type":"news","modality":"text"}
+{"id":"q051","category":"news","query":"European Space Agency Ariane 6 launch news","language":"en","region":"FR","source_type":"news","modality":"text"}
+{"id":"q052","category":"news","query":"European Union AI Act implementation milestones news","language":"en","region":"BE","source_type":"news","modality":"text"}
+{"id":"q053","category":"news","query":"Canada wildfire season response news","language":"en","region":"CA","source_type":"news","modality":"text"}
+{"id":"q054","category":"news","query":"Google Chrome security update stable channel news","language":"en","region":"US","source_type":"news","modality":"text"}
+{"id":"q055","category":"news","query":"World Meteorological Organization global climate report news","language":"en","region":"GB","source_type":"news","modality":"text"}
+{"id":"q056","category":"news","query":"Bibliothèque nationale de France exposition actualité","language":"fr","region":"FR","source_type":"news","modality":"text"}
+{"id":"q057","category":"news","query":"Energía solar en Chile nuevas plantas noticias","language":"es","region":"CL","source_type":"news","modality":"text"}
+{"id":"q058","category":"news","query":"Deutschland Bahn Fahrplanwechsel Nachrichten","language":"de","region":"DE","source_type":"news","modality":"text"}
+{"id":"q059","category":"news","query":"Indonesia transportasi publik Jakarta berita","language":"id","region":"ID","source_type":"news","modality":"text"}
+{"id":"q060","category":"news","query":"대한민국 기상청 폭염 대책 뉴스","language":"ko","region":"KR","source_type":"news","modality":"text"}
+{"id":"q061","category":"photo","query":"Golden Gate Bridge fog photo","language":"en","region":"US","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q062","category":"photo","query":"Northern lights over Iceland photograph","language":"en","region":"IS","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q063","category":"photo","query":"京都 伏見稲荷大社 鳥居 写真","language":"ja","region":"JP","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q064","category":"photo","query":"香港維多利亞港夜景攝影","language":"zh-TW","region":"HK","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q065","category":"photo","query":"黄山云海摄影照片","language":"zh-CN","region":"CN","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q066","category":"photo","query":"Sagrada Família façade photograph","language":"es","region":"ES","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q067","category":"photo","query":"Mont Saint-Michel aerial photograph","language":"fr","region":"FR","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q068","category":"photo","query":"Wellington cable car New Zealand photo","language":"en","region":"NZ","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q069","category":"photo","query":"Australian koala eucalyptus photo","language":"en","region":"AU","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q070","category":"photo","query":"Monarch butterfly close-up photograph","language":"en","region":"MX","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q071","category":"photo","query":"Vancouver Stanley Park seawall photo","language":"en","region":"CA","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q072","category":"photo","query":"Rio de Janeiro Sugarloaf mountain photograph","language":"pt","region":"BR","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q073","category":"photo","query":"Singapore Gardens by the Bay night photo","language":"en","region":"SG","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q074","category":"photo","query":"Busan Haeundae Beach photo","language":"ko","region":"KR","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q075","category":"photo","query":"Istanbul ferry Bosphorus photograph","language":"tr","region":"TR","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q076","category":"photo","query":"Berlin Brandenburg Gate snowy photograph","language":"de","region":"DE","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q077","category":"photo","query":"Galápagos marine iguana photograph","language":"es","region":"EC","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q078","category":"photo","query":"Lake Tekapo mountain photograph","language":"en","region":"NZ","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q079","category":"photo","query":"Machu Picchu terrace photograph","language":"es","region":"PE","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q080","category":"photo","query":"Vienna botanical garden orchid photograph","language":"de","region":"AT","source_type":"web","modality":"image","image_options":{"source_page_required":false}}
+{"id":"q081","category":"illustration","query":"open book line icon transparent background","language":"en","region":"US","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q082","category":"illustration","query":"bicycle silhouette transparent PNG","language":"en","region":"GB","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q083","category":"illustration","query":"wind turbine diagram illustration","language":"en","region":"GB","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q084","category":"illustration","query":"solar panel icon flat illustration","language":"en","region":"US","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q085","category":"illustration","query":"snowflake vector icon transparent","language":"en","region":"CA","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q086","category":"illustration","query":"山脉线稿插画 透明背景","language":"zh-CN","region":"CN","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q087","category":"illustration","query":"圖書館線條圖標 透明背景","language":"zh-TW","region":"TW","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q088","category":"illustration","query":"雲のアイコン 透明背景","language":"ja","region":"JP","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q089","category":"illustration","query":"カメラの線画 イラスト","language":"ja","region":"JP","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q090","category":"illustration","query":"icône feuille fond transparent","language":"fr","region":"FR","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q091","category":"illustration","query":"illustration circuit électrique simple","language":"fr","region":"FR","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q092","category":"illustration","query":"icono brújula fondo transparente","language":"es","region":"ES","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q093","category":"illustration","query":"ilustración ciclo del agua","language":"es","region":"MX","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q094","category":"illustration","query":"Bergwandern Symbol transparent","language":"de","region":"DE","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q095","category":"illustration","query":"teapot flat vector icon transparent","language":"en","region":"GB","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q096","category":"illustration","query":"nautical anchor vector transparent","language":"en","region":"NZ","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q097","category":"illustration","query":"train station pictogram SVG illustration","language":"en","region":"AU","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q098","category":"illustration","query":"coffee cup icon transparent outline","language":"en","region":"US","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q099","category":"illustration","query":"daun transparan ilustrasi ikon","language":"id","region":"ID","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}
+{"id":"q100","category":"illustration","query":"illustration microscope transparent background","language":"en","region":"CA","source_type":"web","modality":"image","image_options":{"min_width":64,"min_height":64,"image_type":"illustration","source_page_required":false}}

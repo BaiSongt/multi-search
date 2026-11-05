@@ -1,0 +1,31 @@
+groups:
+  - name: multisearch
+    rules:
+      - alert: MultiSearchMetricsUnavailable
+        expr: up{job="multisearch"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: MultiSearch 指标端点不可用
+      - alert: MultiSearchMetricsDependencyFailed
+        expr: multisearch_metrics_dependency_up == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: MultiSearch 无法采集一个内部依赖
+      - alert: MultiSearchWorkerNotReadyWithBacklog
+        expr: sum by (instance, mode) (multisearch_jobs_active{status="queued"}) > 0 and on (instance, mode) multisearch_worker_ready == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: MultiSearch 存在积压任务且 Worker 未就绪
+      - alert: MultiSearchProviderCircuitOpen
+        expr: multisearch_circuit_open == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: MultiSearch Provider 持续熔断

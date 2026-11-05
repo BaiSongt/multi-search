@@ -1,0 +1,270 @@
+"""使用公开检索样本测量 L1/L2，并生成可供人工复核的报告。"""
+
+import argparse
+import json
+import math
+import os
+import subprocess
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from ipaddress import ip_address
+from pathlib import Path
+from time import monotonic, sleep
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+ROOT = Path(__file__).resolve().parents[2]
+CASES = Path(__file__).with_name("benchmark_cases.jsonl")
+MAX_RESPONSE_BYTES = 2_000_000
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def local_url(raw: str) -> str:
+    try:
+        parsed = urlsplit(raw)
+        if (
+            parsed.scheme in {"http", "https"}
+            and ip_address(parsed.hostname or "").is_loopback
+            and not parsed.username
+            and not parsed.password
+            and parsed.path in {"", "/"}
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            return raw.rstrip("/")
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("仅允许回环 API URL")
+
+
+def open_response(request: Request, timeout: float):
+    return build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout)
+
+
+def run_case(base: str, key: str, mode: str, case: dict) -> dict:
+    payload = {
+        "query": case["query"],
+        "mode": mode,
+        "source_types": [case["source_type"]],
+        "modalities": [case["modality"]],
+        "language": case["language"],
+        "region": case["region"],
+        "cache_policy": "bypass",
+        "max_results": 10,
+    }
+    if "image_options" in case:
+        payload["image_options"] = case["image_options"]
+    request = Request(
+        f"{base}/api/v1/search",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    started = monotonic()
+    status = 0
+    data = {}
+    try:
+        try:
+            response = open_response(request, 20)
+        except HTTPError as error:
+            response = error
+        with response:
+            status = response.status
+            body = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise ValueError("响应超出报告工具上限")
+            parsed = json.loads(body)
+            if not isinstance(parsed, dict):
+                raise ValueError("响应不符合 JSON 对象契约")
+            data = parsed
+    except (URLError, OSError, ValueError):
+        data = {"code": "INVALID_RESPONSE" if status else "TRANSPORT_ERROR"}
+
+    samples = []
+    for item in data.get("results", [])[:10] if status == 200 else []:
+        image = item.get("image") or {}
+        samples.append(
+            {
+                "result_id": item.get("result_id"),
+                "kind": item.get("kind"),
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "published_at": item.get("published_at"),
+                "retrieved_at": item.get("retrieved_at"),
+                "original_url": image.get("original_url"),
+                "source_page_url": image.get("source_page_url"),
+                "rights_status": image.get("rights_status"),
+            }
+        )
+    runs = data.get("provider_runs", []) if status == 200 else []
+    return {
+        "case_id": case["id"],
+        "category": case["category"],
+        "modality": case["modality"],
+        "mode": mode,
+        "http_status": status,
+        "code": data.get("code"),
+        "partial": bool(data.get("partial")),
+        "wall_ms": round((monotonic() - started) * 1000, 3),
+        "provider_runs": len(runs),
+        "provider_rate_limited_runs": sum(run["status"] == "rate_limited" for run in runs),
+        "results": samples,
+    }
+
+
+def percentile(values: list[float], fraction: float) -> float | None:
+    return sorted(values)[math.ceil(fraction * len(values)) - 1] if values else None
+
+
+def summaries(rows: list[dict], review: dict) -> dict:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        grouped[f"{row['mode']}:{row['modality']}"].append(row)
+    result = {}
+    for group, records in sorted(grouped.items()):
+        successes = [row for row in records if row["http_status"] == 200 and row["code"] is None]
+        images = [item for row in successes for item in row["results"] if item["kind"] == "image"]
+        n = sum(len(row["results"]) for row in successes)
+        reviewed = valid = 0
+        for row in successes:
+            raw = review.get(f"{row['case_id']}:{row['mode']}")
+            if raw is None:
+                continue
+            if (
+                not isinstance(raw, list)
+                or len(raw) != len(row["results"])
+                or any(value is not None and type(value) is not bool for value in raw)
+            ):
+                raise ValueError(f"评审数据与结果条数不匹配：{row['case_id']} / {row['mode']}")
+            reviewed += sum(value is not None for value in raw)
+            valid += sum(value is True for value in raw)
+        latencies = [row["wall_ms"] for row in successes]
+        runs = sum(row["provider_runs"] for row in records)
+        result[group] = {
+            "requests": len(records),
+            "http_statuses": dict(Counter(row["http_status"] for row in records)),
+            "partial": sum(row["partial"] for row in successes),
+            "p50_success_wall_ms": percentile(latencies, 0.5),
+            "p95_success_wall_ms": percentile(latencies, 0.95),
+            "http_429_ratio": sum(row["http_status"] == 429 for row in records) / len(records),
+            "provider_rate_limited_ratio": (
+                sum(row["provider_rate_limited_runs"] for row in records) / runs if runs else None
+            ),
+            "image_source_completeness": (
+                sum(bool(item["original_url"] and item["source_page_url"]) for item in images)
+                / len(images)
+                if images
+                else None
+            ),
+            "image_verified_license_ratio": (
+                sum(item["rights_status"] == "verified_license" for item in images) / len(images)
+                if images
+                else None
+            ),
+            "review_coverage": reviewed / n if n else None,
+            "top10_valid_ratio": valid / n if n and reviewed == n else None,
+        }
+    return result
+
+
+def container_stats(project: str | None) -> list[dict]:
+    compose = ["docker", "compose"]
+    if project:
+        compose += ["--project-name", project]
+    output = subprocess.check_output([*compose, "ps", "-q"], cwd=ROOT, timeout=10, text=True)
+    containers = output.split()
+    if not containers:
+        raise ValueError("Compose 项目未运行容器")
+    stats = subprocess.check_output(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}", *containers],
+        cwd=ROOT,
+        timeout=20,
+        text=True,
+    )
+    return [
+        {key: row.get(key) for key in ("Name", "CPUPerc", "MemUsage", "MemPerc", "PIDs")}
+        for row in map(json.loads, stats.splitlines())
+    ]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--api-url", type=local_url, default="http://127.0.0.1:8765")
+    parser.add_argument("--cases", type=Path, default=CASES)
+    parser.add_argument(
+        "--review", type=Path, help="复核结果映射，键为 case_id:mode，值为逐条布尔或 null"
+    )
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--mode", choices=("quick", "standard"), action="append")
+    parser.add_argument("--case-id", action="append")
+    parser.add_argument("--case-limit", type=int)
+    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--submit-interval", type=float, default=1.1)
+    parser.add_argument("--compose-stats", action="store_true")
+    parser.add_argument("--project")
+    options = parser.parse_args()
+    if not 1 <= options.concurrency <= 20 or not 0 <= options.submit_interval <= 60:
+        parser.error("concurrency 需要 1–20，submit-interval 需要 0–60 秒")
+    if options.case_limit is not None and options.case_limit < 1:
+        parser.error("case-limit 至少为 1")
+    keys = [
+        value.strip()
+        for value in os.getenv("MULTISEARCH_BENCHMARK_KEYS", "").split(",")
+        if value.strip()
+    ]
+    if not keys:
+        parser.error("通过 MULTISEARCH_BENCHMARK_KEYS 提供一个或多个测试 API Key")
+    if options.output.exists():
+        parser.error("输出路径已存在")
+    cases = [
+        json.loads(line)
+        for line in options.cases.read_text(encoding="utf-8-sig").splitlines()
+        if line.strip()
+    ]
+    if options.case_id:
+        selected = set(options.case_id)
+        cases = [case for case in cases if case["id"] in selected]
+        if {case["id"] for case in cases} != selected:
+            parser.error("指定的 case ID 在样本中不存在")
+    cases = cases[: options.case_limit]
+    if not cases or len({case["id"] for case in cases}) != len(cases):
+        parser.error("样本不能为空且 case ID 必须唯一")
+    review = json.loads(options.review.read_text(encoding="utf-8")) if options.review else {}
+    modes = list(dict.fromkeys(options.mode or ("quick", "standard")))
+    started = datetime.now(UTC)
+    before = container_stats(options.project) if options.compose_stats else None
+    tasks = [(mode, case) for case in cases for mode in modes]
+    with ThreadPoolExecutor(max_workers=options.concurrency) as pool:
+        futures = []
+        for index, (mode, case) in enumerate(tasks):
+            if index:
+                sleep(options.submit_interval)
+            futures.append(
+                pool.submit(run_case, options.api_url, keys[index % len(keys)], mode, case)
+            )
+        rows = [future.result() for future in futures]
+    after = container_stats(options.project) if options.compose_stats else None
+    report = {
+        "started_at": started.isoformat(),
+        "completed_at": datetime.now(UTC).isoformat(),
+        "concurrency": options.concurrency,
+        "submit_interval_s": options.submit_interval,
+        "container_resources_before": before,
+        "container_resources_after": after,
+        "summary": summaries(rows, review),
+        "samples": rows,
+    }
+    options.output.parent.mkdir(parents=True, exist_ok=True)
+    with options.output.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+    print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

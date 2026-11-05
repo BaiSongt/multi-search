@@ -1,0 +1,102 @@
+[
+  {
+    "id": "empty",
+    "operation": "search",
+    "expected": "合法空结果应明确区分没有结果与 Provider 不可用"
+  },
+  {
+    "id": "http-404",
+    "operation": "fetch",
+    "expected": "网页返回 404，任务保留失败码"
+  },
+  {
+    "id": "redirect-loop",
+    "operation": "fetch",
+    "expected": "跳转环被限制并有明确失败码"
+  },
+  {
+    "id": "provider-429",
+    "operation": "search",
+    "expected": "Provider 限流进入退避或回退"
+  },
+  {
+    "id": "provider-503",
+    "operation": "search",
+    "expected": "标准模式隔离上游故障"
+  },
+  {
+    "id": "robots-denied",
+    "operation": "fetch",
+    "expected": "站点拒绝抓取时停止"
+  },
+  {
+    "id": "oversize-html",
+    "operation": "fetch",
+    "expected": "压缩和解压字节上限受控"
+  },
+  {
+    "id": "broken-pdf",
+    "operation": "fetch",
+    "expected": "损坏或不受支持 PDF 不生成核验成功证据"
+  },
+  {
+    "id": "loopback",
+    "operation": "fetch",
+    "expected": "拒绝访问 127.0.0.1 与 ::1"
+  },
+  {
+    "id": "rfc1918",
+    "operation": "fetch",
+    "expected": "拒绝私有网段"
+  },
+  {
+    "id": "cloud-metadata",
+    "operation": "fetch",
+    "expected": "拒绝 169.254.169.254"
+  },
+  {
+    "id": "dns-rebinding",
+    "operation": "fetch",
+    "expected": "连接固定在已核对的公网地址"
+  },
+  {
+    "id": "redirect-private",
+    "operation": "fetch",
+    "expected": "每个重定向目标重新验证"
+  },
+  {
+    "id": "budget-overrun",
+    "operation": "search",
+    "expected": "超时返回可区分错误或部分结果"
+  },
+  {
+    "id": "cancel-queued",
+    "operation": "jobs",
+    "expected": "排队任务取消后不可被领用"
+  },
+  {
+    "id": "cancel-running",
+    "operation": "jobs",
+    "expected": "运行中取消释放任务并阻止结果覆盖"
+  },
+  {
+    "id": "expired-key",
+    "operation": "auth",
+    "expected": "过期密钥拒绝鉴权"
+  },
+  {
+    "id": "idempotency-conflict",
+    "operation": "search",
+    "expected": "相同键不同负载返回冲突"
+  },
+  {
+    "id": "cross-tenant-job",
+    "operation": "jobs",
+    "expected": "其他租户不能读取或取消任务"
+  },
+  {
+    "id": "worker-restart",
+    "operation": "jobs",
+    "expected": "任务 ID 和终态在重启后可追踪"
+  }
+]
