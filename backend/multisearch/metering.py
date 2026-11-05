@@ -17,6 +17,7 @@ from .contracts import Modality, Mode, ProviderRun, SearchRequest, SearchRespons
 from .errors import ApiError
 from .evidence_store import save_search_metadata
 from .policy import effective_quota, lock_tenant
+from .query_capture import CAPTURE_ADMITTED_QUERY, maintain_retained_queries, retainable_query
 from .tracing import trace_id
 
 logger = logging.getLogger(__name__)
@@ -294,13 +295,15 @@ class UsageMeter:
 
     @asynccontextmanager
     async def maintenance(self):
-        task = create_task(self._maintain())
+        tasks = (create_task(self._maintain()), create_task(maintain_retained_queries(self.db)))
         try:
             yield
         finally:
-            task.cancel()
-            with suppress(CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(CancelledError):
+                    await task
 
     async def reserve(
         self,
@@ -375,27 +378,31 @@ class UsageMeter:
             )
             event_id = uuid4()
             await connection.execute(
-                text("""
+                text(f"""
                 WITH last_used AS (
                     UPDATE api_keys SET last_used_at = :now
                     WHERE id = :key_id AND tenant_id = :tenant
+                ), admitted AS (
+                    INSERT INTO usage_events (
+                        id, tenant_id, principal_kind, principal_id, user_id, key_id, request_id, trace_id,
+                        idempotency_key, idempotency_until, request_hash, mode, modalities, source_types,
+                        created_at, reservation_expires_at
+                    )
+                    VALUES (
+                        :id, :tenant, :kind, :principal, :user_id, :key_id, :request_id, :trace_id,
+                        :idempotency_key, :idem_until, :hash, :mode, :modalities, :source_types,
+                        :now, :lease
+                    )
+                    RETURNING id, tenant_id, created_at
                 )
-                INSERT INTO usage_events (
-                    id, tenant_id, principal_kind, principal_id, user_id, key_id, request_id, trace_id,
-                    idempotency_key, idempotency_until, request_hash, mode, modalities, source_types,
-                    created_at, reservation_expires_at
-                )
-                VALUES (
-                    :id, :tenant, :kind, :principal, :user_id, :key_id, :request_id, :trace_id,
-                    :idempotency_key, :idem_until, :hash, :mode, :modalities, :source_types,
-                    :now, :lease
-                )
+                {CAPTURE_ADMITTED_QUERY}
             """),
                 {
                     **params,
                     "id": event_id,
                     "idem_until": now + timedelta(days=1) if idem else None,
                     "lease": now + timedelta(milliseconds=max_latency_ms + 5000),
+                    "retained_query": retainable_query(body.query),
                 },
             )
             return Admission(event_id, bool(idem))

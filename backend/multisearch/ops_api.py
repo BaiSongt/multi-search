@@ -10,6 +10,7 @@ from .contracts import InputModel, Role, SearchRequest
 from .errors import ApiError
 from .management_identity import _limit_login
 from .ops_store import OpsStore
+from .query_retention import QueryRetentionState, QueryRetentionStore
 from .routing_policy import RoutingRules, RoutingVersion, resolve_mode, search_limits
 from .sessions import EMAIL_PATTERN, SessionIdentity
 
@@ -142,6 +143,13 @@ class CacheInvalidated(BaseModel):
     tenant_id: UUID
     type: CacheScope
     epoch: int
+
+
+class QueryRetentionUpdate(InputModel):
+    tenant_id: UUID
+    retention_hours: Annotated[int, Field(strict=True, ge=0, le=24)]
+    expected_version: Version
+    confirm: StrictBool
 
 
 def _store(request: Request) -> OpsStore:
@@ -399,3 +407,23 @@ async def settings(request: Request, actor: SessionUser):
             "idempotency_window_minutes": 1440,
         },
     }
+
+
+@router.get("/admin/settings/query-retention", response_model=QueryRetentionState)
+async def query_retention(
+    request: Request, actor: SessionUser, tenant_id: UUID | None = None
+) -> QueryRetentionState:
+    store = QueryRetentionStore(request.app.state.db, request.app.state.identity.sessions)
+    return await store.get(actor, tenant_id or actor.tenant_id)
+
+
+@router.patch("/admin/settings/query-retention", response_model=QueryRetentionState)
+async def update_query_retention(
+    body: QueryRetentionUpdate, request: Request, actor: SessionWrite
+) -> QueryRetentionState:
+    if actor.role != Role.PLATFORM_ADMIN:
+        raise ApiError(403, "FORBIDDEN", "需要平台管理员权限")
+    if not body.confirm:
+        raise ApiError(422, "INVALID_REQUEST", "需要确认查询原文保留设置")
+    store = QueryRetentionStore(request.app.state.db, request.app.state.identity.sessions)
+    return await store.update(actor, body.tenant_id, body.retention_hours, body.expected_version)

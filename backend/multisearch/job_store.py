@@ -22,6 +22,7 @@ from .metering import (
     save_provider_runs,
 )
 from .policy import lock_tenant, try_lock_tenant
+from .query_capture import CAPTURE_ADMITTED_QUERY, retainable_query
 from .reporting import _cursor, _read_cursor
 from .tracing import trace_id
 
@@ -158,14 +159,23 @@ class JobStore:
                 }
             )
             await connection.execute(
-                text("""
-                INSERT INTO usage_events (id, tenant_id, principal_kind, principal_id, user_id, key_id,
-                    request_id, trace_id, operation, mode, modalities, source_types, created_at,
-                    reservation_expires_at, research_jobs_started)
-                VALUES (:id, :tenant, :principal_kind, :principal, :owner, :key_id,
-                    :request_id, :trace_id, :kind, :mode, :modalities, :sources, :now, :deadline, :research_started)
+                text(f"""
+                WITH admitted AS (
+                    INSERT INTO usage_events (id, tenant_id, principal_kind, principal_id, user_id, key_id,
+                        request_id, trace_id, operation, mode, modalities, source_types, created_at,
+                        reservation_expires_at, research_jobs_started)
+                    VALUES (:id, :tenant, :principal_kind, :principal, :owner, :key_id,
+                        :request_id, :trace_id, :kind, :mode, :modalities, :sources, :now, :deadline, :research_started)
+                    RETURNING id, tenant_id, created_at
+                )
+                {CAPTURE_ADMITTED_QUERY}
             """),
-                params,
+                {
+                    **params,
+                    "retained_query": retainable_query(payload.get("query"))
+                    if kind == JobKind.RESEARCH
+                    else None,
+                },
             )
             job = (
                 (

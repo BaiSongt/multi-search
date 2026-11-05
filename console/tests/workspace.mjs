@@ -544,7 +544,96 @@ async function verifyCancellation(page, tenantId) {
   await page.unroute(`**/gateway/admin/jobs/${jobId}/cancel`);
 }
 
-async function verifyOperations(page, tenantId) {
+async function verifyQueryRetention(page, tenantId, operations) {
+  const path = "/gateway/admin/settings/query-retention";
+  const params = { tenant_id: tenantId };
+  const adminSession = await session(page.context());
+  const headers = { Origin: base.origin, "X-CSRF-Token": adminSession.csrf_token };
+  const setting = page.getByRole("region", { name: "查询原文短时保留" });
+  const selector = setting.getByLabel("保留策略租户 ID");
+  const hours = setting.getByLabel("原文保留小时数");
+  const preview = setting.getByRole("button", { name: "预览保留变更" });
+  const confirmation = page.getByRole("dialog", { name: "确认查询原文保留变更" });
+
+  async function current() {
+    const response = await page.request.get(path, { params });
+    assert.equal(response.status(), 200);
+    return await response.json();
+  }
+
+  async function write(retention_hours, expected_version) {
+    const response = await page.request.patch(path, {
+      headers, data: { tenant_id: tenantId, retention_hours, expected_version, confirm: true },
+    });
+    assert.equal(response.status(), 200);
+    return await response.json();
+  }
+
+  const initial = await current();
+  assert.equal(initial.tenant_id, tenantId);
+  assert.equal(initial.retention_hours, 0);
+  assert.deepEqual(initial.changes, []);
+  try {
+    await selector.fill(tenantId);
+    await setting.getByRole("button", { name: "读取租户策略" }).click();
+    await setting.getByText(tenantId, { exact: true }).waitFor();
+    await hours.fill("25");
+    await preview.click();
+    await setting.getByRole("alert").getByText("请输入 0 至 24 的整数。").waitFor();
+    await hours.fill("3");
+    await preview.click();
+    await confirmation.getByText(tenantId, { exact: true }).waitFor();
+    await confirmation.getByText("不保留", { exact: true }).waitFor();
+    await confirmation.getByText("3 小时", { exact: true }).waitFor();
+    assert.equal((await current()).version, initial.version);
+    await confirmation.getByRole("button", { name: "确认保留变更" }).click();
+    await setting.getByText("查询原文保留策略已更新。").waitFor();
+    const history = setting.getByRole("region", { name: "查询原文保留变更记录" });
+    await history.getByText("3 小时", { exact: true }).waitFor();
+    const saved = await current();
+    assert.equal(saved.retention_hours, 3);
+    assert.deepEqual(
+      saved.changes.map(({ before_hours, after_hours }) => [before_hours, after_hours]),
+      [[0, 3]],
+    );
+
+    await hours.fill("4");
+    await preview.click();
+    await confirmation.getByText("4 小时", { exact: true }).waitFor();
+    const newer = await write(5, saved.version);
+    await confirmation.getByRole("button", { name: "确认保留变更" }).click();
+    await setting.getByRole("alert").getByText("策略已发生变更，请按最新版本重新预览。").waitFor();
+    await history.getByText("5 小时", { exact: true }).waitFor();
+    assert.equal(await hours.inputValue(), "5");
+    assert.equal((await current()).version, newer.version);
+
+    const operator = await session(operations);
+    const own = await operations.request.get(path);
+    assert.equal(own.status(), 200);
+    assert.equal((await own.json()).tenant_id, operator.tenant_id);
+    assert.equal((await operations.request.get(path, { params })).status(), 403);
+    const denied = await operations.request.patch(path, {
+      headers: { Origin: base.origin, "X-CSRF-Token": operator.csrf_token },
+      data: { tenant_id: operator.tenant_id, retention_hours: 1, expected_version: 0, confirm: true },
+    });
+    assert.equal(denied.status(), 403);
+    const operatorPage = await operations.newPage();
+    try {
+      await operatorPage.goto("/admin/settings");
+      const ownSetting = operatorPage.getByRole("region", { name: "查询原文短时保留" });
+      await ownSetting.getByText(operator.tenant_id, { exact: true }).waitFor();
+      assert.equal(await ownSetting.getByLabel("保留策略租户 ID").count(), 0);
+      assert.equal(await ownSetting.getByRole("button", { name: "预览保留变更" }).count(), 0);
+    } finally {
+      await operatorPage.close();
+    }
+  } finally {
+    const latest = await current();
+    if (latest.retention_hours !== initial.retention_hours) await write(initial.retention_hours, latest.version);
+  }
+}
+
+async function verifyOperations(page, tenantId, operations) {
   await page.goto("/admin/jobs");
   await waitForTitle(page, "任务与队列");
   assert.equal((await page.request.get("/gateway/admin/jobs")).status(), 200);
@@ -556,6 +645,7 @@ async function verifyOperations(page, tenantId) {
   await page.goto("/admin/settings");
   await page.getByRole("heading", { name: "会话安全" }).waitFor();
   await page.getByText("CSRF 校验", { exact: true }).waitFor();
+  await verifyQueryRetention(page, tenantId, operations);
 
   await page.goto("/admin/routing");
   await page.getByText(/当前版本 [0-9]+/).waitFor();
@@ -675,6 +765,91 @@ async function verifyImageQuality(page, developer, actor, operations) {
     }
   } finally {
     traceFixture(actor, usageId, traceId, "DELETE FROM usage_events WHERE id = :'usage_id'::UUID AND tenant_id = :'tenant_id'::UUID;");
+  }
+}
+
+async function verifyRetainedQuery(page, developer, developerSession, operations, operationsSession) {
+  const actor = await session(page.context());
+  const tenant = developerSession.tenant_id;
+  const settings = "/gateway/admin/settings/query-retention";
+  const adminHeaders = { Origin: base.origin, "X-CSRF-Token": actor.csrf_token };
+  const initial = await page.request.get(settings, { params: { tenant_id: tenant } });
+  assert.equal(initial.status(), 200);
+  const policy = await initial.json();
+  assert.equal(policy.retention_hours, 0);
+  const update = (retention_hours, expected_version) => page.request.patch(settings, {
+    headers: adminHeaders, data: { tenant_id: tenant, retention_hours, expected_version, confirm: true },
+  });
+  const enabled = await update(1, policy.version);
+  assert.equal(enabled.status(), 200);
+  let version = (await enabled.json()).version;
+  try {
+    const original = `retention-browser-fixture-${randomUUID()}`;
+    const response = await developer.request.post("/gateway/playground", {
+      headers: { Origin: base.origin, "X-CSRF-Token": developerSession.csrf_token },
+      data: { query: original, mode: "local" },
+    });
+    assert.equal(response.status(), 200);
+    const trace = response.headers()["x-trace-id"];
+    const list = await page.request.get("/gateway/admin/requests", { params: { trace_id: trace } });
+    assert.equal(list.status(), 200);
+    const report = await list.json();
+    assert.ok(!JSON.stringify(report).includes(original));
+    const [record] = report.items;
+    assert.equal(report.items.length, 1);
+    const detailPath = `/gateway/admin/requests/${record.id}`;
+    const revealPath = `${detailPath}/query`;
+    const detail = await page.request.get(detailPath);
+    assert.equal(detail.status(), 200);
+    assert.ok(!(await detail.text()).includes(original));
+    assert.equal((await page.request.get(revealPath)).status(), 404);
+    assert.equal((await page.request.post(revealPath, {
+      headers: { Origin: base.origin }, data: { tenant_id: tenant, confirm: true },
+    })).status(), 403);
+    assert.equal((await operations.request.post(revealPath, {
+      headers: { Origin: base.origin, "X-CSRF-Token": operationsSession.csrf_token },
+      data: { tenant_id: tenant, confirm: true },
+    })).status(), 403);
+    assert.equal((await page.request.post(revealPath, {
+      headers: adminHeaders, data: { tenant_id: actor.tenant_id, confirm: true },
+    })).status(), 404);
+
+    await page.goto("/admin/requests");
+    await page.getByLabel("追踪 ID", { exact: true }).fill(trace);
+    await page.getByRole("button", { name: "应用筛选" }).click();
+    const row = page.getByRole("row").filter({ hasText: record.request_id });
+    await row.getByRole("button", { name: "详情", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "请求详情" });
+    assert.equal(await dialog.getByText(original, { exact: true }).count(), 0);
+    await dialog.getByRole("button", { name: "查看查询原文" }).click();
+    assert.equal(await dialog.getByText(original, { exact: true }).count(), 0);
+    const disclosed = page.waitForResponse((result) => new URL(result.url()).pathname === revealPath);
+    await dialog.getByRole("button", { name: "确认查看原文" }).click();
+    const sensitive = await disclosed;
+    assert.equal(sensitive.status(), 200);
+    assert.equal(sensitive.headers()["cache-control"], "no-store");
+    await dialog.getByText(original, { exact: true }).waitFor();
+    await dialog.getByRole("button", { name: "隐藏查询原文" }).click();
+    await dialog.getByText(original, { exact: true }).waitFor({ state: "detached" });
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+
+    const audit = await page.request.get("/gateway/admin/audit", { params: { tenant_id: tenant, limit: 50 } });
+    assert.equal(audit.status(), 200);
+    const events = (await audit.json()).items;
+    assert.ok(events.some((entry) => entry.action === "request.query.reveal" && entry.target_id === record.id));
+    assert.ok(!JSON.stringify(events).includes(original));
+    const disabled = await update(0, version);
+    assert.equal(disabled.status(), 200);
+    version = (await disabled.json()).version;
+    const unavailable = await page.request.post(revealPath, {
+      headers: adminHeaders, data: { tenant_id: tenant, confirm: true },
+    });
+    assert.equal(unavailable.status(), 404);
+    assert.equal((await unavailable.json()).code, "RETAINED_QUERY_NOT_FOUND");
+  } finally {
+    const restored = await update(0, version);
+    assert.equal(restored.status(), 200);
   }
 }
 
@@ -945,6 +1120,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
       await searxng.getByText("候选图片过滤", { exact: true }).waitFor();
     }
     await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession, auditor);
+    await verifyRetainedQuery(adminPage, developer, developerSession, operations, operationsSession);
     await verifyImageQuality(adminPage, developer, developerSession, operations);
     await verifyQuotaUsage(adminPage, developer, operations, developerAccount, developerSession.tenant_id);
     await verifyIpAllowlist(developerPage, developer);
@@ -1014,7 +1190,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
       })).status(), 200);
     }
     await verifyRoleSwitch(browser, developer, developerAccount, admin, adminSession, tenant, tenantId);
-    await verifyOperations(adminPage, tenantId);
+    await verifyOperations(adminPage, tenantId, operations);
     await verifyCancellation(adminPage, tenantId);
 
     const secondBrowser = await browser.newContext({ baseURL: base.origin });

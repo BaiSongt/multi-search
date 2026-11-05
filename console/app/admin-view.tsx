@@ -263,7 +263,7 @@ export function ProvidersView({ canEdit, csrf }: { canEdit: boolean; csrf: strin
   );
 }
 
-export function RequestsView({ showTenant }: { showTenant: boolean }) {
+export function RequestsView({ showTenant, csrf }: { showTenant: boolean; csrf: string }) {
   const pager = usePagination();
   const [filters, setFilters] = useState<Record<string, string>>({});
   const query = new URLSearchParams({ limit: "20", ...filters });
@@ -305,7 +305,8 @@ export function RequestsView({ showTenant }: { showTenant: boolean }) {
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
       {resource.data && (
         <>
-          <RequestTable rows={resource.data.items} showTenant={showTenant} showProviderRuns />
+          <RequestTable rows={resource.data.items} showTenant={showTenant} showProviderRuns
+            queryCsrf={showTenant ? csrf : undefined} />
           <Pagination next={resource.data.next_cursor} pager={pager} />
         </>
       )}

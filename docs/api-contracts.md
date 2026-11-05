@@ -112,6 +112,9 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 - `GET /api/v1/usage` 返回最近 30 个 UTC 自然日的计量、趋势和当前租户配额。开发者仅能查看自己的用量，具备权限的角色可查看本租户用量。
 - `/api/v1/admin/` 提供总览、Provider、脱敏请求、租户和审计。平台管理员可创建租户、修改租户配额与 Provider 策略。运维、审计及租户管理员按各自权限读取。
 - 平台管理员与运维可通过 `GET /api/v1/admin/requests/{id}` 读取脱敏请求及已存的来源运行记录。运维仅能读取所在租户，跨租户 ID 与不存在的 ID 均返回 404。列表支持来源、模式、模态、租户、状态、时间与追踪 ID 筛选，租户筛选按角色授权。
+- `GET /api/v1/admin/settings/query-retention` 返回查询原文保留设置和最近十次变更，`tenant_id` 缺省时使用当前租户。平台管理员可选择目标租户，运维仅能读取当前租户。默认 `retention_hours=0`、`version=0`。
+- 平台管理员通过 `PATCH /api/v1/admin/settings/query-retention` 提交 `tenant_id`、整数 `retention_hours`（0 至 24）、`expected_version` 和 `confirm: true`。版本冲突返回 `409 SETTINGS_VERSION_CONFLICT`。实质变更写入 `settings.query_retention.update` 并使旧版本的原文立即不可查看。
+- 平台管理员通过 `POST /api/v1/admin/requests/{id}/query` 提交记录所属 `tenant_id` 和 `confirm: true`。请求需要有效会话、Origin 和 CSRF。成功返回 `query` 与 `expires_at`，并写入 `request.query.reveal`。原文缺失、到期、版本失效或与租户不符时返回 `404 RETAINED_QUERY_NOT_FOUND`。原文响应使用 `Cache-Control: no-store`。
 - `GET /api/v1/admin/images` 返回最近 30 个 UTC 自然日内已返回图片的许可计数 `counts`、来源计数 `source_counts` 和分页记录。列表可组合使用 `rights_status` 和 `source_status`，统计覆盖角色可见的整个时间窗。来源状态为 `missing`、`invalid`、`failed`、`not_matched`、`unverified` 或 `verified`。平台管理员查看全平台，运维仅查看当前租户。
 - `GET /api/v1/admin/overview` 的 `job_queue` 返回 `queued`、`running`、`cancelling`、`queued_for_retry` 及最早有效排队的时间 `oldest_queued_at`。仅统计截止时间尚未到达的活动任务，并按角色限定可见租户。
 - `GET /health/dependencies` 返回独立服务探针的 `checked_at` 和固定名称的 `checks`。状态为 `healthy`、`unavailable`、`unknown` 或 `not_configured`。响应仅包含服务名、状态和检查时间，Console 总览经同源路径独立加载。

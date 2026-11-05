@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -225,6 +225,59 @@ async def requests(
 async def request_detail(usage_id: UUID, request: Request, actor: SessionUser):
     scope = _request_scope(actor)
     return await request.app.state.reports.request_detail(scope, usage_id)
+
+
+class QueryReveal(InputModel):
+    tenant_id: UUID
+    confirm: StrictBool
+
+
+class RetainedQuery(BaseModel):
+    query: str = Field(repr=False)
+    expires_at: datetime
+
+
+@router.post("/admin/requests/{usage_id}/query")
+async def reveal_query(
+    usage_id: UUID, body: QueryReveal, request: Request, actor: SessionWrite
+) -> RetainedQuery:
+    _require(actor.role, {Role.PLATFORM_ADMIN})
+    if not body.confirm:
+        raise ApiError(422, "INVALID_REQUEST", "需要确认查看查询原文")
+    async with request.app.state.db.begin() as connection:
+        await lock_tenant(connection, body.tenant_id)
+        await request.app.state.identity.sessions.assert_actor(connection, actor)
+        row = (
+            (
+                await connection.execute(
+                    text("""
+                        SELECT q.query, q.expires_at
+                        FROM retained_queries q
+                        JOIN tenant_query_retention p ON p.tenant_id = q.tenant_id
+                            AND p.version = q.policy_version AND p.retention_hours > 0
+                        JOIN usage_events u ON u.id = q.usage_id AND u.tenant_id = q.tenant_id
+                        JOIN tenants t ON t.id = q.tenant_id AND t.enabled
+                        WHERE q.usage_id = :usage AND q.tenant_id = :tenant
+                            AND q.expires_at > statement_timestamp()
+                    """),
+                    {"usage": usage_id, "tenant": body.tenant_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise ApiError(404, "RETAINED_QUERY_NOT_FOUND", "当前没有可查看的查询原文")
+        await _audit(
+            connection,
+            actor_id=actor.user_id,
+            tenant_id=body.tenant_id,
+            action="request.query.reveal",
+            target_id=usage_id,
+            before={},
+            after={},
+        )
+    return RetainedQuery.model_validate(row)
 
 
 @router.get("/admin/tenants")

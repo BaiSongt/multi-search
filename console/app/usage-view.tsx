@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { callApi } from "./lib/api";
 import { quotaLabels, type RequestRow, type RequestTrace, type Totals, type Usage, type UsageDay } from "./lib/contracts";
 import { downloadCsv } from "./lib/csv";
 import { CopyId, dateTime, Dialog, Empty, Failure, formatNumber, Loading, Table, useResource } from "./ui";
@@ -109,12 +110,60 @@ function RequestFields({ row }: { row: RequestRow }) {
   );
 }
 
-function AdminRequestTrace({ row }: { row: RequestRow }) {
+function QueryDisclosure({ row, csrf }: { row: RequestRow; csrf: string }) {
+  const [confirming, setConfirming] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<unknown>();
+  const [retained, setRetained] = useState<{ query: string; expires_at: string }>();
+
+  useEffect(() => {
+    if (!retained) return;
+    const delay = Math.min(60_000, Math.max(0, Date.parse(retained.expires_at) - Date.now()));
+    const timer = window.setTimeout(() => setRetained(undefined), delay);
+    return () => window.clearTimeout(timer);
+  }, [retained]);
+
+  async function reveal() {
+    setPending(true);
+    setError(undefined);
+    try {
+      const value = await callApi<{ query: string; expires_at: string }>(
+        `admin/requests/${encodeURIComponent(row.id)}/query`,
+        { method: "POST", csrf, body: { tenant_id: row.tenant_id, confirm: true } },
+      );
+      setRetained(value);
+      setConfirming(false);
+    } catch (failure) {
+      setError(failure);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="stack" aria-label="查询原文">
+      {retained ? <>
+        <pre className="notice warning">{retained.query}</pre>
+        <button type="button" onClick={() => setRetained(undefined)}>隐藏查询原文</button>
+      </> : confirming ? <>
+        <p className="notice warning">查询原文可能包含敏感信息。查看操作将写入审计，并在此页面短暂显示。</p>
+        <div className="actions">
+          <button type="button" disabled={pending} onClick={() => void reveal()}>{pending ? "正在查看…" : "确认查看原文"}</button>
+          <button type="button" disabled={pending} onClick={() => { setConfirming(false); setError(undefined); }}>返回</button>
+        </div>
+        {error !== undefined && <Failure reason={error} />}
+      </> : <button type="button" onClick={() => setConfirming(true)}>查看查询原文</button>}
+    </section>
+  );
+}
+
+function AdminRequestTrace({ row, queryCsrf }: { row: RequestRow; queryCsrf?: string }) {
   const resource = useResource<RequestTrace>(`admin/requests/${encodeURIComponent(row.id)}`);
   const runs = resource.data?.provider_runs;
   return (
     <>
       <RequestFields row={resource.data ?? row} />
+      {queryCsrf && <QueryDisclosure row={row} csrf={queryCsrf} />}
       <h3>来源调用</h3>
       {resource.pending && <Loading />}
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
@@ -137,11 +186,12 @@ function AdminRequestTrace({ row }: { row: RequestRow }) {
   );
 }
 
-export function RequestTable({ rows, showTenant = false, caption = "调用记录", showProviderRuns = false }: {
+export function RequestTable({ rows, showTenant = false, caption = "调用记录", showProviderRuns = false, queryCsrf }: {
   rows: RequestRow[];
   showTenant?: boolean;
   caption?: string;
   showProviderRuns?: boolean;
+  queryCsrf?: string;
 }) {
   const [selected, setSelected] = useState<RequestRow>();
   if (!rows.length) return <Empty>暂无符合条件的调用记录。</Empty>;
@@ -163,7 +213,7 @@ export function RequestTable({ rows, showTenant = false, caption = "调用记录
       </Table>
       {selected && (
         <Dialog title="请求详情" close={() => setSelected(undefined)}>
-          {showProviderRuns ? <AdminRequestTrace row={selected} /> : <RequestFields row={selected} />}
+          {showProviderRuns ? <AdminRequestTrace row={selected} queryCsrf={queryCsrf} /> : <RequestFields row={selected} />}
         </Dialog>
       )}
     </>

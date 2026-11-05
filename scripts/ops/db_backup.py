@@ -10,6 +10,17 @@ from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
+VERIFY_QUERY_RETENTION = """
+DO $$
+BEGIN
+    IF to_regclass('public.retained_queries') IS NOT NULL THEN
+        IF EXISTS (SELECT 1 FROM public.retained_queries) THEN
+            RAISE EXCEPTION 'backup contains retained query text';
+        END IF;
+    END IF;
+END;
+$$;
+"""
 COUNTS = """
 SELECT jsonb_build_object(
     'schema_revision', (SELECT version_num FROM alembic_version),
@@ -66,6 +77,7 @@ def backup(project: str | None, archive: Path) -> None:
                 "--format=custom",
                 "--no-owner",
                 "--no-privileges",
+                "--exclude-table-data=public.retained_queries",
                 stdout=stream,
             )
         except (OSError, subprocess.SubprocessError):
@@ -115,10 +127,13 @@ def restore_check(project: str | None, archive: Path) -> None:
             "--username=multisearch",
             f"--dbname={scratch}",
             "-X",
+            "-q",
             "-v",
             "ON_ERROR_STOP=1",
             "-A",
             "-t",
+            "-c",
+            VERIFY_QUERY_RETENTION,
             "-c",
             COUNTS,
             stdout=subprocess.PIPE,

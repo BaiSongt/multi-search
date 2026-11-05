@@ -55,6 +55,8 @@ histogram_quantile(0.95,
 
 脚本使用 PostgreSQL 自定义归档格式备份业务数据库，输出归档和 SHA-256 校验文件。恢复演练先校验归档，再将它写入随机命名的独立数据库。验证迁移版本、租户、用量、任务及结果、证据记录后，清理该临时库。 [pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html) · [pg_restore](https://www.postgresql.org/docs/17/app-pgrestore.html)
 
+项目逻辑备份保留查询保留策略、审计和原文表结构，并排除 `retained_queries` 的数据。恢复演练拒绝含有该表数据的归档，兼容早期版本中没有该表的归档。队列中的待执行任务继续保留恢复所需的任务负载。物理快照与 WAL 由部署方按其备份保留策略管理。 [查询保留设置](api-contracts.md#管理面)
+
 ```sh
 python scripts/ops/db_backup.py backup .secrets/ops/multisearch-2026-11-05.dump
 python scripts/ops/db_backup.py restore-check .secrets/ops/multisearch-2026-11-05.dump

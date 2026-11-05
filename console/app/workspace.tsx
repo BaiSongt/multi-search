@@ -49,7 +49,7 @@ function Body({ section, workspace, session, tenant }: { section: string; worksp
   switch (section) {
     case "overview": return <AdminOverview />;
     case "providers": return <ProvidersView canEdit={platform} csrf={session.csrf_token} />;
-    case "requests": return <RequestsView showTenant={platform} />;
+    case "requests": return <RequestsView showTenant={platform} csrf={session.csrf_token} />;
     case "jobs": return <JobsView csrf={session.csrf_token} showTenant={platform} />;
     case "routing": return <RoutingView csrf={session.csrf_token} canEdit={platform} />;
     case "images": return <ImageQualityView showTenant={platform} />;
@@ -57,7 +57,7 @@ function Body({ section, workspace, session, tenant }: { section: string; worksp
     case "quotas": return <TenantsView csrf={session.csrf_token} quotas />;
     case "audit": return <AuditView />;
     case "cache": return <CacheView csrf={session.csrf_token} platform={platform} />;
-    case "settings": return <SettingsView />;
+    case "settings": return <SettingsView csrf={session.csrf_token} platform={platform} />;
   }
   notFound();
 }
