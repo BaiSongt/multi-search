@@ -238,3 +238,12 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - 最终镜像添加 `maxlag=5` 后，以一条英文和一条中文查询再次验证 L1、L2，4／4 次均返回由 Wikipedia 提供的候选，共 18 条。响应保留标题与条目链接。条目能否回答故宫开放时间等实时问题仍需核对官方来源。 [候补部署](deployment.md#可选-wikipedia-候补)
 - 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
 - RFC Editor 公网正文探针收到 `FETCH_TARGET_BLOCKED`。Worker 对 RFC Editor、英中 Wikipedia 等七个公开站点均解析到 `198.18.0.0/15`，触发非公网地址拒绝。完整公网覆盖、正向公网正文和人工 Top-10 有效率待验收。 [公网探针](operations.md#公网正文验收)
+
+### `0.3.0-alpha.17` 复验
+
+- 516 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 工作区回归通过。隔离 Compose 的八个服务和八项依赖检查健康。同源及跨源动态抓取、证据归档、REST／MCP 单次计量和本地研究日期边界复验通过。
+- 真实 PostgreSQL 夹具验证用量汇总的 UTC 窗口、两租户与两账户隔离、过期中断和未知码归类。Chromium 验证最近 20 条之外的失败仍进入失败原因汇总，并核对模式计数与页面展示。 [用量契约](api-contracts.md#管理面)
+- 受控抓取验证首地址连接失败或超时后可使用另一公网地址，保留原始 Host 和 TLS SNI。每跳最多尝试三个地址，全部 DNS 答案先校验。读取、写入及 HTTP 限流失败不会换地址重试，混合非公网答案仍拒绝整跳。 [抓取安全](security.md)
+- 四租户 20 并发 Mock 基准完成 40 次冷请求、40 次缓存命中及 80 条完成记录。冷请求 P50 为 158.021 ms，P95 为 195.155 ms，P99 为 204.501 ms。 [基准方法](operations.md#性能与质量基线)
+- 在最终 API 与 Worker 上分别执行 RFC Editor 的 HTML 和 PDF 探针。两项均正常入队、重放后保持同一任务，并在一次 Worker 尝试后得到 `FETCH_TARGET_BLOCKED`。脱敏报告核对了两端版本和追踪，均记录 `dns_status=non_public`。正向公网正文、完整公网覆盖和人工 Top-10 仍待验收。 [公网探针](operations.md#公网正文验收)
+- 八个实际运行镜像均生成 SBOM，Trivy 0.76.1 未报告高危或严重漏洞。 [镜像扫描](security.md#运行镜像-sbom-与漏洞扫描)
