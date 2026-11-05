@@ -87,7 +87,18 @@ python scripts/ops/rehearse_worker_restart.py \
 python scripts/ops/benchmark_search.py --compose-stats --output .secrets/ops/public-baseline.json
 ```
 
-报告按模式和模态分组，列出成功请求的墙钟 P50/P95、HTTP 状态、上游限流、图片来源页完整率和许可证核验比例。容器 CPU 与内存来自运行前后两次采样。对每条候选的评审结果可用 `--review` 指定，例如 `{"q001:quick":[true,false,null]}`。数组必须对应本次返回的排名顺序，`null` 表示待评审；全组结果完成评审后才计算 Top-10 有效率。
+报告按模式和模态分组，列出成功请求的墙钟 P50/P95、HTTP 状态、Provider 限流、图片来源页完整率和许可证核验比例。失败样本保留已返回的 Provider 状态和服务端追踪 ID。`upstream_failures_without_runs` 统计没有来源诊断的超时或不可用错误。Provider 限流率以报告中 `status=rate_limited` 的 Provider 调用为分子，SearXNG 内部单个引擎可能在 Provider 返回 `partial` 时限流。容器 CPU 与内存来自运行前后两次采样。
+
+在原始报告上离线评审，确保候选顺序和内容与评审时完全一致。
+
+```sh
+python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.json \
+  --review-template --output .secrets/ops/public-labels.json
+python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.json \
+  --review .secrets/ops/public-labels.json --output .secrets/ops/public-reviewed.json
+```
+
+先生成模板并人工打开原始报告中的结果链接。仅当结果直接相关、可访问且正文或图片与查询匹配时标 `true`，判定无效标 `false`，留待复核标 `null`。每个数组严格按同次请求的返回顺序填写。模板和结果绑定原始报告的 SHA-256，全组结果标注完毕后才计算 Top-10 有效率。离线命令无需 Key，也不会重新检索。
 
 不访问公网的基线使用 Mock Provider、真实 PostgreSQL/Redis 和四个临时租户，每轮并发 20。运行示例使用 Python 传递原始脚本字节，兼容 Windows 与 POSIX shell。
 

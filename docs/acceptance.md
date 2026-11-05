@@ -94,3 +94,15 @@ docker compose exec -T multisearch-api python - < scripts/probe_job_store.py
 - PDF 受控测试覆盖原页码和页内偏移、大小和时间限制、损坏与无文本层。只读、无网络的 Linux 容器验证解析进程的资源和文件访问限制。OCR 仍需集成。
 - Python 与 TypeScript SDK 通过本地 HTTP 契约测试。SBOM、锁文件漏洞检查范围以及部署后续见安全记录。 [安全验收](security.md)
 - Mock 冷请求 P95 为 159.509 ms。100 条样本的两种公网模式均已测量。文字成功率、图片许可核验和 Top-10 人工评审仍有缺口，公网 SLO 尚未冻结。 [性能基线](operations.md#性能与质量基线)
+
+### 公网对照与评审
+
+- 同一通识查询的直接对照复现了 SearXNG 返回零候选，内部 Brave 限流、DuckDuckGo 验证码，以及 DDGS 暂时没有候选。稍后同一查询恢复。混合结果保留来源诊断，交付候选的部分成功响应仍允许继续调用该 Provider。
+- Commons 对照在 Compose 容器中使用真实许可接口，L2 和 L3 的 `verified_only` 只保留具备固定版本证据的 CC BY-SA 2.5 候选，零元数据预算返回空结果。探针固定检索候选，L3 对照页仍受当前出口的非公网 DNS 限制。 [许可证据](https://commons.wikimedia.org/w/index.php?oldid=1265385258)
+- 默认图片基准未指定元数据核验预算，用于测量候选和来源页字段覆盖。严格许可核验单独执行上述对照。
+
+```sh
+docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
+```
+
+从同一份原始基准报告生成离线评审模板，完成人工判读后可验证并计算 Top-10 有效率。 [评审流程](operations.md#性能与质量基线)

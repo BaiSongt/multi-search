@@ -4,10 +4,12 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path
 from time import monotonic, sleep
@@ -55,6 +57,7 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
         "modalities": [case["modality"]],
         "language": case["language"],
         "region": case["region"],
+        "source_type": case["source_type"],
         "cache_policy": "bypass",
         "max_results": 10,
     }
@@ -67,6 +70,7 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
     )
     started = monotonic()
     status = 0
+    trace_id = None
     data = {}
     try:
         try:
@@ -75,6 +79,8 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
             response = error
         with response:
             status = response.status
+            trace = response.headers.get("X-Trace-ID", "")
+            trace_id = trace if re.fullmatch(r"[0-9a-f]{32}", trace) else None
             body = response.read(MAX_RESPONSE_BYTES + 1)
             if len(body) > MAX_RESPONSE_BYTES:
                 raise ValueError("响应超出报告工具上限")
@@ -101,17 +107,28 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
                 "rights_status": image.get("rights_status"),
             }
         )
-    runs = data.get("provider_runs", []) if status == 200 else []
+    runs = data.get("provider_runs") or []
     return {
         "case_id": case["id"],
         "category": case["category"],
         "modality": case["modality"],
         "mode": mode,
+        "query": case["query"],
+        "language": case["language"],
+        "region": case["region"],
+        "trace_id": trace_id,
         "http_status": status,
         "code": data.get("code"),
         "partial": bool(data.get("partial")),
         "wall_ms": round((monotonic() - started) * 1000, 3),
         "provider_runs": len(runs),
+        "provider_outcomes": [
+            {
+                name: run[name]
+                for name in ("provider_id", "status", "elapsed_ms", "attempts", "count")
+            }
+            for run in runs
+        ],
         "provider_rate_limited_runs": sum(run["status"] == "rate_limited" for run in runs),
         "results": samples,
     }
@@ -145,6 +162,10 @@ def summaries(rows: list[dict], review: dict) -> dict:
             valid += sum(value is True for value in raw)
         latencies = [row["wall_ms"] for row in successes]
         runs = sum(row["provider_runs"] for row in records)
+        provider_statuses = defaultdict(Counter)
+        for row in records:
+            for run in row.get("provider_outcomes", []):
+                provider_statuses[run["provider_id"]][run["status"]] += 1
         result[group] = {
             "requests": len(records),
             "http_statuses": dict(Counter(row["http_status"] for row in records)),
@@ -154,6 +175,12 @@ def summaries(rows: list[dict], review: dict) -> dict:
             "http_429_ratio": sum(row["http_status"] == 429 for row in records) / len(records),
             "provider_rate_limited_ratio": (
                 sum(row["provider_rate_limited_runs"] for row in records) / runs if runs else None
+            ),
+            "provider_statuses": dict(provider_statuses),
+            "upstream_failures_without_runs": sum(
+                row["code"] in {"PROVIDER_UNAVAILABLE", "TIME_BUDGET_EXCEEDED"}
+                and not row["provider_runs"]
+                for row in records
             ),
             "image_source_completeness": (
                 sum(bool(item["original_url"] and item["source_page_url"]) for item in images)
@@ -170,6 +197,36 @@ def summaries(rows: list[dict], review: dict) -> dict:
             "top10_valid_ratio": valid / n if n and reviewed == n else None,
         }
     return result
+
+
+def review_report(path: Path, review: Path | None) -> dict:
+    original = path.read_bytes()
+    report = json.loads(original)
+    if not isinstance(report, dict) or not isinstance(report.get("samples"), list):
+        raise ValueError("报告缺少 samples 数组")
+    digest = sha256(original).hexdigest()
+    rows = report["samples"]
+    labels = {
+        f"{row['case_id']}:{row['mode']}": [None] * len(row["results"])
+        for row in rows
+        if row["http_status"] == 200 and row["code"] is None and row["results"]
+    }
+    if review is None:
+        return {"report_sha256": digest, "labels": labels}
+    judgments = json.loads(review.read_text(encoding="utf-8-sig"))
+    if not isinstance(judgments, dict) or judgments.get("report_sha256") != digest:
+        raise ValueError("评审与当前基准报告的 SHA-256 不匹配")
+    submitted = judgments.get("labels")
+    if not isinstance(submitted, dict) or submitted.keys() - labels.keys():
+        raise ValueError("评审包含不存在的样本键")
+    return {**report, "reviewed_report_sha256": digest, "summary": summaries(rows, submitted)}
+
+
+def write_output(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
 
 
 def container_stats(project: str | None) -> list[dict]:
@@ -196,9 +253,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-url", type=local_url, default="http://127.0.0.1:8765")
     parser.add_argument("--cases", type=Path, default=CASES)
-    parser.add_argument(
-        "--review", type=Path, help="复核结果映射，键为 case_id:mode，值为逐条布尔或 null"
-    )
+    parser.add_argument("--report", type=Path, help="离线处理已保存的原始报告")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--review-template", action="store_true", help="从原始报告生成评审模板")
+    actions.add_argument("--review", type=Path, help="与原始报告绑定的人工评审 JSON")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mode", choices=("quick", "standard"), action="append")
     parser.add_argument("--case-id", action="append")
@@ -208,6 +266,20 @@ def main() -> None:
     parser.add_argument("--compose-stats", action="store_true")
     parser.add_argument("--project")
     options = parser.parse_args()
+    if options.output.exists():
+        parser.error("输出路径已存在")
+    review_action = options.review_template or options.review is not None
+    if bool(options.report) != review_action:
+        parser.error("--report 需要和 --review-template 或 --review 一起使用")
+    if options.report:
+        try:
+            result = review_report(options.report, options.review)
+            write_output(options.output, result)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            parser.error(str(error))
+        if not options.review_template:
+            print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
+        return
     if not 1 <= options.concurrency <= 20 or not 0 <= options.submit_interval <= 60:
         parser.error("concurrency 需要 1–20，submit-interval 需要 0–60 秒")
     if options.case_limit is not None and options.case_limit < 1:
@@ -219,8 +291,6 @@ def main() -> None:
     ]
     if not keys:
         parser.error("通过 MULTISEARCH_BENCHMARK_KEYS 提供一个或多个测试 API Key")
-    if options.output.exists():
-        parser.error("输出路径已存在")
     cases = [
         json.loads(line)
         for line in options.cases.read_text(encoding="utf-8-sig").splitlines()
@@ -234,7 +304,6 @@ def main() -> None:
     cases = cases[: options.case_limit]
     if not cases or len({case["id"] for case in cases}) != len(cases):
         parser.error("样本不能为空且 case ID 必须唯一")
-    review = json.loads(options.review.read_text(encoding="utf-8")) if options.review else {}
     modes = list(dict.fromkeys(options.mode or ("quick", "standard")))
     started = datetime.now(UTC)
     before = container_stats(options.project) if options.compose_stats else None
@@ -256,13 +325,10 @@ def main() -> None:
         "submit_interval_s": options.submit_interval,
         "container_resources_before": before,
         "container_resources_after": after,
-        "summary": summaries(rows, review),
+        "summary": summaries(rows, {}),
         "samples": rows,
     }
-    options.output.parent.mkdir(parents=True, exist_ok=True)
-    with options.output.open("x", encoding="utf-8") as stream:
-        json.dump(report, stream, ensure_ascii=False, indent=2)
-        stream.write("\n")
+    write_output(options.output, report)
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
 
 
