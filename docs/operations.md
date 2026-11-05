@@ -30,11 +30,14 @@ rule_files:
 | `multisearch_jobs_active`、`multisearch_oldest_queued_job_seconds` | 持久化活跃队列和最早排队时间，按抓取和研究模式汇总 |
 | `multisearch_worker_ready`、`multisearch_redis_used_memory_bytes` | Redis 中 Worker 心跳存在性及 Redis 当前内存 |
 | `multisearch_metrics_dependency_up` | PostgreSQL 和 Redis 快照采集是否成功 |
+| `multisearch_fetch_total` | API 与 Worker 实际尝试的正文提取次数，按 MIME 类型和 `completed`、`failed`、`blocked`、`timeout`、`ocr_pending`、`cancelled` 汇总。没有取得可确认响应类型时记为 `unknown` |
 | `multisearch_evidence_coverage_ratio` | 当前 API 进程观测到的带证据引用结果数占比 |
 
-快照使用 5 秒共享缓存和 1.5 秒采集上限。租户类别当前为 `standard`。图片存在多个 Provider 来源时，每个来源在对应维度分别计数。API 进程的提取指标记录同步取得的证据，后台批量提取以持久化快照的 `multisearch_stored_fetch_observations_window` 为准。 [Prometheus 指标格式](https://prometheus.io/docs/instrumenting/exposition_formats/)
+快照使用 5 秒共享缓存和 1.5 秒采集上限。租户类别当前为 `standard`。图片存在多个 Provider 来源时，每个来源在对应维度分别计数。正文提取 Counter 通过 Redis 在同一部署内共享，采集端应只配置一个 API 实例。缓存命中、幂等重放和因预算未启动的页面都不会增加次数。计数异步提交，Redis 写入故障或进程非正常终止时，可能丢失尚未提交的计数。持久化快照 `multisearch_stored_fetch_observations_window` 继续统计近期独立抓取任务的最终记录。 [Prometheus 指标格式](https://prometheus.io/docs/instrumenting/exposition_formats/)
 
 API 响应提供服务端生成的 `X-Trace-ID`。运行日志记录固定路由名、方法、状态、耗时和该追踪标识。调用方的 `X-Request-ID` 继续用于关联响应和授权查询，结构化日志只记录服务端追踪标识。指标标签使用固定枚举，日志字段与数据面内容分开。
+
+通过 `X-Trace-ID` 可关联 `fetch.extract` 日志中的提取状态、耗时和已知错误代码。抓取日志省略目标 URL、请求头和正文。
 
 ```promql
 histogram_quantile(0.95,
@@ -77,6 +80,19 @@ python scripts/ops/rehearse_worker_restart.py \
 
 也可在独立 `research` 项目启用 Crossref、arXiv 和研究 Worker，使用具备 `research` 与 `search:text` 权限的临时 Key，将 `--url` 替换为 `--research-query "attention transformer neural network"`。本机演练中，Worker 容器启动时间改变，同一研究任务的尝试次数从 1 增至 2，最终到达 `partial`。
 
+## 公网正文验收
+
+在启用了 `fetch` 或 `research` 配置的 Compose 项目中运行探针。输入应为已确认允许抓取和保留摘录的公开 URL，Worker 的 DNS 和出站链路应能按安全策略直接连接站点。
+
+```sh
+docker compose --profile fetch exec -T multisearch-worker python - \
+  https://www.rfc-editor.org/rfc/rfc8785.html < scripts/probe_public_fetch.py
+docker compose --profile fetch exec -T multisearch-worker python - \
+  https://www.rfc-editor.org/rfc/rfc8785.pdf --method pypdf < scripts/probe_public_fetch.py
+```
+
+HTML 默认要求 Crawl4AI 提供提取提示。可用 `--method static_html` 单独验收静态解析。探针会签发并吊销临时抓取 Key，经 REST 入队和重放，校验可定位正文、证据读取以及 PostgreSQL 中的单次用量与追踪。无正文、抓取失败或解析方法不符时返回非零状态。Worker DNS 返回非公网地址时输出策略拒绝诊断。
+
 ## 性能与质量基线
 
 样本包含通用知识、开发文档、新闻、照片和插画各 20 条，另有 20 条故障场景供回归设计。这些是整理好的评审候选。Top-10 有效率需要人工检查相关性、可访问性和内容匹配。 [检索样本](../scripts/ops/benchmark_cases.jsonl) · [异常场景](../scripts/ops/fault_cases.json)
@@ -89,16 +105,16 @@ python scripts/ops/benchmark_search.py --compose-stats --output .secrets/ops/pub
 
 报告按模式和模态分组，列出成功请求的墙钟 P50/P95、HTTP 状态、Provider 限流、图片来源页完整率和许可证核验比例。失败样本保留已返回的 Provider 状态和服务端追踪 ID。`upstream_failures_without_runs` 统计没有来源诊断的超时或不可用错误。Provider 限流率以报告中 `status=rate_limited` 的 Provider 调用为分子，SearXNG 内部单个引擎可能在 Provider 返回 `partial` 时限流。容器 CPU 与内存来自运行前后两次采样。
 
-在原始报告上离线评审，确保候选顺序和内容与评审时完全一致。
+使用原始报告生成本地评审工作区，并在浏览器打开生成的 HTML。确认每条查询符合样本要求，并分别判断每个候选的相关性、可访问性和内容匹配。需要暂停时可以导出进度，之后在同一报告的工作区导入继续。
 
 ```sh
-python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.json \
-  --review-template --output .secrets/ops/public-labels.json
+python scripts/ops/benchmark_review.py --report .secrets/ops/public-baseline.json \
+  --output .secrets/ops/public-review.html
 python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.json \
   --review .secrets/ops/public-labels.json --output .secrets/ops/public-reviewed.json
 ```
 
-先生成模板并人工打开原始报告中的结果链接。仅当结果直接相关、可访问且正文或图片与查询匹配时标 `true`，判定无效标 `false`，留待复核标 `null`。每个数组严格按同次请求的返回顺序填写。模板和结果绑定原始报告的 SHA-256，全组结果标注完毕后才计算 Top-10 有效率。离线命令无需 Key，也不会重新检索。
+将工作区导出的标注 JSON 保存为 `public-labels.json` 后运行第二条命令。标注与原始报告的 SHA-256 和返回顺序绑定，全组有候选且标注齐全后才计算该组的 Top-10 有效率。工作区只在评审者主动点击时打开候选链接。可使用 `--review-template` 生成原有 JSON 模板，直接按返回顺序填写 `true`、`false` 或待复核的 `null`。离线命令无需 Key，也不会重新检索。
 
 学术来源使用独立的 12 条标题、DOI 和 arXiv ID 样本。启用 Crossref 与 arXiv 后，使用具备 `search:text` 作用域的临时 Key。报告保留每条样本的原始文献链接，以及候选的 DOI、arXiv ID 和版本，便于复核同一论文。 [学术样本](../scripts/ops/academic_cases.jsonl)
 

@@ -138,3 +138,10 @@ docker compose exec -T multisearch-api python - < scripts/probe_image_license.py
 - Chromium 使用实际 PostgreSQL 数据验证运维 Provider 计数的租户隔离、平台管理员额度报告权限、脱敏 Key 分页和逐 Key 用量，并展开真实 SearXNG 的能力声明。 [管理接口](api-contracts.md#管理面)
 - 受控来源返回验证码错误时，REST 502 重放保留原追踪 ID 和两条类型化诊断，PostgreSQL 只写入一次用量。真实 REST／MCP 共用研究任务、追踪、单次计量和指标鉴权通过。该次公网研究收集到 30 条候选，正文证据为 0，返回 `partial`。
 - 七个实际运行镜像均生成 SBOM，并通过严重及高危漏洞扫描门禁。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
+
+### `0.3.0-alpha.6` 复验
+
+- 317 项后端测试、9 项 SDK 测试、Console 类型检查和 Chromium 角色工作区回归通过。七个 Compose 服务健康，七个运行镜像生成 SBOM 并通过严重及高危漏洞扫描门禁。 [镜像安全](security.md#运行镜像-sbom-与漏洞扫描)
+- 隔离源站夹具通过 REST、Worker、Crawl4AI、pypdf 和 PostgreSQL，HTML 与 PDF 各返回一条可定位证据。损坏 PDF 失败，扫描 PDF 返回 OCR 待处理，两者都没有生成证据。受保护的提取 Counter 对四种对应结果分别计数一次。
+- 真实 Compose 对公开 RFC 的 HTML 和 PDF 分别执行抓取。Worker DNS 返回非公网地址，两项正向公网门禁均返回 `FETCH_TARGET_BLOCKED`。受保护的 `unknown/blocked` 指标恰好增加 2，两次结构化追踪均记录相同诊断码。 [公网探针](operations.md#公网正文验收)
+- Chromium 打开由 100 条查询、200 次公网请求生成的离线评审工作区，验证查询审定、分项标注、部分进度导入导出、报告摘要不匹配拒绝及无自动外部请求。原报告有 1157 条候选，开发文档两种模式均无候选。实际人工标注和公网覆盖率复验仍待完成。 [评审操作](operations.md#性能与质量基线)
