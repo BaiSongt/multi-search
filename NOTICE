@@ -11,6 +11,7 @@ Pydantic — MIT — https://github.com/pydantic/pydantic/blob/main/LICENSE
 Uvicorn — BSD-3-Clause — https://github.com/Kludex/uvicorn/blob/main/LICENSE.md
 HTTPX — BSD-3-Clause — https://github.com/encode/httpx/blob/master/LICENSE.md
 DDGS — MIT — https://github.com/deedy5/ddgs/blob/main/LICENSE
+MCP Python SDK — MIT — https://github.com/modelcontextprotocol/python-sdk/blob/v2.3.0/LICENSE
 SQLAlchemy — MIT — https://github.com/sqlalchemy/sqlalchemy/blob/main/LICENSE
 Alembic — MIT — https://github.com/sqlalchemy/alembic/blob/main/LICENSE
 asyncpg — Apache-2.0 — https://github.com/MagicStack/asyncpg/blob/master/LICENSE
