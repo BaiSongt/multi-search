@@ -58,6 +58,8 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 响应头 `X-Trace-ID` 由服务端生成，与脱敏运行日志中的追踪标识对应。
 
+检索失败时，如果已经观察到来源调用结果，REST 与 MCP 的错误正文会带 `provider_runs`。字段沿用成功响应的来源、状态、耗时、候选数和尝试次数。授权、参数、配额错误或尚未返回结果的超时可能没有该字段。重放返回原始来源诊断，调用与 Provider 计量不重复写入。
+
 | HTTP | 典型错误码 | 处理 |
 | --- | --- | --- |
 | 401 | `AUTH_REQUIRED` | 检查 Key 是否提供且有效 |

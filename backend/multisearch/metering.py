@@ -379,6 +379,7 @@ class UsageMeter:
         response: SearchResponse | None = None,
         error: ApiError | None = None,
         cancelled: bool = False,
+        elapsed_ms: int | None = None,
     ) -> None:
         status = "cancelled" if cancelled else "failed"
         replay = None
@@ -394,23 +395,25 @@ class UsageMeter:
                     "message": str(error),
                     "retryable": error.retryable,
                     "retry_after_ms": error.retry_after_ms,
+                    "provider_runs": [run.model_dump(mode="json") for run in error.provider_runs],
                 }
             }
         async with self.db.begin() as connection:
             results = response.results if response else []
-            await connection.execute(
+            updated = await connection.scalar(
                 text("""
                 UPDATE usage_events SET status = :status, code = :code, elapsed_ms = :elapsed_ms,
                     cache_hit = :cache_hit, text_results_returned = :text_count,
                     image_results_returned = :image_count, image_sources_present = :source_count,
                     pages_fetched = :pages, llm_tokens = :tokens, replay_payload = CAST(:replay AS JSONB)
                 WHERE id = :id AND status = 'running'
+                RETURNING id
             """),
                 {
                     "id": admission.event_id,
                     "status": status,
                     "code": error.code if error else ("REQUEST_CANCELLED" if cancelled else None),
-                    "elapsed_ms": response.elapsed_ms if response else None,
+                    "elapsed_ms": response.elapsed_ms if response else elapsed_ms,
                     "cache_hit": response.cache_hit if response else False,
                     "text_count": sum(result.kind == "text" for result in results),
                     "image_count": sum(result.kind == "image" for result in results),
@@ -423,9 +426,11 @@ class UsageMeter:
                     "replay": json.dumps(replay, ensure_ascii=False) if replay else None,
                 },
             )
-            if response is not None:
+            if updated is not None and response is not None:
                 await save_provider_runs(connection, admission.event_id, response.provider_runs)
                 await save_search_metadata(connection, admission.event_id, response)
+            elif updated is not None and error is not None:
+                await save_provider_runs(connection, admission.event_id, error.provider_runs)
 
     async def cancel(self, admission: Admission) -> None:
         await shield(

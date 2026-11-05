@@ -102,7 +102,11 @@ class SearchApplication:
                 pass
             raise
         except ApiError as error:
-            await self.meter.finish(admission, error=error)
+            if self.telemetry:
+                self.telemetry.record_provider_runs(error.provider_runs)
+            await self.meter.finish(
+                admission, error=error, elapsed_ms=int((monotonic() - started) * 1000)
+            )
             raise
         except Exception:
             await self.meter.finish(

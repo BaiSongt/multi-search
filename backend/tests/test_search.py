@@ -2,10 +2,13 @@ import asyncio
 from collections import Counter
 from datetime import UTC, datetime
 from time import monotonic
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from multisearch.application import SearchApplication
 from multisearch.contracts import (
     ImageAttribution,
     ImageSearchResult,
@@ -17,6 +20,8 @@ from multisearch.contracts import (
 )
 from multisearch.errors import ApiError
 from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
+from multisearch.metering import Admission, SearchPrincipal
+from multisearch.observability import Telemetry
 from multisearch.policy import ProviderPolicy
 from multisearch.providers import ProviderFailure, ProviderResult
 from multisearch.routing_policy import DEFAULT_ROUTING, RoutingRules
@@ -112,6 +117,59 @@ async def test_quick_falls_back_and_enforces_mode_caps():
     assert ddgs.calls[0][3] == 10
     assert "PARTIAL_RESULT" in result.warnings
     assert not search.redis.cache
+
+
+async def test_failed_search_reports_provider_runs_without_recounting_replays():
+    search = service(FakeProvider("searxng", handler=failed), FakeProvider("ddgs", handler=failed))
+    event_id = uuid4()
+    meter = AsyncMock()
+    meter.reserve.return_value = Admission(event_id, True)
+    telemetry = Telemetry()
+    application = SearchApplication(search, meter, telemetry=telemetry)
+    principal = SearchPrincipal(uuid4(), uuid4(), uuid4(), "key")
+    request = SearchRequest(
+        query="private diagnostic fixture", mode="standard", idempotency_key="idem-1"
+    )
+
+    with pytest.raises(ApiError) as raised:
+        await application.search(request, principal, "req-1")
+    error = raised.value
+    assert (error.status, error.code) == (502, "PROVIDER_UNAVAILABLE")
+    assert {run.provider_id: run.status for run in error.provider_runs} == {
+        "ddgs": "failed",
+        "searxng": "failed",
+    }
+    assert request.query not in error.body("req-1").model_dump_json()
+    assert meter.finish.await_args.kwargs["error"] is error
+
+    body = error.body("req-1").model_dump(mode="json", exclude={"request_id"})
+    meter.reserve.return_value = Admission(event_id, True, {"error": {"status": 502, **body}})
+    with pytest.raises(ApiError) as replay:
+        await application.search(request, principal, "req-2")
+    assert replay.value.provider_runs == error.provider_runs
+    assert meter.finish.await_count == 1
+    assert telemetry.counters["provider_requests"] == {
+        ("ddgs", "failed"): 1,
+        ("searxng", "failed"): 1,
+    }
+
+
+async def test_provider_with_partial_candidates_stays_available():
+    class PartialProvider(FakeProvider):
+        async def search(self, *args):
+            result = await super().search(*args)
+            result.partial = True
+            return result
+
+    provider = PartialProvider("searxng")
+    search = service(provider)
+    for index in range(5):
+        result = await search.search(
+            SearchRequest(query=f"fixture {index}", mode="standard"), "tenant", f"req-{index}"
+        )
+        assert result.partial and result.result_count == 1
+        assert result.provider_runs[0].status == "partial"
+    assert len(provider.calls) == 5
 
 
 async def test_standard_fuses_provider_provenance_and_reports_missing_pairs():

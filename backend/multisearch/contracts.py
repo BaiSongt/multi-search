@@ -233,3 +233,4 @@ class ErrorBody(BaseModel):
     message: str
     retryable: bool = False
     retry_after_ms: int | None = None
+    provider_runs: list[ProviderRun] | None = None

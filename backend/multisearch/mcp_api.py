@@ -21,7 +21,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import ErrorBody, InputModel, Modality, Mode, SearchRequest, SearchResponse
+from .contracts import InputModel, Modality, Mode, SearchRequest, SearchResponse
 from .errors import ApiError
 from .identity import MachineIdentity
 from .job_contracts import FetchRequest, JobAccepted, JobView
@@ -61,18 +61,8 @@ def _tool_input[Model: InputModel](model: type[Model], arguments: dict[str, obje
         raise ApiError(422, "INVALID_REQUEST", "请求参数验证失败") from None
 
 
-def _error_body(error: ApiError, request_id: str) -> ErrorBody:
-    return ErrorBody(
-        request_id=request_id,
-        code=error.code,
-        message=str(error),
-        retryable=error.retryable,
-        retry_after_ms=error.retry_after_ms,
-    )
-
-
 def _tool_error(error: ApiError, request_id: str) -> CallToolResult:
-    body = _error_body(error, request_id)
+    body = error.body(request_id)
     return CallToolResult(
         is_error=True,
         structured_content=body.model_dump(mode="json", exclude_none=True),
@@ -249,7 +239,7 @@ class _MachineAuth:
             headers = {"WWW-Authenticate": "Bearer"} if error.status == 401 else {}
             if error.retry_after_ms is not None:
                 headers["Retry-After"] = str((error.retry_after_ms + 999) // 1000)
-            body = _error_body(error, state["request_id"])
+            body = error.body(state["request_id"])
             response = JSONResponse(body.model_dump(exclude_none=True), error.status, headers)
             await response(scope, receive, send_uncached)
             return

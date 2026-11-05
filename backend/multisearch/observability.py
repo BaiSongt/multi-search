@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import ImageSearchResult, Modality, Mode, SearchResponse, Source
+from .contracts import ImageSearchResult, Modality, Mode, ProviderRun, SearchResponse, Source
 from .settings import secret
 from .tracing import bind_trace
 
@@ -219,6 +219,12 @@ class Telemetry:
         self._count("requests", mode, status, "standard")
         self._duration("request_duration_seconds", (mode, status), elapsed_ms / 1000)
 
+    def record_provider_runs(self, runs: Iterable[ProviderRun]) -> None:
+        for run in runs:
+            provider = _label(run.provider_id, _PROVIDERS)
+            self._count("provider_requests", provider, _label(run.status, _PROVIDER_STATUS))
+            self._duration("provider_duration_seconds", (provider,), run.elapsed_ms / 1000)
+
     def record_search(
         self,
         response: SearchResponse,
@@ -235,10 +241,7 @@ class Telemetry:
             sources = {_label(source, _SOURCES) for source in source_types}
             for source_label in sources or {"unknown"}:
                 self._count("cache_hits", mode, source_label)
-        for run in response.provider_runs:
-            provider = _label(run.provider_id, _PROVIDERS)
-            self._count("provider_requests", provider, _label(run.status, _PROVIDER_STATUS))
-            self._duration("provider_duration_seconds", (provider,), run.elapsed_ms / 1000)
+        self.record_provider_runs(response.provider_runs)
         for result in response.results:
             if not isinstance(result, ImageSearchResult):
                 continue

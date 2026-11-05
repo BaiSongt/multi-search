@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -6,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import ErrorBody
+from .contracts import ErrorBody, ProviderRun
 
 
 class ApiError(Exception):
@@ -18,12 +19,24 @@ class ApiError(Exception):
         *,
         retryable: bool = False,
         retry_after_ms: int | None = None,
+        provider_runs: Iterable[ProviderRun | dict] = (),
     ):
         super().__init__(message)
         self.status = status
         self.code = code
         self.retryable = retryable
         self.retry_after_ms = retry_after_ms
+        self.provider_runs = [ProviderRun.model_validate(run) for run in provider_runs]
+
+    def body(self, request_id: str) -> ErrorBody:
+        return ErrorBody(
+            request_id=request_id,
+            code=self.code,
+            message=str(self),
+            retryable=self.retryable,
+            retry_after_ms=self.retry_after_ms,
+            provider_runs=self.provider_runs or None,
+        )
 
 
 class SearchBodyLimit:
@@ -82,13 +95,7 @@ def install_errors(app: FastAPI) -> None:
 
     @app.exception_handler(ApiError)
     async def api_error(request: Request, error: ApiError):
-        body = ErrorBody(
-            request_id=request.state.request_id,
-            code=error.code,
-            message=str(error),
-            retryable=error.retryable,
-            retry_after_ms=error.retry_after_ms,
-        )
+        body = error.body(request.state.request_id)
         headers = {}
         if error.status == 401:
             headers["WWW-Authenticate"] = "Bearer"

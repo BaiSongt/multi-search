@@ -654,7 +654,8 @@ class ResearchOrchestrator:
         routing: RoutingVersion,
         deadline: float,
     ) -> bool:
-        remaining_ms = int((deadline - monotonic()) * 1000)
+        round_started = monotonic()
+        remaining_ms = int((deadline - round_started) * 1000)
         if remaining_ms <= 0:
             raise TimeoutError
         pages = min(8, budget.max_pages - state.pages_charged)
@@ -682,7 +683,7 @@ class ResearchOrchestrator:
         mode = Mode.EVIDENCE if evidence else Mode.STANDARD
         mode_time = 45_000 if evidence else routing.policy.budgets.standard.max_latency_ms
         round_budget_ms = min(remaining_ms, mode_time)
-        round_deadline = min(deadline, monotonic() + round_budget_ms / 1000)
+        round_deadline = min(deadline, round_started + mode_time / 1000)
         round_body = body.model_copy(
             update={
                 "query": plan.query,
@@ -718,8 +719,9 @@ class ResearchOrchestrator:
             image_metadata_fetches=None if metadata else 0,
             image_metadata_charged=metadata,
         )
+        round_timeout = asyncio.timeout_at(round_deadline)
         try:
-            async with asyncio.timeout_at(round_deadline):
+            async with round_timeout:
                 request_id = (claim.request_id or claim.job_id.hex)[:120]
                 response = await self.search.search(
                     round_body,
@@ -733,6 +735,7 @@ class ResearchOrchestrator:
             report.error_code = "TIME_BUDGET_EXCEEDED"
         except ApiError as error:
             report.error_code = error.code
+            report.provider_runs = error.provider_runs
             if error.code == "EVIDENCE_UNAVAILABLE":
                 state.evidence_unavailable = True
         else:
@@ -741,6 +744,8 @@ class ResearchOrchestrator:
         state.rounds.append(report)
         if report.error_code:
             state.warn(f"RESEARCH_ROUND_{report.error_code}")
+        if round_deadline == deadline and round_timeout.expired():
+            raise TimeoutError
         if monotonic() >= deadline:
             return True
         return await self._checkpoint(claim, state, budget, planned, "researching", deadline)

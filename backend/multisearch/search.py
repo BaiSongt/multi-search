@@ -140,8 +140,10 @@ def _budget(request: SearchRequest, mode: Mode, rules: RoutingRules) -> SearchBu
     )
 
 
-def _time_error() -> ApiError:
-    return ApiError(504, "TIME_BUDGET_EXCEEDED", "检索时限已耗尽", retryable=True)
+def _time_error(runs: tuple[ProviderRun, ...] = ()) -> ApiError:
+    return ApiError(
+        504, "TIME_BUDGET_EXCEEDED", "检索时限已耗尽", retryable=True, provider_runs=runs
+    )
 
 
 class SearchService:
@@ -531,7 +533,9 @@ class SearchService:
                     circuit.probing = False
             # 调用方自设的很短时限不足以判断上游是否故障。
             observed = attempts and (status != "timeout" or monotonic() - started >= 1)
-            if observed and status in {"success", "empty"}:
+            # 聚合来源仍交付候选时，部分引擎失败不应触发整个来源熔断。
+            delivered = status in {"success", "empty"} or (status == "partial" and result.results)
+            if observed and delivered:
                 circuit.failures = 0
                 circuit.open_until = 0
             elif observed:
@@ -707,8 +711,14 @@ class SearchService:
         runs = [run for _, run in records]
         if not any(run.status in _SUCCESS for run in runs):
             if monotonic() >= provider_deadline or any(run.status == "timeout" for run in runs):
-                raise _time_error()
-            raise ApiError(502, "PROVIDER_UNAVAILABLE", "当前没有可用的检索来源", retryable=True)
+                raise _time_error(tuple(runs))
+            raise ApiError(
+                502,
+                "PROVIDER_UNAVAILABLE",
+                "当前没有可用的检索来源",
+                retryable=True,
+                provider_runs=runs,
+            )
         for result, run in records:
             warnings.extend(result.warnings)
             if run.status not in {"success", "empty"}:
