@@ -1,8 +1,11 @@
 import json
 import logging
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from uuid import uuid4
+
+from .contracts import ProviderReason
 
 _trace: ContextVar[tuple[str | None, str | None]] = ContextVar(
     "multisearch_trace", default=(None, None)
@@ -35,6 +38,7 @@ def trace_event(
     status: str,
     elapsed_ms: int | None = None,
     provider: str | None = None,
+    reason_codes: Sequence[ProviderReason] = (),
 ) -> None:
     identifier = trace_id()
     if identifier is None or not _logger.isEnabledFor(logging.INFO):
@@ -44,4 +48,6 @@ def trace_event(
         fields["elapsed_ms"] = elapsed_ms
     if provider is not None:
         fields["provider"] = provider
+    if reason_codes:
+        fields["reason_codes"] = list(reason_codes)
     _logger.info(json.dumps(fields, separators=(",", ":")))

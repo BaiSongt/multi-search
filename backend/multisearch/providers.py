@@ -11,7 +11,7 @@ from typing import Literal, Protocol
 
 import httpx
 
-from .contracts import Modality, Scope, SearchRequest, SearchResult, Source
+from .contracts import Modality, ProviderReason, Scope, SearchRequest, SearchResult, Source
 from .pipeline import normalize
 from .settings import Settings
 
@@ -26,6 +26,11 @@ _DDGS_METHODS = {
     "news": ("news", "bing"),
 }
 _MAX_UPSTREAM_BYTES = 1024 * 1024
+_ENGINE_REASON_MARKERS = {
+    ProviderReason.UPSTREAM_CAPTCHA: ("captcha",),
+    ProviderReason.UPSTREAM_RATE_LIMITED: ("429", "rate limit", "too many requests"),
+    ProviderReason.UPSTREAM_TIMEOUT: ("timeout", "timed out"),
+}
 FailureStatus = Literal["failed", "timeout", "rate_limited"]
 
 
@@ -34,12 +39,20 @@ class ProviderResult:
     results: list[SearchResult]
     warnings: list[str] = field(default_factory=list)
     partial: bool = False
+    reason_codes: tuple[ProviderReason, ...] = ()
 
 
 class ProviderFailure(Exception):
-    def __init__(self, status: FailureStatus, retry_after: float | None = None):
+    def __init__(
+        self,
+        status: FailureStatus,
+        retry_after: float | None = None,
+        *,
+        reason_codes: tuple[ProviderReason, ...] = (),
+    ):
         self.status = status
         self.retry_after = retry_after
+        self.reason_codes = reason_codes
         super().__init__(status)
 
 
@@ -89,20 +102,28 @@ def _retry_after(header: object) -> float | None:
         return None
 
 
-def _engine_failure(errors: list) -> FailureStatus:
-    codes = [
-        error[1].casefold()
-        for error in errors
-        if isinstance(error, (tuple, list)) and len(error) >= 2 and isinstance(error[1], str)
-    ]
-    if len(codes) == len(errors):
-        if all("timeout" in code or "timed out" in code for code in codes):
-            return "timeout"
-        if all(
-            "429" in code or "rate limit" in code or "too many requests" in code for code in codes
-        ):
-            return "rate_limited"
-    return "failed"
+def _engine_diagnostics(errors: list) -> tuple[FailureStatus, tuple[ProviderReason, ...]]:
+    reasons: set[ProviderReason] = set()
+    common = set(_ENGINE_REASON_MARKERS) if errors else set()
+    for error in errors:
+        detail = (
+            error[1].casefold()
+            if isinstance(error, (tuple, list)) and len(error) >= 2 and isinstance(error[1], str)
+            else ""
+        )
+        observed = {
+            reason
+            for reason, markers in _ENGINE_REASON_MARKERS.items()
+            if any(marker in detail for marker in markers)
+        }
+        common.intersection_update(observed)
+        reasons.update(observed or {ProviderReason.UPSTREAM_UNAVAILABLE})
+    status: FailureStatus = "failed"
+    if ProviderReason.UPSTREAM_TIMEOUT in common:
+        status = "timeout"
+    elif ProviderReason.UPSTREAM_RATE_LIMITED in common:
+        status = "rate_limited"
+    return status, tuple(reason for reason in ProviderReason if reason in reasons)
 
 
 class SearXNGProvider(PublicProvider):
@@ -142,10 +163,18 @@ class SearXNGProvider(PublicProvider):
             ):
                 if response.status_code == 429:
                     raise ProviderFailure(
-                        "rate_limited", _retry_after(response.headers.get("retry-after"))
+                        "rate_limited",
+                        _retry_after(response.headers.get("retry-after")),
+                        reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,),
                     )
                 if response.status_code in {408, 504}:
-                    raise ProviderFailure("timeout")
+                    raise ProviderFailure(
+                        "timeout", reason_codes=(ProviderReason.UPSTREAM_TIMEOUT,)
+                    )
+                if 500 <= response.status_code < 600:
+                    raise ProviderFailure(
+                        "failed", reason_codes=(ProviderReason.UPSTREAM_UNAVAILABLE,)
+                    )
                 if (
                     response.status_code != 200
                     or response.headers.get("content-encoding", "identity").lower() != "identity"
@@ -158,16 +187,23 @@ class SearXNGProvider(PublicProvider):
                     body.extend(chunk)
             payload = json.loads(body)
         except (TimeoutError, httpx.TimeoutException) as error:
-            raise ProviderFailure("timeout") from error
-        except (httpx.HTTPError, RecursionError, ValueError) as error:
+            raise ProviderFailure(
+                "timeout", reason_codes=(ProviderReason.UPSTREAM_TIMEOUT,)
+            ) from error
+        except httpx.HTTPError as error:
+            raise ProviderFailure(
+                "failed", reason_codes=(ProviderReason.UPSTREAM_UNAVAILABLE,)
+            ) from error
+        except (RecursionError, ValueError) as error:
             raise ProviderFailure("failed") from error
         if not isinstance(payload, dict) or not isinstance(rows := payload.get("results"), list):
             raise ProviderFailure("failed")
         unavailable = payload.get("unresponsive_engines", [])
         if not isinstance(unavailable, list):
             raise ProviderFailure("failed")
+        failure_status, reason_codes = _engine_diagnostics(unavailable)
         if unavailable and not rows:
-            raise ProviderFailure(_engine_failure(unavailable))
+            raise ProviderFailure(failure_status, reason_codes=reason_codes)
         expected_rows = [
             row
             for row in rows
@@ -191,7 +227,12 @@ class SearXNGProvider(PublicProvider):
             and request.image_options.image_type
         ):
             warnings.append("searxng:image_type_unsupported")
-        return ProviderResult(results, warnings, partial=bool(unavailable) or mismatched_categories)
+        return ProviderResult(
+            results,
+            warnings,
+            partial=bool(unavailable) or mismatched_categories,
+            reason_codes=reason_codes,
+        )
 
 
 class DDGSProvider(PublicProvider):

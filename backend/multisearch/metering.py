@@ -190,13 +190,14 @@ async def save_provider_runs(
         return
     await connection.execute(
         text("""
-        INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count)
-        VALUES (:usage_id, :ordinal, :provider_id, :status, :elapsed_ms, :count)
+        INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes)
+        VALUES (:usage_id, :ordinal, :provider_id, :status, :elapsed_ms, :count, :reason_codes)
     """),
         [
             {
                 "usage_id": usage_id,
                 "ordinal": index,
+                "reason_codes": [reason.value for reason in run.reason_codes],
                 **run.model_dump(include={"provider_id", "status", "elapsed_ms", "count"}),
             }
             for index, run in enumerate(runs)

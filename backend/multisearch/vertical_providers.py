@@ -5,6 +5,7 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import monotonic, time
+from typing import Literal
 from urllib.parse import quote, unquote, urlsplit
 from xml.etree import ElementTree
 
@@ -23,6 +24,15 @@ _ARXIV_ID = re.compile(
     flags=re.ASCII,
 )
 _DOI = re.compile(r"10\.[0-9]{4,9}/[^\s\x00-\x1f\x7f]+", flags=re.IGNORECASE)
+_ARXIV_HOSTS = {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
+AcademicIdentifierKind = Literal["doi", "arxiv"]
+
+
+@dataclass(frozen=True)
+class AcademicIdentifier:
+    kind: AcademicIdentifierKind
+    value: str
+    version: str | None = None
 
 
 def _dict(value: object) -> dict:
@@ -63,6 +73,37 @@ def _doi(value: object) -> str | None:
 
 def _doi_url(doi: str | None) -> str | None:
     return f"https://doi.org/{quote(doi, safe='/')}" if doi else None
+
+
+def academic_identifier(query: str) -> AcademicIdentifier | None:
+    candidate = query.strip()
+    prefix, separator, suffix = candidate.partition(":")
+    if separator and prefix.casefold() in {"doi", "arxiv"}:
+        candidate = suffix.strip()
+    else:
+        prefix = ""
+    if prefix.casefold() != "arxiv" and (doi := _doi(candidate)):
+        # DOI 中的点段和反斜线不能改变固定的上游 API 路径。
+        path = unquote(doi)
+        if not {".", ".."}.intersection(path.split("/")) and "\\" not in path:
+            return AcademicIdentifier("doi", doi)
+        return None
+    if prefix.casefold() == "doi":
+        return None
+    if url := public_link(candidate):
+        parts = urlsplit(url)
+        path = unquote(parts.path)
+        if parts.hostname not in _ARXIV_HOSTS or parts.port is not None:
+            return None
+        if path.startswith("/abs/"):
+            candidate = path[5:]
+        elif path.startswith("/pdf/"):
+            candidate = path[5:].removesuffix(".pdf")
+        else:
+            return None
+    if match := _ARXIV_ID.fullmatch(candidate.casefold()):
+        return AcademicIdentifier("arxiv", *match.groups())
+    return None
 
 
 def _first_text(values: object, limit: int) -> str | None:
@@ -114,6 +155,7 @@ class _VerticalProvider:
     accept = "application/json"
     spacing_seconds = 0.0
     cache_version = "1"
+    identifier_kind: AcademicIdentifierKind | None = None
     provider_id: str
     endpoint: str
 
@@ -130,15 +172,19 @@ class _VerticalProvider:
         self._connection = asyncio.Lock()
         self._next_request = 0.0
 
-    async def _download(self, params: dict[str, str | int], timeout_s: float) -> bytes:
+    async def _download(
+        self, endpoint: str, params: dict[str, str | int], timeout_s: float, *, missing_ok: bool
+    ) -> bytes | None:
         async with self.client.stream(
             "GET",
-            self.endpoint,
+            endpoint,
             params=params,
             headers=self.headers,
             follow_redirects=False,
             timeout=timeout_s,
         ) as response:
+            if response.status_code == 404 and missing_ok:
+                return None
             retry_after = _retry_after(response.headers.get("retry-after"))
             github_limit = self.provider_id == "github" and (
                 retry_after is not None or response.headers.get("x-ratelimit-remaining") == "0"
@@ -170,18 +216,20 @@ class _VerticalProvider:
                 raise ProviderFailure("failed")
             return bytes(body)
 
-    async def _request(self, params: dict[str, str | int], timeout_s: float) -> bytes:
+    async def _request(
+        self, endpoint: str, params: dict[str, str | int], timeout_s: float, *, missing_ok: bool
+    ) -> bytes | None:
         if timeout_s <= 0:
             raise ProviderFailure("timeout")
         try:
             async with asyncio.timeout(timeout_s):
                 if self.spacing_seconds == 0:
-                    return await self._download(params, timeout_s)
+                    return await self._download(endpoint, params, timeout_s, missing_ok=missing_ok)
                 # 需要限速的来源同时使用单连接，排队时间计入调用预算。
                 async with self._connection:
                     await asyncio.sleep(max(0.0, self._next_request - monotonic()))
                     self._next_request = monotonic() + self.spacing_seconds
-                    return await self._download(params, timeout_s)
+                    return await self._download(endpoint, params, timeout_s, missing_ok=missing_ok)
         except (TimeoutError, httpx.TimeoutException):
             raise ProviderFailure("timeout") from None
         except (httpx.HTTPError, ValueError):
@@ -190,7 +238,12 @@ class _VerticalProvider:
     def _params(self, request: SearchRequest, limit: int) -> dict[str, str | int]:
         raise NotImplementedError
 
-    def _parse(self, body: bytes) -> _Batch:
+    def _target(
+        self, request: SearchRequest, limit: int, identifier: AcademicIdentifier | None
+    ) -> tuple[str, dict[str, str | int]]:
+        return self.endpoint, self._params(request, limit)
+
+    def _parse(self, body: bytes, *, exact: bool = False) -> _Batch:
         raise NotImplementedError
 
     async def search(
@@ -204,13 +257,28 @@ class _VerticalProvider:
         if request.network_scope != Scope.PUBLIC or (source, modality) not in self.pairs:
             raise ProviderFailure("failed")
         limit = max(1, min(_MAX_RESULTS, limit))
-        body = await self._request(self._params(request, limit), timeout_s)
-        batch = self._parse(body)
+        identifier = academic_identifier(request.query) if source == Source.ACADEMIC else None
+        if identifier and self.identifier_kind != identifier.kind:
+            return ProviderResult([])
+        endpoint, params = self._target(request, limit, identifier)
+        body = await self._request(endpoint, params, timeout_s, missing_ok=identifier is not None)
+        batch = self._parse(body, exact=identifier is not None) if body is not None else _Batch([])
         warnings = []
         results = []
         invalid = missing_dates = 0
         retrieved_at = datetime.now(UTC)
         for row in batch.rows:
+            if identifier and (
+                (identifier.kind == "doi" and row.doi != identifier.value)
+                or (
+                    identifier.kind == "arxiv"
+                    and (
+                        (row.arxiv_id or "").casefold() != identifier.value
+                        or (identifier.version is not None and row.version != identifier.version)
+                    )
+                )
+            ):
+                raise ProviderFailure("failed")
             if not row.url or not row.title:
                 invalid += 1
                 continue
@@ -267,12 +335,22 @@ class _VerticalProvider:
 class OpenAlexProvider(_VerticalProvider):
     provider_id = "openalex"
     endpoint = "https://api.openalex.org/works"
+    cache_version = "2"
+    identifier_kind = "doi"
+    fields = "id,doi,display_name,authorships,publication_date,language,primary_location"
+
+    def _target(self, request, limit, identifier):
+        if identifier:
+            return f"{self.endpoint}/doi:{quote(identifier.value, safe='/')}", {
+                "select": self.fields
+            }
+        return super()._target(request, limit, identifier)
 
     def _params(self, request: SearchRequest, limit: int) -> dict[str, str | int]:
         params: dict[str, str | int] = {
             "search": request.query,
             "per_page": limit,
-            "select": "id,doi,display_name,authorships,publication_date,language,primary_location",
+            "select": self.fields,
         }
         if window := request.time_range:
             params["filter"] = (
@@ -280,9 +358,10 @@ class OpenAlexProvider(_VerticalProvider):
             )
         return params
 
-    def _parse(self, body: bytes) -> _Batch:
+    def _parse(self, body: bytes, *, exact: bool = False) -> _Batch:
+        data = _json(body)
         documents = []
-        for value in _rows(_json(body).get("results")):
+        for value in [data] if exact else _rows(data.get("results")):
             row = _dict(value)
             location = _dict(row.get("primary_location"))
             source = _dict(location.get("source"))
@@ -317,12 +396,20 @@ class CrossrefProvider(_VerticalProvider):
     provider_id = "crossref"
     endpoint = "https://api.crossref.org/works"
     spacing_seconds = 0.2
+    cache_version = "2"
+    identifier_kind = "doi"
 
     def __init__(self, client: httpx.AsyncClient, email: str = ""):
         super().__init__(client)
         if email and (len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)):
             raise ValueError("Crossref 联系邮箱格式无效")
         self.email = email
+
+    def _target(self, request, limit, identifier):
+        if identifier:
+            params = {"mailto": self.email} if self.email else {}
+            return f"{self.endpoint}/{quote(identifier.value, safe='/')}", params
+        return super()._target(request, limit, identifier)
 
     def _params(self, request: SearchRequest, limit: int) -> dict[str, str | int]:
         params: dict[str, str | int] = {
@@ -336,12 +423,13 @@ class CrossrefProvider(_VerticalProvider):
             params["filter"] = f"from-pub-date:{window.start},until-pub-date:{window.end}"
         return params
 
-    def _parse(self, body: bytes) -> _Batch:
+    def _parse(self, body: bytes, *, exact: bool = False) -> _Batch:
         data = _json(body)
         if data.get("status") != "ok":
             raise ProviderFailure("failed")
+        message = _dict(data.get("message"))
         documents = []
-        for value in _rows(_dict(data.get("message")).get("items")):
+        for value in [message] if exact else _rows(message.get("items")):
             row = _dict(value)
             doi = _doi(row.get("DOI"))
             authors = []
@@ -376,6 +464,16 @@ class ArxivProvider(_VerticalProvider):
     endpoint = "https://export.arxiv.org/api/query"
     accept = "application/atom+xml"
     spacing_seconds = 3.0
+    cache_version = "2"
+    identifier_kind = "arxiv"
+
+    def _target(self, request, limit, identifier):
+        if identifier:
+            return self.endpoint, {
+                "id_list": identifier.value + (identifier.version or ""),
+                "max_results": 1,
+            }
+        return super()._target(request, limit, identifier)
 
     def _params(self, request: SearchRequest, limit: int) -> dict[str, str | int]:
         phrase = _query_phrase(request.query)
@@ -388,7 +486,7 @@ class ArxivProvider(_VerticalProvider):
             search += f" AND submittedDate:[{start}0000 TO {end}2359]"
         return {"search_query": search, "start": 0, "max_results": limit}
 
-    def _parse(self, body: bytes) -> _Batch:
+    def _parse(self, body: bytes, *, exact: bool = False) -> _Batch:
         try:
             xml = body.decode("utf-8-sig")
             if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml, flags=re.IGNORECASE):
@@ -402,7 +500,7 @@ class ArxivProvider(_VerticalProvider):
         for entry in feed.findall(f"{_ATOM}entry")[:_MAX_RESULTS]:
             identifier = public_link(entry.findtext(f"{_ATOM}id"))
             parts = urlsplit(identifier or "")
-            from_arxiv = parts.hostname in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
+            from_arxiv = parts.hostname in _ARXIV_HOSTS
             if from_arxiv and parts.path == "/api/errors":
                 raise ProviderFailure("failed")
             match = (
@@ -455,7 +553,7 @@ class GitHubProvider(_VerticalProvider):
             query += f" created:{window.start}..{window.end}"
         return {"q": query, "per_page": limit}
 
-    def _parse(self, body: bytes) -> _Batch:
+    def _parse(self, body: bytes, *, exact: bool = False) -> _Batch:
         data = _json(body)
         documents = []
         for value in _rows(data.get("items")):

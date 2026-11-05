@@ -59,6 +59,7 @@ def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):
         "elapsed_ms": 4,
         "attempts": 1,
         "count": 0,
+        "reason_codes": ["upstream_rate_limited", "upstream_captcha"],
     }
 
     class Handler(BaseHTTPRequestHandler):
@@ -126,4 +127,10 @@ def test_live_report_captures_failed_provider_runs(tmp_path, monkeypatch):
     assert report["samples"][0]["provider_outcomes"] == [run]
     summary = report["summary"]["quick:text"]
     assert summary["provider_rate_limited_ratio"] == 1
+    assert summary["provider_reason_counts"] == {
+        "searxng": {
+            "upstream_rate_limited": 1,
+            "upstream_captcha": 1,
+        }
+    }
     assert summary["upstream_failures_without_runs"] == 0

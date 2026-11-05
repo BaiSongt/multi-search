@@ -183,6 +183,13 @@ class ImageSearchResult(Result):
 SearchResult = Annotated[TextSearchResult | ImageSearchResult, Field(discriminator="kind")]
 
 
+class ProviderReason(StrEnum):
+    UPSTREAM_CAPTCHA = "upstream_captcha"
+    UPSTREAM_RATE_LIMITED = "upstream_rate_limited"
+    UPSTREAM_TIMEOUT = "upstream_timeout"
+    UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+
+
 class ProviderRun(BaseModel):
     provider_id: str
     source_type: Source
@@ -193,6 +200,9 @@ class ProviderRun(BaseModel):
     elapsed_ms: int
     count: int = 0
     attempts: int = 1
+    reason_codes: list[ProviderReason] = Field(
+        default_factory=list, exclude_if=lambda codes: not codes
+    )
 
 
 class SearchBudget(BaseModel):

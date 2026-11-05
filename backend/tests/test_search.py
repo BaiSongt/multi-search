@@ -172,6 +172,28 @@ async def test_provider_with_partial_candidates_stays_available():
     assert len(provider.calls) == 5
 
 
+@pytest.mark.parametrize("mode", ["quick", "standard"])
+async def test_academic_identifier_routes_only_to_capable_providers(mode):
+    class DoiProvider(FakeProvider):
+        pairs = frozenset({(Source.ACADEMIC, Modality.TEXT)})
+        identifier_kind = "doi"
+
+    class ArxivProvider(DoiProvider):
+        identifier_kind = "arxiv"
+
+    doi = DoiProvider("crossref", handler=failed)
+    arxiv = ArxivProvider("arxiv")
+    search = service(doi, arxiv)
+    query = SearchRequest(query="arXiv:2512.12345v3", source_types=[Source.ACADEMIC], mode=mode)
+    result = await search.search(query, "tenant", "request")
+    assert [run.provider_id for run in result.provider_runs] == ["arxiv"]
+    assert result.result_count == 1 and not doi.calls
+
+    with pytest.raises(ApiError) as unavailable:
+        service(doi).plan(query)
+    assert unavailable.value.code == "SOURCE_MODALITY_UNAVAILABLE"
+
+
 async def test_standard_fuses_provider_provenance_and_reports_missing_pairs():
     search = service(FakeProvider("searxng"), FakeProvider("ddgs"))
     result = await search.search(

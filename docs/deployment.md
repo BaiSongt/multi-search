@@ -63,6 +63,8 @@ docker compose exec -T multisearch-api python -m multisearch.keys revoke --id KE
 
 可在 `.env` 中设置 `MULTISEARCH_VERTICAL_SOURCES=crossref,arxiv` 选择来源，或设置 `MULTISEARCH_ENABLE_ACADEMIC=true` 启用 OpenAlex、Crossref 和 arXiv。学术请求使用 `source_types=["academic"]`。OpenAlex 匿名查询使用上游较低的额度，可配置 `MULTISEARCH_OPENALEX_KEY`。如需使用 Crossref 的礼貌访问池，可提供 `MULTISEARCH_CROSSREF_EMAIL`。
 
+学术查询可以使用完整 DOI、DOI 链接或 `doi:` 前缀，也可以使用 arXiv ID、arXiv 摘要／PDF 链接或 `arXiv:` 前缀。带 `vN` 的 arXiv ID 要求上游返回同一版本。日期与域名筛选仍适用。 [Crossref 接口](https://api.crossref.org/swagger-ui/index.html) · [OpenAlex 接口](https://help.openalex.org/api/get-single-entities/) · [arXiv API 手册](https://info.arxiv.org/help/api/user-manual.html)
+
 GitHub 代码检索通过 `MULTISEARCH_VERTICAL_SOURCES=github` 和 `MULTISEARCH_GITHUB_TOKEN` 启用，请求使用 `source_types=["code"]`。结果只包含公开仓库，默认分支与提交 SHA 分开理解。部署平台可通过对应的 `_FILE` 变量注入密钥文件。未启用的来源由能力端点显式标记为不可用。
 
 ## 本地索引和离线查询

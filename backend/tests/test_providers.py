@@ -5,7 +5,14 @@ import httpx
 import pytest
 from ddgs.exceptions import DDGSException
 
-from multisearch.contracts import ImageSearchResult, Modality, SearchRequest, Source
+from multisearch.contracts import (
+    ImageSearchResult,
+    Modality,
+    ProviderReason,
+    ProviderRun,
+    SearchRequest,
+    Source,
+)
 from multisearch.ddgs_child import _FixedEndpoint
 from multisearch.pipeline import fuse, normalize, public_link
 from multisearch.providers import DDGSProvider, ProviderFailure, SearXNGProvider
@@ -82,6 +89,7 @@ async def test_searxng_uses_image_category_and_preserves_attribution():
             1,
         )
     assert result.partial
+    assert result.reason_codes == (ProviderReason.UPSTREAM_TIMEOUT,)
     assert "searxng:unresponsive_engines:1" in result.warnings
     assert "searxng:image_type_unsupported" in result.warnings
     assert "searxng:unexpected_result_category" in result.warnings
@@ -101,21 +109,41 @@ async def test_searxng_uses_image_category_and_preserves_attribution():
 
 
 @pytest.mark.parametrize(
-    ("response", "status", "retry_after"),
+    ("response", "status", "retry_after", "reason_codes"),
     [
-        (httpx.Response(302, headers={"location": "http://127.0.0.1"}), "failed", None),
-        (httpx.Response(429, headers={"retry-after": "7"}), "rate_limited", 7),
-        (httpx.Response(200, content=b"X" * (1024 * 1024 + 1)), "failed", None),
+        (httpx.Response(302, headers={"location": "http://127.0.0.1"}), "failed", None, ()),
+        (
+            httpx.Response(429, headers={"retry-after": "7"}),
+            "rate_limited",
+            7,
+            (ProviderReason.UPSTREAM_RATE_LIMITED,),
+        ),
+        (httpx.Response(503), "failed", None, (ProviderReason.UPSTREAM_UNAVAILABLE,)),
+        (httpx.Response(504), "timeout", None, (ProviderReason.UPSTREAM_TIMEOUT,)),
+        (httpx.Response(200, content=b"X" * (1024 * 1024 + 1)), "failed", None, ()),
         (
             httpx.Response(
                 200, json={"results": [], "unresponsive_engines": [["bing", "timeout"]]}
             ),
             "timeout",
             None,
+            (ProviderReason.UPSTREAM_TIMEOUT,),
+        ),
+        (
+            httpx.Response(
+                200,
+                json={
+                    "results": [],
+                    "unresponsive_engines": [["brave", "Suspended: too many requests"]],
+                },
+            ),
+            "rate_limited",
+            None,
+            (ProviderReason.UPSTREAM_RATE_LIMITED,),
         ),
     ],
 )
-async def test_searxng_bounded_upstream_errors(response, status, retry_after):
+async def test_searxng_bounded_upstream_errors(response, status, retry_after, reason_codes):
     calls = []
 
     def upstream(request):
@@ -137,6 +165,53 @@ async def test_searxng_bounded_upstream_errors(response, status, retry_after):
     assert calls == ["searxng"]
     assert failure.value.status == status
     assert failure.value.retry_after == retry_after
+    assert failure.value.reason_codes == reason_codes
+
+
+@pytest.mark.parametrize("has_candidates", [False, True])
+async def test_searxng_reports_mixed_engine_reasons_without_raw_details(has_candidates):
+    def upstream(_request):
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"url": "https://example.org/result"}] if has_candidates else [],
+                "unresponsive_engines": [
+                    ["upstream-detail", "Suspended: too many requests"],
+                    ["upstream-detail", "CAPTCHA"],
+                    ["upstream-detail", "timed out"],
+                    ["upstream-detail", "private upstream diagnostic"],
+                    ["upstream-detail", "CAPTCHA"],
+                ],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        provider = SearXNGProvider("http://searxng", client)
+        args = SearchRequest(query="Moon"), Source.WEB, Modality.TEXT, 10, 1
+        if has_candidates:
+            result = await provider.search(*args)
+            assert result.partial and len(result.results) == 1
+            assert result.warnings == ["searxng:unresponsive_engines:5"]
+            reason_codes = result.reason_codes
+        else:
+            with pytest.raises(ProviderFailure, match="^failed$") as failure:
+                await provider.search(*args)
+            assert failure.value.status == "failed"
+            reason_codes = failure.value.reason_codes
+    assert reason_codes == tuple(ProviderReason)
+
+
+def test_provider_run_serializes_only_present_sanitized_reasons():
+    fields = {
+        "provider_id": "searxng",
+        "source_type": Source.WEB,
+        "modality": Modality.TEXT,
+        "status": "partial",
+        "elapsed_ms": 4,
+    }
+    assert "reason_codes" not in ProviderRun(**fields).model_dump(mode="json")
+    run = ProviderRun(**fields, reason_codes=[ProviderReason.UPSTREAM_CAPTCHA])
+    assert run.model_dump(mode="json")["reason_codes"] == ["upstream_captcha"]
 
 
 async def test_private_scope_never_calls_public_adapters(monkeypatch):

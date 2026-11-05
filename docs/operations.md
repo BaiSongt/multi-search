@@ -105,6 +105,8 @@ python scripts/ops/benchmark_search.py --report .secrets/ops/public-baseline.jso
 ```sh
 python scripts/ops/benchmark_search.py --cases scripts/ops/academic_cases.jsonl \
   --concurrency 1 --submit-interval 3.1 --output .secrets/ops/academic-baseline.json
+python scripts/ops/academic_quality.py .secrets/ops/academic-baseline.json \
+  --fail-on-identifier-miss
 ```
 
 本地索引的独立样本在临时 PostgreSQL 库中运行，覆盖中文和英文查询、筛选、有序结果上限、更新与两租户隔离。公网 Provider 和共享缓存作为故障哨兵，任何意外调用都会使验收失败。 [本地索引探针](../scripts/probe_local_index.py)

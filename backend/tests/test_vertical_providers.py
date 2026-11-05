@@ -11,6 +11,7 @@ from multisearch.vertical_providers import (
     CrossrefProvider,
     GitHubProvider,
     OpenAlexProvider,
+    academic_identifier,
     create_vertical_providers,
 )
 
@@ -28,6 +29,119 @@ ARXIV_FEED = """<?xml version="1.0" encoding="UTF-8"?>
   </entry>
 </feed>
 """
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("10.1234/LUNAR", ("doi", "10.1234/lunar", None)),
+        ("DOI: 10.1234/LUNAR", ("doi", "10.1234/lunar", None)),
+        ("https://doi.org/10.1234/LUNAR%3Fx%23y", ("doi", "10.1234/lunar?x#y", None)),
+        ("arXiv:2512.12345", ("arxiv", "2512.12345", None)),
+        ("https://arxiv.org/pdf/quant-ph/9508027v2.pdf", ("arxiv", "quant-ph/9508027", "v2")),
+        ("lunar paper 10.1234/example", None),
+        ("https://doi.org.example.org/10.1234/lunar", None),
+        ("https://doi.org/10.1234/%2e%2e/example", None),
+        ("10.1234/%2e%2e/example", None),
+        ("https://arxiv.org@example.org/abs/2512.12345v3", None),
+    ],
+)
+def test_academic_identifier_requires_the_entire_query(query, expected):
+    identifier = academic_identifier(query)
+    actual = (identifier.kind, identifier.value, identifier.version) if identifier else None
+    assert actual == expected
+
+
+@pytest.mark.parametrize("adapter", [CrossrefProvider, OpenAlexProvider])
+async def test_exact_doi_uses_singleton_escapes_reserved_characters_and_filters_dates(adapter):
+    expected_doi = "10.1234/lunar?x#y"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.raw_path.split(b"?", 1)[0]
+        assert path.endswith(b"10.1234/lunar%3Fx%23y")
+        if adapter is CrossrefProvider:
+            assert request.url.host == "api.crossref.org" and path.startswith(b"/works/10.")
+            assert dict(request.url.params) == {"mailto": "operator@example.org"}
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "message": {
+                        "DOI": expected_doi,
+                        "title": ["Lunar orbits"],
+                        "published": {"date-parts": [[2025, 12, 10]]},
+                    },
+                },
+            )
+        assert request.url.host == "api.openalex.org" and path.startswith(b"/works/doi:10.")
+        assert set(request.url.params) == {"select"}
+        return httpx.Response(
+            200,
+            json={
+                "doi": "https://doi.org/10.1234/lunar%3Fx%23y",
+                "display_name": "Lunar orbits",
+                "publication_date": "2025-12-10",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = (
+            adapter(client, "operator@example.org")
+            if adapter is CrossrefProvider
+            else adapter(client)
+        )
+        query = "https://doi.org/10.1234/LUNAR%3Fx%23y"
+        response = await source.search(
+            SearchRequest(query=query), Source.ACADEMIC, Modality.TEXT, 10, 1
+        )
+        outside = await source.search(
+            SearchRequest(query=query, time_range={"from": "2024-01-01", "to": "2024-12-31"}),
+            Source.ACADEMIC,
+            Modality.TEXT,
+            10,
+            1,
+        )
+    assert response.results[0].doi == expected_doi and not outside.results
+
+
+@pytest.mark.parametrize("status", [200, 404])
+async def test_exact_doi_distinguishes_missing_work_from_a_mismatched_record(status):
+    wrong = {"status": "ok", "message": {"DOI": "10.1234/wrong", "title": ["Wrong work"]}}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(status, json=wrong),
+        )
+    ) as client:
+        source = CrossrefProvider(client)
+        args = (SearchRequest(query="10.1234/example"), Source.ACADEMIC, Modality.TEXT, 10, 1)
+        if status == 404:
+            result = await source.search(*args)
+            assert result.results == [] and not result.partial
+        else:
+            with pytest.raises(ProviderFailure, match="failed"):
+                await source.search(*args)
+
+
+@pytest.mark.parametrize(
+    "query", ["arXiv:2512.12345", "https://arxiv.org/abs/2512.12345v3", "2512.12345v2"]
+)
+async def test_arxiv_exact_id_keeps_requested_version(query):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert dict(request.url.params) == {
+            "id_list": query.rsplit("/", 1)[-1].removeprefix("arXiv:"),
+            "max_results": "1",
+        }
+        return httpx.Response(200, text=ARXIV_FEED)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = ArxivProvider(client)
+        args = (SearchRequest(query=query), Source.ACADEMIC, Modality.TEXT, 5, 1)
+        if query.endswith("v2"):
+            with pytest.raises(ProviderFailure, match="failed"):
+                await source.search(*args)
+        else:
+            result = await source.search(*args)
+            assert result.results[0].version == "v3"
 
 
 async def test_openalex_filters_dates_and_maps_declared_copy_metadata():

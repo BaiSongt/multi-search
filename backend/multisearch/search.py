@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from random import uniform
 from time import monotonic
@@ -44,6 +44,7 @@ from .routing_policy import (
 from .safe_fetch import FetchError
 from .settings import Settings
 from .tracing import trace_event, trace_id
+from .vertical_providers import AcademicIdentifier, academic_identifier
 
 if TYPE_CHECKING:
     from .local_index import LocalIndex
@@ -188,12 +189,23 @@ class SearchService:
             if self.settings.enable_images or pair[1] != Modality.IMAGE
         }
 
-    def _supported_pairs(self) -> set[Pair]:
+    @staticmethod
+    def _accepts_identifier(
+        provider: Provider, pair: Pair, identifier: AcademicIdentifier | None
+    ) -> bool:
+        return (
+            identifier is None
+            or pair[0] != Source.ACADEMIC
+            or getattr(provider, "identifier_kind", identifier.kind) == identifier.kind
+        )
+
+    def _supported_pairs(self, identifier: AcademicIdentifier | None = None) -> set[Pair]:
         pairs = {
             pair
             for provider in self.providers.values()
             if self.provider_policies[provider.provider_id].enabled
             for pair in self._pairs(provider)
+            if self._accepts_identifier(provider, pair, identifier)
         }
         if self.local_index is not None:
             pairs.add((Source.LOCAL, Modality.TEXT))
@@ -475,12 +487,21 @@ class SearchService:
                         return result, "rate_limited", attempts
                     attempts += 1
                     try:
-                        result = await provider.search(request, *pair, limit, remaining)
+                        candidate = await provider.search(request, *pair, limit, remaining)
                     except ProviderFailure as error:
                         status, retry_after = error.status, error.retry_after
+                        result.reason_codes = tuple(
+                            sorted(set(result.reason_codes + error.reason_codes))
+                        )
                         if status == "rate_limited" and retry_after:
                             state.retry_until = max(state.retry_until, monotonic() + retry_after)
                     else:
+                        result = replace(
+                            candidate,
+                            reason_codes=tuple(
+                                sorted(set(result.reason_codes + candidate.reason_codes))
+                            ),
+                        )
                         status = (
                             "partial"
                             if result.partial
@@ -556,9 +577,14 @@ class SearchService:
             elapsed_ms=elapsed_ms,
             count=len(result.results),
             attempts=attempts,
+            reason_codes=list(result.reason_codes),
         )
         trace_event(
-            "provider.run", status=status, elapsed_ms=run.elapsed_ms, provider=provider.provider_id
+            "provider.run",
+            status=status,
+            elapsed_ms=run.elapsed_ms,
+            provider=provider.provider_id,
+            reason_codes=run.reason_codes,
         )
         return result, run
 
@@ -570,6 +596,7 @@ class SearchService:
         limit: int,
         deadline: float,
         rules: RoutingRules,
+        identifier: AcademicIdentifier | None,
     ) -> list[tuple[ProviderResult, ProviderRun]]:
         preferred = ("ddgs", "searxng") if mode == Mode.QUICK else ("searxng", "ddgs")
         eligible = [
@@ -577,6 +604,7 @@ class SearchService:
             for provider in self.providers.values()
             if self.provider_policies[provider.provider_id].enabled
             and pair in self._pairs(provider)
+            and self._accepts_identifier(provider, pair, identifier)
         ]
         eligible.sort(
             key=lambda p: (
@@ -661,7 +689,10 @@ class SearchService:
         requested = [
             (source, modality) for source in request.source_types for modality in request.modalities
         ]
-        supported = self._supported_pairs()
+        identifier = (
+            academic_identifier(request.query) if Source.ACADEMIC in request.source_types else None
+        )
+        supported = self._supported_pairs(identifier)
         warnings = [
             f"SOURCE_MODALITY_UNAVAILABLE:{source}:{kind}"
             for source, kind in requested
@@ -694,6 +725,7 @@ class SearchService:
                 else budget.max_results,
                 provider_deadline,
                 routing.policy,
+                identifier,
             )
             for pair in requested
             if pair in supported and pair[0] != Source.LOCAL
@@ -953,7 +985,10 @@ class SearchService:
             raise ApiError(422, "SOURCE_UNAVAILABLE", "当前版本没有获准使用的内部检索来源")
         if local_only and needs_evidence:
             raise ApiError(422, "EVIDENCE_UNAVAILABLE", "本地索引不执行公网证据抓取")
-        supported = self._supported_pairs()
+        identifier = (
+            academic_identifier(request.query) if Source.ACADEMIC in request.source_types else None
+        )
+        supported = self._supported_pairs(identifier)
         if not supported.intersection(
             (source, kind) for source in request.source_types for kind in request.modalities
         ):

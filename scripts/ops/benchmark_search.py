@@ -130,7 +130,15 @@ def run_case(base: str, key: str, mode: str, case: dict) -> dict:
         "provider_outcomes": [
             {
                 name: run[name]
-                for name in ("provider_id", "status", "elapsed_ms", "attempts", "count")
+                for name in (
+                    "provider_id",
+                    "status",
+                    "elapsed_ms",
+                    "attempts",
+                    "count",
+                    "reason_codes",
+                )
+                if name in run
             }
             for run in runs
         ],
@@ -168,9 +176,12 @@ def summaries(rows: list[dict], review: dict) -> dict:
         latencies = [row["wall_ms"] for row in successes]
         runs = sum(row["provider_runs"] for row in records)
         provider_statuses = defaultdict(Counter)
+        provider_reason_counts = defaultdict(Counter)
         for row in records:
             for run in row.get("provider_outcomes", []):
                 provider_statuses[run["provider_id"]][run["status"]] += 1
+                if reasons := run.get("reason_codes"):
+                    provider_reason_counts[run["provider_id"]].update(reasons)
         result[group] = {
             "requests": len(records),
             "http_statuses": dict(Counter(row["http_status"] for row in records)),
@@ -182,6 +193,7 @@ def summaries(rows: list[dict], review: dict) -> dict:
                 sum(row["provider_rate_limited_runs"] for row in records) / runs if runs else None
             ),
             "provider_statuses": dict(provider_statuses),
+            "provider_reason_counts": dict(provider_reason_counts),
             "upstream_failures_without_runs": sum(
                 row["code"] in {"PROVIDER_UNAVAILABLE", "TIME_BUDGET_EXCEEDED"}
                 and not row["provider_runs"]
