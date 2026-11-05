@@ -296,18 +296,37 @@ class _Group:
                     "mime_type": first.mime_type or second.mime_type,
                 }
             )
+        elif isinstance(result, TextSearchResult) and isinstance(other, TextSearchResult):
+            updates["authors"] = result.authors or other.authors
+            updates["journal"] = result.journal or other.journal
+            if result.canonical_url == other.canonical_url:
+                if result.license_name is None and result.license_url is None:
+                    updates["license_name"] = other.license_name
+                    updates["license_url"] = other.license_url
+                updates["repository_branch"] = result.repository_branch or other.repository_branch
+                updates["version"] = result.version or other.version
         self.result = result.model_copy(update=updates)
 
 
 def _identity(result: SearchResult) -> tuple:
     if isinstance(result, ImageSearchResult):
         return ("image", canonical_url(result.image.original_url), result.canonical_url)
-    return ("text", result.doi.casefold() if result.doi else result.canonical_url)
+    if result.doi:
+        return ("doi", result.doi.casefold())
+    if result.arxiv_id:
+        return ("arxiv", result.arxiv_id.casefold(), result.version)
+    return ("text", result.canonical_url or result.result_id)
 
 
-def _same_size(result: SearchResult, candidate: SearchResult) -> bool:
+def _compatible_record(result: SearchResult, candidate: SearchResult) -> bool:
     if not isinstance(result, ImageSearchResult) or not isinstance(candidate, ImageSearchResult):
-        return True
+        return not (
+            isinstance(result, TextSearchResult)
+            and isinstance(candidate, TextSearchResult)
+            and result.version
+            and candidate.version
+            and result.version != candidate.version
+        )
     return all(
         left is None or right is None or left == right
         for left, right in (
@@ -327,7 +346,9 @@ def fuse(
     for batch in batches:
         for position, item in enumerate(batch, start=1):
             candidates = groups.setdefault(_identity(item), [])
-            matching = next((group for group in candidates if _same_size(group.result, item)), None)
+            matching = next(
+                (group for group in candidates if _compatible_record(group.result, item)), None
+            )
             if matching is None:
                 matching = _Group(item)
                 candidates.append(matching)
