@@ -1,0 +1,122 @@
+name: multisearch
+
+services:
+  multisearch-api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      API_KEY_HASH_PEPPER_FILE: /run/secrets/api_key_hash_pepper
+      MULTISEARCH_ENABLE_DDGS: ${MULTISEARCH_ENABLE_DDGS:-true}
+      MULTISEARCH_ENABLE_IMAGE_SEARCH: ${MULTISEARCH_ENABLE_IMAGE_SEARCH:-true}
+    secrets: [postgres_password, api_key_hash_pepper]
+    ports:
+      - "127.0.0.1:${MULTISEARCH_API_PORT:-8765}:8765"
+    networks: [gateway, data, search]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 128
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8765/health/ready', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+
+  multisearch-console:
+    build:
+      context: .
+      dockerfile: console/Dockerfile
+    environment:
+      MULTISEARCH_INTERNAL_API_URL: http://multisearch-api:8765
+      MULTISEARCH_PUBLIC_API_BASE_URL: ${MULTISEARCH_PUBLIC_API_BASE_URL:-http://127.0.0.1:8765}
+    ports:
+      - "127.0.0.1:${MULTISEARCH_CONSOLE_PORT:-3000}:3000"
+    networks: [gateway]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 64
+    depends_on:
+      multisearch-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:17-alpine@sha256:266d3c257594e195b309ae9d1805e54c788f1d7b375f56bf6c367aac6c917e7b
+    environment:
+      POSTGRES_DB: multisearch
+      POSTGRES_USER: multisearch
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [data]
+    read_only: true
+    tmpfs: [/tmp, /var/run/postgresql]
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "multisearch", "-d", "multisearch"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:8.6-alpine@sha256:f4ed7d6732f9a5dcc6b64e2b347860b9f329334bfd4839a672f78cd981a8bba6
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
+    volumes: [redis_data:/data]
+    networks: [data]
+    read_only: true
+    mem_limit: 192m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  searxng:
+    image: searxng/searxng:2026.11.2-cccbc9e15@sha256:892ed5710603e38f9dc201e6a0b2f3f14dbdb8108edcadac30e55b165c979fb7
+    entrypoint: ["/bin/sh", "/opt/searxng-start.sh"]
+    user: searxng
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./deploy/searxng/start.sh:/opt/searxng-start.sh:ro
+    secrets: [searxng_secret]
+    networks: [search]
+    read_only: true
+    tmpfs: [/tmp, "/var/cache/searxng:mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    pids_limit: 96
+
+networks:
+  gateway:
+  data:
+    internal: true
+  search:
+
+volumes:
+  postgres_data:
+  redis_data:
+
+secrets:
+  postgres_password:
+    file: ./.secrets/postgres_password
+  api_key_hash_pepper:
+    file: ./.secrets/api_key_hash_pepper
+  searxng_secret:
+    file: ./.secrets/searxng_secret

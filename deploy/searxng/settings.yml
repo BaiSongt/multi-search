@@ -1,0 +1,23 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - duckduckgo images
+      - duckduckgo news
+      - bing
+      - bing images
+      - bing news
+
+server:
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 3.0
+  max_request_timeout: 4.0

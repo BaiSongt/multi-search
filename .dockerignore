@@ -1,0 +1,12 @@
+.git
+.env
+.secrets
+**/.venv
+.uv-cache
+.npm-cache
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/node_modules
+**/.next
+**/*.tsbuildinfo

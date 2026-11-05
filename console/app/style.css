@@ -1,0 +1,10 @@
+:root { color-scheme: dark; background: #101820; color: #eef2f4; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+main { width: min(48rem, calc(100% - 3rem)); margin: 12vh auto; }
+.label { letter-spacing: .13em; font-size: .8rem; color: #91cfd2; }
+h1 { font-size: clamp(2rem, 8vw, 4rem); margin: .35em 0; }
+h2 { margin-top: 0; font-size: 1.2rem; }
+section { margin-top: 2rem; padding: 1.5rem; border: 1px solid #41545e; border-radius: .5rem; }
+a { color: #a4e2ff; }
+.ready { color: #91e6b7; }
+.pending { color: #ffd08a; }
