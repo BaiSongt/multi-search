@@ -94,7 +94,7 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 
 `POST /api/v1/research` 使用 SearchRequest，接受 `auto` 或 `deep`。同一请求也可通过 `POST /api/v1/search` 并设置 `mode=deep` 提交。REST 与 MCP 共享任务与幂等标识。研究启动只扣一次，结果记录轮次、来源、证据、页数和模型计量。恢复时保留已预留的预算，执行中断不会令预算重新计数。未知的模型用量保持未知。
 
-任务响应正文中的 `trace_id` 始终关联首次成功提交，查询和幂等重试的 `X-Trace-ID` 响应头关联当次传输。研究结果区分已预留 Token、实际 Token 和用量是否已知。`estimated_cost` 仅估算模型费用，未调用模型时为零，缺少用量或费率时为 `null`。报告按轮记录去重来源数和证据覆盖率。
+任务响应正文中的 `trace_id` 始终关联首次成功提交，查询和幂等重试的 `X-Trace-ID` 响应头关联当次传输。研究结果区分已预留 Token、实际 Token 和用量是否已知。发起模型生成前持久化预留额度及未知用量，响应中的用量确认后才写入实际值。`estimated_cost` 仅估算模型费用，以十进制字符串返回并按最多 14 位小数入账。未调用模型时为零，缺少用量或费率时为 `null`。报告按轮记录去重来源数和证据覆盖率，Console 展示分轮指标和最终综合阶段的模型输入、输出及费用。
 
 启用本地索引时，纯本地研究按离线执行，正文公网抓取与模型预算均为零。Console 使用同源 Playground 提交研究，再通过 `/api/v1/console/jobs/{id}` 查询或取消本人任务。
 
@@ -106,7 +106,9 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 - `GET /api/v1/usage` 返回最近 30 个 UTC 自然日的计量、趋势和当前租户配额。开发者仅能查看自己的用量，具备权限的角色可查看本租户用量。
 - `/api/v1/admin/` 提供总览、Provider、脱敏请求、租户和审计。平台管理员可创建租户、修改租户配额与 Provider 策略。运维、审计及租户管理员按各自权限读取。
 - 平台管理员与运维可通过 `GET /api/v1/admin/requests/{id}` 读取脱敏请求及已存的来源运行记录。运维仅能读取所在租户，跨租户 ID 与不存在的 ID 均返回 404。列表支持来源、模式、模态、租户、状态、时间与追踪 ID 筛选，租户筛选按角色授权。
-- `GET /api/v1/admin/providers` 返回来源组合、过滤执行位置、分页支持、凭据要求和进程并发能力。实时熔断反映服务级状态，持久化运行量和延迟按角色范围汇总。运维读取当前租户，平台管理员读取全平台。
+- `GET /api/v1/admin/images` 返回最近 30 个 UTC 自然日内已返回图片的许可计数 `counts`、来源计数 `source_counts` 和分页记录。列表可组合使用 `rights_status` 和 `source_status`，统计覆盖角色可见的整个时间窗。来源状态为 `missing`、`invalid`、`failed`、`not_matched`、`unverified` 或 `verified`。平台管理员查看全平台，运维仅查看当前租户。
+- `GET /api/v1/admin/overview` 的 `job_queue` 返回 `queued`、`running`、`cancelling`、`queued_for_retry` 及最早有效排队的时间 `oldest_queued_at`。仅统计截止时间尚未到达的活动任务，并按角色限定可见租户。
+- `GET /api/v1/admin/providers` 返回来源组合、过滤执行位置、分页支持、凭据要求和进程并发能力。实时熔断反映服务级状态。运维和审计员只读取当前租户的持久化运行量和延迟，平台管理员读取全平台并可修改 Provider 策略。
 - 平台管理员可通过 `GET /api/v1/admin/tenants/{id}/quota-usage` 查看 UTC 当日租户用量、实时活动数以及分页后的脱敏 Key 用量与有效配额。分页接受 `limit`、`cursor`，Key 页只返回掩码。
 
 MCP 客户端使用相同的搜索鉴权与计量。 [MCP 接入](mcp.md)

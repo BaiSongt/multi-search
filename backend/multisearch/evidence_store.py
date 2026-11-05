@@ -1,3 +1,4 @@
+import json
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -41,6 +42,15 @@ async def save_search_metadata(
     await save_images(connection, usage_id, response.results)
 
 
+def _image_metadata(result: ImageSearchResult) -> str:
+    metadata = result.image.model_dump(mode="json")
+    if "image_source_verification_failed" in result.warnings:
+        metadata["source_verification"] = "failed"
+    elif "image_source_not_matched" in result.warnings:
+        metadata["source_verification"] = "not_matched"
+    return json.dumps(metadata, ensure_ascii=False)
+
+
 async def save_images(
     connection: AsyncConnection,
     usage_id: UUID,
@@ -70,7 +80,7 @@ async def save_images(
                 "verified": result.image.source_page_verified,
                 "retrieved": result.retrieved_at,
                 "checked": result.image.rights_checked_at,
-                "metadata": result.image.model_dump_json(),
+                "metadata": _image_metadata(result),
             }
             for result in observations
         ],

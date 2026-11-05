@@ -10,6 +10,7 @@ from .evidence_store import get_evidence
 
 router = APIRouter(prefix="/api/v1")
 Rights = Literal["unknown", "declared_unverified", "verified_license", "conflict"]
+SourceStatus = Literal["missing", "invalid", "failed", "not_matched", "unverified", "verified"]
 
 
 @router.get("/evidence/{evidence_id}", response_model=EvidenceRecord)
@@ -28,10 +29,13 @@ async def images(
     request: Request,
     actor: SessionUser,
     rights_status: Rights | None = None,
+    source_status: SourceStatus | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
     cursor: Annotated[str | None, Query(max_length=256)] = None,
 ):
     if actor.role not in {Role.PLATFORM_ADMIN, Role.OPERATIONS_ADMIN}:
         raise ApiError(403, "FORBIDDEN", "当前角色无权查看图片质量")
     tenant_id = None if actor.role == Role.PLATFORM_ADMIN else actor.tenant_id
-    return await request.app.state.reports.images(tenant_id, rights_status, limit, cursor)
+    return await request.app.state.reports.images(
+        tenant_id, rights_status, limit, cursor, source_status=source_status
+    )

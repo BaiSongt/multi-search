@@ -1,4 +1,5 @@
 import base64
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -45,6 +46,15 @@ _QUOTA_METRICS = {
 _QUOTA_METRIC_SELECT = ", ".join(
     f"{expression} AS {name}" for name, expression in _QUOTA_METRICS.items()
 )
+_IMAGE_SOURCE_STATUS = """
+    CASE WHEN i.source_page_url IS NULL THEN 'missing'
+         WHEN i.metadata ->> 'source_page_status' = 'invalid' THEN 'invalid'
+         WHEN i.source_page_verified THEN 'verified'
+         WHEN i.metadata ->> 'source_verification' = 'failed' THEN 'failed'
+         WHEN i.metadata ->> 'source_page_status' = 'checked'
+              OR i.metadata ->> 'source_verification' = 'not_matched' THEN 'not_matched'
+         ELSE 'unverified' END
+"""
 
 
 @dataclass(frozen=True)
@@ -214,19 +224,28 @@ class UsageReports:
                 .mappings()
                 .one()
             )
-            active_jobs = await connection.scalar(
+            jobs = await connection.execute(
                 text("""
-                SELECT count(*) FROM search_jobs WHERE (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant)
+                SELECT count(*) AS active_jobs,
+                    count(*) FILTER (WHERE status = 'queued') AS queued,
+                    count(*) FILTER (WHERE status = 'running') AS running,
+                    count(*) FILTER (WHERE status = 'cancelling') AS cancelling,
+                    count(*) FILTER (WHERE status = 'queued' AND attempts > 0) AS queued_for_retry,
+                    min(updated_at) FILTER (WHERE status = 'queued') AS oldest_queued_at
+                FROM search_jobs WHERE (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant)
                     AND status IN ('queued','running','cancelling') AND deadline_at > now()
             """),
                 {"tenant": scope.tenant},
             )
+            job_queue = dict(jobs.mappings().one())
+            active_jobs = job_queue.pop("active_jobs")
             return {
                 "totals": await self._totals(connection, scope),
                 "series": await self._series(connection, scope),
                 **dict(details),
                 "requests_per_second": float(details["requests_per_second"]),
                 "active_jobs": active_jobs,
+                "job_queue": job_queue,
             }
 
     async def providers(self, tenant_id: UUID | None) -> dict[str, dict]:
@@ -326,6 +345,8 @@ class UsageReports:
         rights_status: str | None,
         limit: int,
         cursor: str | None,
+        *,
+        source_status: str | None = None,
     ) -> dict:
         after, identifier = _read_cursor(cursor)
         params = {"tenant": tenant_id, "start": _start()}
@@ -333,10 +354,12 @@ class UsageReports:
             counts = (
                 (
                     await connection.execute(
-                        text("""
-                SELECT rights_status, count(*) AS count FROM image_observations
-                WHERE (CAST(:tenant AS UUID) IS NULL OR tenant_id = :tenant) AND retrieved_at >= :start
-                GROUP BY rights_status
+                        text(f"""
+                SELECT i.rights_status, {_IMAGE_SOURCE_STATUS} AS source_status, count(*) AS count
+                FROM image_observations i
+                WHERE (CAST(:tenant AS UUID) IS NULL OR i.tenant_id = :tenant)
+                    AND i.retrieved_at >= :start
+                GROUP BY i.rights_status, source_status
             """),
                         params,
                     )
@@ -347,21 +370,25 @@ class UsageReports:
             rows = (
                 (
                     await connection.execute(
-                        text("""
+                        text(f"""
                 SELECT i.id, u.request_id, i.tenant_id, i.source_page_url, i.original_url, i.thumbnail_url,
                     i.rights_status, i.source_page_verified, i.retrieved_at,
                     COALESCE(i.metadata ->> 'source_page_status',
                         CASE WHEN i.source_page_verified THEN 'checked' ELSE 'unverified' END) AS source_page_status,
-                    COALESCE((i.metadata ->> 'source_checked_at')::TIMESTAMPTZ, i.rights_checked_at) AS last_check_at
+                    COALESCE((i.metadata ->> 'source_checked_at')::TIMESTAMPTZ, i.rights_checked_at) AS last_check_at,
+                    source.source_status
                 FROM image_observations i JOIN usage_events u ON u.id = i.usage_id
+                CROSS JOIN LATERAL (SELECT {_IMAGE_SOURCE_STATUS} AS source_status) AS source
                 WHERE (CAST(:tenant AS UUID) IS NULL OR i.tenant_id = :tenant) AND i.retrieved_at >= :start
                     AND (CAST(:rights AS TEXT) IS NULL OR i.rights_status = :rights)
+                    AND (CAST(:source AS TEXT) IS NULL OR source.source_status = :source)
                     AND (CAST(:after AS TIMESTAMPTZ) IS NULL OR (i.retrieved_at, i.id) < (:after, :id))
                 ORDER BY i.retrieved_at DESC, i.id DESC LIMIT :limit
             """),
                         {
                             **params,
                             "rights": rights_status,
+                            "source": source_status,
                             "after": after,
                             "id": identifier,
                             "limit": limit + 1,
@@ -371,9 +398,15 @@ class UsageReports:
                 .mappings()
                 .all()
             )
+        rights_counts: Counter[str] = Counter()
+        source_counts: Counter[str] = Counter()
+        for row in counts:
+            rights_counts[row["rights_status"]] += row["count"]
+            source_counts[row["source_status"]] += row["count"]
         boundary = rows[limit - 1] if len(rows) > limit else None
         return {
-            "counts": {row["rights_status"]: row["count"] for row in counts},
+            "counts": dict(rights_counts),
+            "source_counts": dict(source_counts),
             "items": [dict(row) for row in rows[:limit]],
             "next_cursor": _cursor({"created_at": boundary["retrieved_at"], "id": boundary["id"]})
             if boundary

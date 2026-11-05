@@ -14,6 +14,7 @@ export function AdminOverview() {
   if (resource.pending) return <Loading />;
   if (!resource.data) return <Failure reason={resource.error} retry={resource.reload} />;
   const overview = resource.data;
+  const queue = overview.job_queue;
   return (
     <>
       <div className="actions">
@@ -30,6 +31,21 @@ export function AdminOverview() {
         ...resourceMetrics(overview.totals),
       ]} />
       <Trend series={overview.series} />
+      <section className="panel">
+        <h2>队列压力</h2>
+        {queue ? <>
+          <Metrics values={[
+            ["排队中", queue.queued, "个"],
+            ["运行中", queue.running, "个"],
+            ["正在取消", queue.cancelling, "个"],
+            ["排队重试", queue.queued_for_retry, "个"],
+          ]} />
+          <p className="muted">{queue.oldest_queued_at
+            ? <>最早等待开始于 <time dateTime={queue.oldest_queued_at}>{dateTime(queue.oldest_queued_at)}</time></>
+            : "当前没有排队任务。"}</p>
+        </> : <Empty>队列指标暂不可用。</Empty>}
+        <Link href="/admin/jobs">查看任务与队列</Link>
+      </section>
       <section className="panel">
         <h2>最近异常</h2>
         {failures.pending && <Loading />}

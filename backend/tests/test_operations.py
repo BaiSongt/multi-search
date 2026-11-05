@@ -145,7 +145,9 @@ async def test_request_trace_reuses_scoped_request_permissions(role):
 
 
 @pytest.mark.parametrize("role", list(Role))
-async def test_provider_and_quota_reports_enforce_their_distinct_scopes(role):
+async def test_provider_and_quota_reports_enforce_their_distinct_scopes(role, monkeypatch):
+    origin = "http://127.0.0.1:3000"
+    monkeypatch.setenv("MULTISEARCH_PUBLIC_CONSOLE_URL", origin)
     actor = _actor(role)
     tenant_id = uuid4()
     calls = []
@@ -165,9 +167,10 @@ async def test_provider_and_quota_reports_enforce_their_distinct_scopes(role):
     app.include_router(admin_router)
     quota_path = f"/api/v1/admin/tenants/{tenant_id}/quota-usage"
     async with AsyncClient(transport=ASGITransport(app), base_url="http://127.0.0.1") as client:
-        assert (
-            await client.get(quota_path, headers={"Authorization": "Bearer search-key"})
-        ).status_code == 401
+        for path in (quota_path, "/api/v1/admin/providers"):
+            assert (
+                await client.get(path, headers={"Authorization": "Bearer search-key"})
+            ).status_code == 401
         client.cookies.set(SESSION_COOKIE, "session-only")
         providers = await client.get("/api/v1/admin/providers")
         quota = await client.get(quota_path, params={"limit": 1, "cursor": "test-cursor"})
@@ -176,9 +179,16 @@ async def test_provider_and_quota_reports_enforce_their_distinct_scopes(role):
             assert providers.json()["providers"][0]["usage"] == {"runs": 3}
             assert quota.json()["keys"]["items"] == [{"key_mask": "msk_abcd…1234"}]
             assert calls == [("providers", None), ("quota_usage", tenant_id, 1, "test-cursor")]
-        elif role == Role.OPERATIONS_ADMIN:
+        elif role in {Role.OPERATIONS_ADMIN, Role.AUDITOR}:
             assert providers.status_code == 200 and quota.status_code == 403
             assert calls == [("providers", actor.tenant_id)]
+            forbidden = await client.patch(
+                "/api/v1/admin/providers/sample",
+                json={"enabled": False},
+                headers={"Origin": origin, "X-CSRF-Token": actor.csrf_token},
+            )
+            assert forbidden.status_code == 403
+            assert forbidden.json()["message"] == "当前角色无权执行此操作"
         else:
             assert providers.status_code == quota.status_code == 403
             assert not calls

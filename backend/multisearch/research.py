@@ -549,7 +549,9 @@ def _restore(claim: Claim, budget: ResearchBudget, plans: list[ResearchStep]) ->
         budget.max_llm_tokens, max(0, reserved.get("llm_tokens_reserved", 0))
     )
     if state.model_reserved and (
-        not previous or previous.usage.llm_tokens_reserved < state.model_reserved
+        not previous
+        or previous.usage.llm_tokens_reserved < state.model_reserved
+        or not previous.usage.llm_usage_known
     ):
         state.input_tokens = state.output_tokens = None
         state.warn("MODEL_INTERRUPTED")
@@ -831,15 +833,7 @@ class ResearchOrchestrator:
                 return True
             state.model_reserved = plan.reservation
             state.input_tokens = state.output_tokens = None
-            if not await self._checkpoint(
-                claim,
-                state,
-                budget,
-                planned,
-                "synthesizing",
-                deadline,
-                persist=False,
-            ):
+            if not await self._checkpoint(claim, state, budget, planned, "synthesizing", deadline):
                 return False
             async with asyncio.timeout_at(deadline):
                 generation = await self.model.generate(plan, deadline)

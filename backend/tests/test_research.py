@@ -404,11 +404,19 @@ async def test_model_usage_is_reported_and_invalid_references_do_not_become_find
     class Model:
         async def prepare(self, prompt, available, deadline):
             assert "evidence-valid" in prompt and available == 3000
+            _, before = store.checkpoints[-1]
+            assert before["usage"]["llm_usage_known"] is True
+            assert before["usage"]["llm_tokens_reserved"] == 0
+            assert Decimal(before["usage"]["estimated_cost"]) == 0
             return ModelPlan(500, 200, {})
 
         async def generate(self, plan, deadline):
-            progress, _ = store.checkpoints[-1]
+            progress, snapshot = store.checkpoints[-1]
             assert progress.research_budget["llm_tokens_reserved"] == plan.reservation == 700
+            assert snapshot["usage"]["llm_tokens_reserved"] == plan.reservation
+            assert snapshot["usage"]["llm_usage_known"] is False
+            assert snapshot["usage"]["llm_tokens"] is None
+            assert snapshot["usage"]["estimated_cost"] is None
             return ModelGeneration(
                 json.dumps(
                     {
@@ -441,6 +449,54 @@ async def test_model_usage_is_reported_and_invalid_references_do_not_become_find
     assert outcome.result["usage"]["cost_currency"] == "USD"
     findings = outcome.result["model_findings"]
     assert len(findings) == 1 and findings[0]["verification_status"] == "model_synthesis_unverified"
+
+
+async def test_recovered_model_checkpoint_keeps_unknown_usage_without_generating_again():
+    store = Store()
+    source, evidence = _record("valid", "first.example.org", "a")
+    search = Search(store, [_response(Mode.EVIDENCE, [source], [evidence], attempted=1)])
+    generating = asyncio.Event()
+
+    class Model:
+        async def prepare(self, *_):
+            return ModelPlan(500, 200, {})
+
+        async def generate(self, *_):
+            generating.set()
+            await asyncio.Event().wait()
+
+    pricing = ResearchPricing(
+        currency="USD", input_per_million_tokens="2.5", output_per_million_tokens=10
+    )
+    claim = _claim(_request(max_search_rounds=1, max_llm_tokens=3000))
+    work = asyncio.create_task(
+        ResearchOrchestrator(search, store, Model(), pricing=pricing).run(claim)
+    )
+    try:
+        await asyncio.wait_for(generating.wait(), 5)
+        progress, snapshot = store.checkpoints[-1]
+    finally:
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+
+    class UnusedModel:
+        async def prepare(self, *_):
+            pytest.fail("model reservation cannot be reused after an interruption")
+
+    recovered = replace(claim, progress=progress, checkpoint=snapshot)
+    resumed_store = Store()
+    resumed_search = Search(resumed_store, [])
+    outcome = await ResearchOrchestrator(
+        resumed_search, resumed_store, UnusedModel(), pricing=pricing
+    ).run(recovered)
+    assert outcome.status == JobStatus.PARTIAL
+    assert outcome.result["warnings"] == ["MODEL_INTERRUPTED"]
+    assert not resumed_search.calls and not resumed_store.checkpoints
+    assert outcome.result["evidence_records"] == snapshot["evidence_records"]
+    assert outcome.result["usage"] == snapshot["usage"]
+    assert outcome.result["usage"]["llm_tokens_reserved"] == 700
+    assert outcome.result["usage"]["llm_usage_known"] is False
+    assert outcome.result["usage"]["estimated_cost"] is None
 
 
 @pytest.mark.parametrize("untrusted_limit", [True, False])

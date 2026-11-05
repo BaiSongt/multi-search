@@ -200,19 +200,23 @@ async function researchJob(page, csrf) {
   };
   const result = {
     mode: "deep", summary: "完成两轮检索并保留一条可定位证据。", planned_rounds: 2, results: [],
+    evidence_coverage_ratio: 0.25,
     rounds: [
       { number: 1, step: "original", mode: "evidence", status: "completed", elapsed_ms: 100, result_count: 1,
-        evidence_refs: [record.evidence_id], error_code: null },
+        source_count: 1, evidence_coverage_ratio: 1, evidence_refs: [record.evidence_id], error_code: null },
       { number: 2, step: "limitations", mode: "evidence", status: "partial", elapsed_ms: 200, result_count: 0,
-        evidence_refs: [], error_code: null },
+        source_count: 0, evidence_coverage_ratio: null, evidence_refs: [], error_code: null },
     ],
     evidence_records: [record], warnings: ["第二轮仅返回部分结果。"], comparisons: [],
     findings: [{ title: record.title, origin_url: origin, excerpt: record.evidence_text,
       evidence_refs: [record.evidence_id], verification_status: "content_extracted" }],
     model_findings: [{ claim: "模型综合结论", evidence_refs: [record.evidence_id], verification_status: "model_synthesis_unverified" }],
     budget, usage: { search_rounds: 2, pages_attempted: null, pages_charged: 3, pages_fetched: 1,
-      image_metadata_fetches: 0, image_metadata_charged: 0, llm_tokens: null, llm_tokens_reserved: 500 },
+      image_metadata_fetches: 0, image_metadata_charged: 0, llm_tokens: 48, llm_tokens_reserved: 500,
+      llm_input_tokens: 36, llm_output_tokens: 12, estimated_cost: "0.000072", cost_currency: "USD" },
   };
+  const pendingModel = { ...result, model_findings: [], usage: { ...result.usage,
+    llm_tokens: null, llm_input_tokens: null, llm_output_tokens: null, estimated_cost: null } };
   function job(id, status, stage, completed, report = null) {
     return { job_id: id, tenant_id: publicId, kind: "research", status, created_at: "2026-11-05T00:00:00Z",
       updated_at: "2026-11-05T00:00:01Z", deadline_at: "2026-11-05T00:00:50Z", attempts: 1, max_attempts: 3,
@@ -235,6 +239,7 @@ async function researchJob(page, csrf) {
 
   let available = false;
   let publicPolls = 0;
+  let synthesizingPublic = false;
   let finishPublic = false;
   let cancelled = false;
   const capabilityRoute = "**/gateway/capabilities";
@@ -279,7 +284,10 @@ async function researchJob(page, csrf) {
       } else {
         assert.ok(path.endsWith(`/${publicId}`));
         publicPolls += 1;
-        await route.fulfill({ json: finishPublic ? job(publicId, "partial", "completed", 2, result) : job(publicId, "running", "searching", 1) });
+        const state = finishPublic ? job(publicId, "partial", "completed", 2, result)
+          : synthesizingPublic ? job(publicId, "running", "synthesizing", 2, pendingModel)
+          : job(publicId, "running", "searching", 1);
+        await route.fulfill({ json: state });
       }
     }
   });
@@ -306,11 +314,23 @@ async function researchJob(page, csrf) {
     await task.getByText("最多 3", { exact: true }).waitFor();
     await task.getByText(traceId, { exact: true }).waitFor();
     await task.getByText("research-request-fixture", { exact: true }).waitFor();
+    synthesizingPublic = true;
+    await task.getByText("未报告 / 500", { exact: true }).waitFor();
+    assert.equal(await task.getByText("模型总费用估算", { exact: true }).locator("xpath=following-sibling::dd[1]").textContent(), "未报告");
     finishPublic = true;
     await task.getByText("部分完成", { exact: true }).waitFor();
-    await task.getByText("未报告 / 500", { exact: true }).waitFor();
-    assert.ok(publicPolls >= 2);
+    await task.getByText("48 / 500", { exact: true }).waitFor();
+    await task.getByText("36 / 12", { exact: true }).waitFor();
+    await task.getByText("0.000072 USD", { exact: true }).waitFor();
+    assert.ok(publicPolls >= 3);
     await report.getByText(result.summary).waitFor();
+    await report.getByText("25%", { exact: true }).waitFor();
+    await report.getByText("检索轮次 · 2 / 2", { exact: true }).click();
+    const firstRound = report.getByRole("listitem").filter({ hasText: "第 1 轮" });
+    const secondRound = report.getByRole("listitem").filter({ hasText: "第 2 轮" });
+    await firstRound.getByText("100%", { exact: true }).waitFor();
+    await firstRound.getByText("1", { exact: true }).waitFor();
+    await secondRound.getByText("未报告", { exact: true }).waitFor();
     await report.getByRole("heading", { name: "模型综合 · 未核验" }).waitFor();
     assert.equal(await report.getByRole("link", { name: record.title }).getAttribute("href"), origin);
     await report.getByRole("button", { name: "证据 · 研究来源" }).first().click();
@@ -481,7 +501,89 @@ function traceFixture(actor, id, traceId, sql) {
   assert.equal(result.status, 0, "无法准备或清理请求追踪测试记录");
 }
 
-async function verifyRequestTrace(page, developer, developerSession, operations, operationsSession) {
+const imageQualitySeed = `
+INSERT INTO image_observations (
+  id, usage_id, tenant_id, source_page_url, original_url, rights_status, source_page_verified, retrieved_at, metadata
+)
+SELECT gen_random_uuid(), :'usage_id'::UUID, :'tenant_id'::UUID, source,
+  'https://images.example.org/original.jpg', rights, verified, now(), details::JSONB
+FROM (VALUES
+  (NULL, 'unknown', false, '{}'),
+  ('https://images.example.org/removed', 'unknown', false, '{"source_page_status":"invalid"}'),
+  ('https://images.example.org/timed-out', 'unknown', false, '{"source_verification":"failed"}'),
+  ('https://images.example.org/verified', 'verified_license', true, '{}'),
+  ('https://images.example.org/older', 'unknown', false, '{}'),
+  ('https://images.example.org/unmatched', 'unknown', false, '{"source_page_status":"checked"}')
+) AS fixtures(source, rights, verified, details);`;
+
+async function verifyImageQuality(page, developer, actor, operations) {
+  const path = "/gateway/admin/images";
+  const usageId = randomUUID();
+  const traceId = randomBytes(16).toString("hex");
+  const requestId = `trace-browser-${usageId}`;
+  const ownBefore = await operations.request.get(path);
+  assert.equal(ownBefore.status(), 200);
+  try {
+    traceFixture(actor, usageId, traceId, `BEGIN;${traceSeed}${imageQualitySeed}COMMIT;`);
+    assert.equal((await developer.request.get(path)).status(), 403);
+    assert.equal((await page.request.get(path, { params: { source_status: "unknown" } })).status(), 422);
+
+    const all = await page.request.get(path);
+    assert.equal(all.status(), 200);
+    const report = await all.json();
+    assert.deepEqual(report.items.filter((row) => row.request_id === requestId)
+      .map((row) => row.source_status).sort(), ["failed", "invalid", "missing", "not_matched", "unverified", "verified"]);
+    for (const status of ["failed", "invalid", "missing"]) assert.ok(report.source_counts[status] >= 1);
+    const foreign = await operations.request.get(path, { params: { source_status: "failed" } });
+    assert.equal(foreign.status(), 200);
+    const scoped = await foreign.json();
+    assert.deepEqual(scoped.source_counts, (await ownBefore.json()).source_counts);
+    assert.ok(!scoped.items.some((row) => row.request_id === requestId));
+
+    await page.goto("/admin/images");
+    await waitForTitle(page, "图片来源质量");
+    await page.getByText(/授权未知比例.*许可核验比例/).waitFor();
+    await page.getByLabel("许可状态", { exact: true }).selectOption("unknown");
+    const filtered = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === path && url.searchParams.get("source_status") === "failed"
+        && url.searchParams.get("rights_status") === "unknown";
+    });
+    await page.getByLabel("来源状态", { exact: true }).selectOption("failed");
+    const response = await filtered;
+    assert.equal(response.status(), 200);
+    const { items } = await response.json();
+    assert.ok(items.length && items.every((row) => row.source_status === "failed" && row.rights_status === "unknown"));
+    const row = page.getByRole("row").filter({ hasText: requestId });
+    await row.getByText("来源核验失败", { exact: true }).waitFor();
+    await row.getByRole("button", { name: "查看详情" }).click();
+    const dialog = page.getByRole("dialog", { name: "图片质量记录" });
+    await dialog.getByText("来源核验失败", { exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+
+    const legacyRoute = "**/gateway/admin/images?*";
+    await page.route(legacyRoute, (route) => route.fulfill({ json: {
+      counts: report.counts,
+      items: report.items.filter((item) => item.request_id === requestId)
+        .map(({ source_status, ...item }) => item),
+      next_cursor: null,
+    } }));
+    try {
+      await page.reload();
+      const legacyTable = page.getByRole("region", { name: "图片来源和核验记录" });
+      await legacyTable.getByText("来源页失效", { exact: true }).waitFor();
+      await legacyTable.getByText("未匹配原图", { exact: true }).waitFor();
+      assert.ok(await page.getByLabel("来源状态", { exact: true }).isDisabled());
+    } finally {
+      await page.unroute(legacyRoute);
+    }
+  } finally {
+    traceFixture(actor, usageId, traceId, "DELETE FROM usage_events WHERE id = :'usage_id'::UUID AND tenant_id = :'tenant_id'::UUID;");
+  }
+}
+
+async function verifyRequestTrace(page, developer, developerSession, operations, operationsSession, auditor) {
   const id = randomUUID();
   const traceId = randomBytes(16).toString("hex");
   const ownId = randomUUID();
@@ -499,11 +601,14 @@ async function verifyRequestTrace(page, developer, developerSession, operations,
     assert.deepEqual((await own.json()).provider_runs, []);
 
     const ownProviders = await operations.request.get("/gateway/admin/providers");
+    const auditorProviders = await auditor.request.get("/gateway/admin/providers");
     const platformProviders = await page.request.get("/gateway/admin/providers");
     assert.equal(ownProviders.status(), 200);
+    assert.equal(auditorProviders.status(), 200);
     assert.equal(platformProviders.status(), 200);
     const searxng = (response) => response.providers.find((provider) => provider.provider_id === "searxng").usage;
     assert.equal(searxng(await ownProviders.json()).runs, 0);
+    assert.equal(searxng(await auditorProviders.json()).runs, 0);
     assert.ok(searxng(await platformProviders.json()).runs >= 1);
 
     await page.goto("/admin/requests");
@@ -590,6 +695,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
   const developer = await browser.newContext({ baseURL: base.origin, viewport: { width: 1280, height: 850 }, timezoneId: "Asia/Hong_Kong" });
   const admin = await browser.newContext({ baseURL: base.origin });
   const operations = await browser.newContext({ baseURL: base.origin });
+  const auditor = await browser.newContext({ baseURL: base.origin });
   const developerPage = await developer.newPage();
   const adminPage = await admin.newPage();
   const errors = [];
@@ -609,6 +715,13 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     await signIn(adminPage, adminAccount);
     await waitForTitle(adminPage, "服务总览");
     adminSession = await session(admin);
+    await adminPage.getByRole("heading", { name: "队列压力" }).waitFor();
+    await adminPage.getByRole("link", { name: "查看任务与队列" }).waitFor();
+    const overview = await admin.request.get("/gateway/admin/overview");
+    assert.equal(overview.status(), 200);
+    const { active_jobs: activeJobs, job_queue: queue } = await overview.json();
+    assert.equal(activeJobs, queue.queued + queue.running + queue.cancelling);
+    assert.ok(queue.queued_for_retry <= queue.queued);
 
     await developerPage.goto("/admin/providers");
     await developerPage.waitForURL("**/auth?next=*");
@@ -626,6 +739,23 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     assert.equal(operationsLogin.status(), 200);
     const operationsSession = await session(operations);
     tenantIds.push(operationsSession.tenant_id);
+    const auditorAccount = provision("auditor");
+    fixtureAccounts.push(auditorAccount);
+    const auditorLogin = await auditor.request.post("/gateway/auth/login", {
+      data: auditorAccount, headers: { Origin: base.origin },
+    });
+    assert.equal(auditorLogin.status(), 200);
+    const auditorSession = await session(auditor);
+    tenantIds.push(auditorSession.tenant_id);
+    const auditorPage = await auditor.newPage();
+    await auditorPage.goto("/admin");
+    await auditorPage.getByRole("link", { name: "Provider 管理" }).click();
+    await auditorPage.getByRole("region", { name: "Provider 状态和运行指标" }).waitFor();
+    assert.equal(await auditorPage.getByRole("columnheader", { name: "操作" }).count(), 0);
+    assert.equal((await auditor.request.patch("/gateway/admin/providers/searxng", {
+      data: { enabled: false },
+      headers: { Origin: base.origin, "X-CSRF-Token": auditorSession.csrf_token },
+    })).status(), 403);
     const cookie = (await developer.cookies()).find((item) => item.name === "multisearch_session");
     assert.ok(cookie?.httpOnly && cookie.sameSite === "Lax");
     assert.equal((await developer.request.post("/gateway/auth/refresh", {
@@ -693,7 +823,8 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     if (await searxng.getByText(/^web \/ image ·/).count()) {
       await searxng.getByText("候选图片过滤", { exact: true }).waitFor();
     }
-    await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession);
+    await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession, auditor);
+    await verifyImageQuality(adminPage, developer, developerSession, operations);
     await verifyQuotaUsage(adminPage, developer, operations, developerAccount, developerSession.tenant_id);
     await adminPage.goto("/admin/tenants");
     await adminPage.getByRole("button", { name: "新建租户" }).click();

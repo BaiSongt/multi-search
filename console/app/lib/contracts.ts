@@ -53,7 +53,8 @@ export function canView(role: Role, workspace: Workspace, section: string) {
   }
   if (role === "platform_admin") return true;
   if (role === "operations_admin") return ["overview", "providers", "requests", "jobs", "routing", "images", "cache", "audit", "settings"].includes(section);
-  return (role === "auditor" || role === "tenant_admin") && section === "audit";
+  if (role === "auditor") return section === "audit" || section === "providers";
+  return role === "tenant_admin" && section === "audit";
 }
 
 export function workspaceHome(role: Role) {
@@ -151,6 +152,13 @@ export type Overview = {
   p95_ms: number | null;
   image_source_coverage: number | null;
   active_jobs: number | null;
+  job_queue?: {
+    queued: number;
+    running: number;
+    cancelling: number;
+    queued_for_retry: number;
+    oldest_queued_at: string | null;
+  };
 };
 
 type ProviderLocaleFilter = "unsupported" | "upstream_best_effort" | "upstream_requires_language" | "upstream_requires_region";
@@ -282,6 +290,7 @@ type ResultBase = {
 
 export type SearchResult = (ResultBase & { kind: "text" }) | (ResultBase & { kind: "image"; image: Attribution });
 export type ImageResult = Extract<SearchResult, { kind: "image" }>;
+export type ImageSourceStatus = "missing" | "invalid" | "failed" | "not_matched" | "unverified" | "verified";
 export type ImageReportRow = {
   id: string;
   request_id: string;
@@ -292,11 +301,15 @@ export type ImageReportRow = {
   rights_status: RightsStatus;
   source_page_verified: boolean;
   source_page_status?: string | null;
+  source_status?: ImageSourceStatus;
   last_check_at?: string | null;
   retrieved_at: string;
 };
 
-export type ImageReport = Page<ImageReportRow> & { counts: Record<string, number> };
+export type ImageReport = Page<ImageReportRow> & {
+  counts: Partial<Record<RightsStatus, number>>;
+  source_counts?: Partial<Record<ImageSourceStatus, number>>;
+};
 export type EvidenceRecord = {
   evidence_id: string;
   result_id: string | null;
@@ -321,6 +334,7 @@ export type ResearchResult = {
   mode: "deep";
   summary: string;
   planned_rounds: number;
+  evidence_coverage_ratio: number | null;
   rounds: {
     number: number;
     step: string;
@@ -328,6 +342,8 @@ export type ResearchResult = {
     status: "completed" | "partial" | "failed" | "interrupted";
     elapsed_ms: number;
     result_count: number;
+    source_count: number;
+    evidence_coverage_ratio: number | null;
     evidence_refs: string[];
     error_code: string | null;
   }[];
@@ -344,8 +360,12 @@ export type ResearchResult = {
     pages_fetched: number;
     image_metadata_fetches: number | null;
     image_metadata_charged: number;
+    llm_input_tokens: number | null;
+    llm_output_tokens: number | null;
     llm_tokens: number | null;
     llm_tokens_reserved: number;
+    estimated_cost: string | null;
+    cost_currency: string | null;
   };
   warnings: string[];
 };

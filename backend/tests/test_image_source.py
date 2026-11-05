@@ -1,10 +1,16 @@
+import asyncio
+import json
 from datetime import UTC, datetime
+from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 
-from multisearch.contracts import ImageAttribution, ImageSearchResult, Source
+from multisearch.contracts import ImageAttribution, ImageSearchResult, SearchRequest, Source
+from multisearch.evidence_store import _image_metadata
 from multisearch.image_source import PublicImageSourceResolver
 from multisearch.safe_fetch import FetchedPage, FetchError
+from multisearch.search import SearchService
 
 PAGE = "https://source.example/path/page.html"
 ORIGINAL = "https://source.example/path/original.jpg"
@@ -102,3 +108,40 @@ async def test_only_definitive_missing_source_is_invalid(status, code, expected)
     assert result.image.source_page_status == expected
     assert (result.image.source_checked_at is not None) == (expected == "invalid")
     assert result.image.rights_status == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("warnings", "verification"),
+    [
+        (["image_source_verification_failed", "omitted_detail"], "failed"),
+        (["image_source_not_matched"], "not_matched"),
+        ([], None),
+    ],
+)
+def test_image_observation_persists_only_source_verification_outcome(warnings, verification):
+    result = hit().model_copy(update={"warnings": warnings})
+    metadata = json.loads(_image_metadata(result))
+    assert metadata.pop("source_verification", None) == verification
+    assert metadata == result.image.model_dump(mode="json")
+
+
+async def test_only_attempted_image_verification_is_recorded_on_outer_timeout():
+    class Unavailable:
+        async def resolve(self, *args, **kwargs):
+            raise TimeoutError
+
+    result = hit()
+    request = SearchRequest(query="fixture")
+    service = SimpleNamespace(attribution_slots=asyncio.Semaphore(), image_source=Unavailable())
+    timed_out, attempts = await SearchService._resolve_image(
+        service, result, monotonic() + 1, False, request
+    )
+    assert attempts == 1
+    assert timed_out.image.source_page_status == "unverified"
+    assert "image_source_verification_failed" in timed_out.warnings
+
+    service.attribution_slots = asyncio.Semaphore(0)
+    not_started, attempts = await SearchService._resolve_image(
+        service, result, monotonic(), False, request
+    )
+    assert attempts == 0 and not_started == result

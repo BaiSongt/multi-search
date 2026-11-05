@@ -108,7 +108,7 @@ async def overview(request: Request, actor: SessionUser):
 
 @router.get("/admin/providers")
 async def providers(request: Request, actor: SessionUser):
-    _require(actor.role, OPS)
+    _require(actor.role, OPS | {Role.AUDITOR})
     tenant = None if actor.role == Role.PLATFORM_ADMIN else actor.tenant_id
     metrics = await request.app.state.reports.providers(tenant)
     return {

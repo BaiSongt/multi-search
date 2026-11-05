@@ -193,6 +193,7 @@ class JobStore:
 
     async def _recover(self, connection: AsyncConnection) -> None:
         # 过期租约可重领。任务期限或尝试次数耗尽时，原子保存终态和计量状态。
+        # 旧 Worker 可能只在任务进度中写入模型预留，终结时同步旧报告的未知用量。
         await connection.execute(
             text("""
             WITH expired AS (
@@ -207,7 +208,9 @@ class JobStore:
                     CASE
                     WHEN status = 'cancelling' THEN 'JOB_CANCELLED'
                     WHEN deadline_at <= now() THEN 'TIME_BUDGET_EXCEEDED'
-                    ELSE 'WORKER_INTERRUPTED' END AS error_code
+                    ELSE 'WORKER_INTERRUPTED' END AS error_code,
+                    COALESCE((progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0)
+                        AS model_reservation
                 FROM search_jobs
                 WHERE (status = 'queued' AND deadline_at <= now())
                     OR (status IN ('running','cancelling') AND lease_expires_at <= now())
@@ -217,12 +220,23 @@ class JobStore:
                     lease_token = NULL, lease_expires_at = NULL,
                     progress = jsonb_set(j.progress, '{stage}', to_jsonb(e.next_status)),
                     payload = CASE WHEN e.next_status = 'queued' THEN j.payload ELSE '{}'::JSONB END,
-                    result = CASE WHEN e.next_status = 'cancelled' THEN NULL ELSE j.result END,
+                    result = CASE WHEN e.next_status = 'cancelled' THEN NULL
+                        WHEN jsonb_typeof(j.result -> 'usage') = 'object'
+                            AND e.model_reservation > COALESCE(
+                                (j.result #>> '{usage,llm_tokens_reserved}')::INTEGER, 0
+                            )
+                        THEN jsonb_set(j.result, '{usage}', (j.result -> 'usage') || jsonb_build_object(
+                            'llm_input_tokens', NULL, 'llm_output_tokens', NULL, 'llm_tokens', NULL,
+                            'llm_tokens_reserved', e.model_reservation,
+                            'llm_usage_known', FALSE, 'estimated_cost', NULL
+                        ))
+                        ELSE j.result END,
                     error = CASE WHEN e.next_status <> 'queued' THEN
                         jsonb_build_object('code', e.error_code, 'message', '任务已到期、取消或执行中断')
                         ELSE NULL END
                 FROM expired e WHERE j.id = e.id
-                RETURNING j.id, j.tenant_id, j.status, j.progress, j.result, e.error_code
+                RETURNING j.id, j.tenant_id, j.status, j.progress, j.result, e.error_code,
+                    e.model_reservation
             ), evidence AS (
                 INSERT INTO evidence_records (tenant_id, evidence_id, usage_id, record)
                 SELECT r.tenant_id, source.record ->> 'evidence_id', r.id, source.record
@@ -235,8 +249,8 @@ class JobStore:
             UPDATE usage_events u SET status = r.status, code = r.error_code,
                 pages_fetched = GREATEST(u.pages_fetched, COALESCE((r.progress ->> 'pages_fetched')::INTEGER, 0)),
                 llm_tokens = GREATEST(u.llm_tokens, COALESCE((r.progress ->> 'llm_tokens')::INTEGER, 0)),
-                llm_tokens_reserved = COALESCE((r.progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0),
-                llm_usage_unknown = COALESCE((r.progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0) > 0
+                llm_tokens_reserved = r.model_reservation,
+                llm_usage_unknown = r.model_reservation > 0
                     AND NOT COALESCE((r.result #>> '{usage,llm_usage_known}')::BOOLEAN, FALSE),
                 estimated_cost = (r.result #>> '{usage,estimated_cost}')::NUMERIC,
                 cost_currency = r.result #>> '{usage,cost_currency}'
@@ -322,9 +336,15 @@ class JobStore:
                     UPDATE search_jobs SET status = 'failed', updated_at = now(), payload = '{}'::JSONB,
                         progress = jsonb_set(progress, '{stage}', '"failed"'::JSONB),
                         error = '{"code":"JOB_PRINCIPAL_INACTIVE","message":"任务身份已停用"}'::JSONB
-                    WHERE id = :id RETURNING id
+                    WHERE id = :id RETURNING id, progress, result
                 )
-                UPDATE usage_events SET status = 'failed', code = 'JOB_PRINCIPAL_INACTIVE'
+                UPDATE usage_events SET status = 'failed', code = 'JOB_PRINCIPAL_INACTIVE',
+                    llm_tokens_reserved = COALESCE(
+                        (stopped.progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0
+                    ),
+                    llm_usage_unknown = COALESCE(
+                        (stopped.progress #>> '{research_budget,llm_tokens_reserved}')::INTEGER, 0
+                    ) > 0 AND NOT COALESCE((stopped.result #>> '{usage,llm_usage_known}')::BOOLEAN, FALSE)
                 FROM stopped WHERE usage_events.id = stopped.id
             """),
                 {"id": job_id},
@@ -426,9 +446,10 @@ class JobStore:
             )
             if row is None:
                 return False
-            result = (outcome.result or {}) if row["status"] != "cancelled" else {}
+            outcome_result = outcome.result or {}
+            result = outcome_result if row["status"] != "cancelled" else {}
             results = _RESULTS.validate_python(result.get("results", []))
-            usage = result.get("usage", {})
+            usage = outcome_result.get("usage", {})
             reserved = (row["progress"].get("research_budget") or {}).get("llm_tokens_reserved", 0)
             cost = usage.get("estimated_cost")
             await connection.execute(
@@ -561,11 +582,16 @@ class JobStore:
                 .one()
             )
             if state == "cancelled":
+                reserved = (row["progress"].get("research_budget") or {}).get(
+                    "llm_tokens_reserved", 0
+                )
                 await connection.execute(
                     text("""
-                    UPDATE usage_events SET status = 'cancelled', code = 'JOB_CANCELLED' WHERE id = :id
+                    UPDATE usage_events SET status = 'cancelled', code = 'JOB_CANCELLED',
+                        llm_tokens_reserved = :reserved, llm_usage_unknown = :usage_unknown
+                    WHERE id = :id
                 """),
-                    {"id": job_id},
+                    {"id": job_id, "reserved": reserved, "usage_unknown": reserved > 0},
                 )
             return JobView.model_validate(dict(row))
 

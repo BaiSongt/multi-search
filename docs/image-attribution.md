@@ -14,7 +14,7 @@
 | `image.license_name`、`image.license_url` | 许可证名称与声明链接 |
 | `image.rights_status` | `unknown`、`declared_unverified`、`verified_license` 或 `conflict` |
 | `image.rights_checked_at`、`image.rights_evidence_url` | 许可核验时间与证据链接 |
-| `image.source_page_verified` | 来源页是否已经核查 |
+| `image.source_page_verified` | 来源页是否已核对并匹配原图 |
 | `image.source_page_status`、`image.source_checked_at` | 来源页访问状态与最近核查时间 |
 | `image.asset_hash`、`image.asset_hash_algorithm`、`image.asset_hash_source` | 上游报告的原图哈希、算法与提供者 |
 
@@ -27,3 +27,5 @@
 `min_width`、`min_height`、`orientation` 基于上游尺寸元数据筛选。缺少所需尺寸的候选无法满足条件。图片类型取决于引擎支持，对无法执行的筛选返回告警。结果不因去重或预览而触发服务端下载原图。
 
 L3 还可以通过安全抓取检查普通 HTML 来源页。原图必须与页面明确的图片引用一致才设置 `source_page_verified`。404 或 410 记为失效，网络限制与超时保留未核查状态。普通来源页的链接关联不会提升版权状态。Commons 提供的 SHA-1 以 `asset_hash_source=wikimedia_commons` 标明，平台无需重新下载原图。
+
+管理台图片来源质量页将缺失、失效、核验失败、未匹配原图、待核查和已核查分开显示。核验受网络或策略限制时计入核验失败。汇总按可见租户和最近 30 个 UTC 自然日内已返回的图片记录计算。旧记录按已保存的来源状态归类。

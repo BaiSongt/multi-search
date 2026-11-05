@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { callApi } from "./lib/api";
 import type { EvidenceRecord, JobAccepted, JobStatus, ResearchBudget, ResearchJobView, ResearchResult, SearchResult } from "./lib/contracts";
-import { CopyId, dateTime, ExternalLink, Failure } from "./ui";
+import { CopyId, dateTime, ExternalLink, Failure, formatNumber } from "./ui";
 
 const STATUS: Record<JobStatus, string> = {
   queued: "排队中", running: "运行中", cancelling: "正在取消", completed: "完成",
@@ -23,6 +23,16 @@ function isActive(status: JobStatus) {
   return status === "queued" || status === "running" || status === "cancelling";
 }
 
+function evidenceCoverage(ratio: number | null) {
+  return ratio == null ? "未报告" : `${formatNumber(ratio * 100)}%`;
+}
+
+function estimatedCost(usage: ResearchResult["usage"]) {
+  if (usage.llm_tokens === 0 && usage.llm_tokens_reserved === 0) return "0（未调用模型）";
+  if (usage.estimated_cost == null) return usage.llm_tokens == null ? "未报告" : "未配置模型单价";
+  return usage.cost_currency ? `${usage.estimated_cost} ${usage.cost_currency}` : usage.estimated_cost;
+}
+
 function Budget({ budget, usage }: { budget: ResearchBudget; usage?: ResearchResult["usage"] }) {
   return (
     <details open>
@@ -36,7 +46,11 @@ function Budget({ budget, usage }: { budget: ResearchBudget; usage?: ResearchRes
         <dt>图片来源核验额度</dt><dd>{usage ? `${usage.image_metadata_charged} / ` : "最多 "}{budget.max_image_metadata_fetches}</dd>
         {usage && <><dt>图片来源核验尝试</dt><dd>{usage.image_metadata_fetches ?? "未报告"}</dd></>}
         <dt>模型 Token 上限</dt><dd>{budget.max_llm_tokens}</dd>
-        {usage && <><dt>模型 Token 实际 / 预留</dt><dd>{usage.llm_tokens ?? "未报告"} / {usage.llm_tokens_reserved}</dd></>}
+        {usage && <>
+          <dt>模型 Token 实际 / 预留</dt><dd>{usage.llm_tokens ?? "未报告"} / {usage.llm_tokens_reserved}</dd>
+          <dt>模型 Token 输入 / 输出</dt><dd>{usage.llm_input_tokens ?? "未报告"} / {usage.llm_output_tokens ?? "未报告"}</dd>
+          <dt>模型总费用估算</dt><dd>{estimatedCost(usage)}</dd>
+        </>}
       </dl>
     </details>
   );
@@ -60,6 +74,7 @@ function ResearchReport({ report, showEvidence }: { report: ResearchResult; show
     <section className="panel stack" aria-label="研究报告">
       <h2>研究报告</h2>
       <p>{report.summary}</p>
+      <dl><dt>整体证据覆盖率</dt><dd>{evidenceCoverage(report.evidence_coverage_ratio)}</dd></dl>
       {report.warnings.length > 0 && <ul>{report.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
       <h3>来源摘录</h3>
       {report.findings.length === 0 && <p className="muted">暂无可定位的来源摘录。</p>}
@@ -89,10 +104,15 @@ function ResearchReport({ report, showEvidence }: { report: ResearchResult; show
       ))}
       <details>
         <summary>检索轮次 · {report.rounds.length} / {report.planned_rounds}</summary>
+        <p className="muted">模型 Token 与费用计入最终综合阶段，检索轮次分别报告来源和证据覆盖率。</p>
         <ul>{report.rounds.map((round) => (
           <li key={round.number}>
             第 {round.number} 轮 · {STEPS[round.step] ?? round.step} · {ROUND_STATUS[round.status]} · {round.result_count} 条 · {round.elapsed_ms} ms
             {round.error_code && <span className="muted"> · {round.error_code}</span>}
+            <dl>
+              <dt>来源数</dt><dd>{round.source_count ?? "未报告"}</dd>
+              <dt>证据覆盖率</dt><dd>{evidenceCoverage(round.evidence_coverage_ratio)}</dd>
+            </dl>
             {references(round.evidence_refs)}
           </li>
         ))}</ul>

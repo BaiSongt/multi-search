@@ -962,7 +962,14 @@ class SearchService:
                         )
                     return resolved, attempted
         except TimeoutError:
-            pass
+            if attempted:
+                result = result.model_copy(
+                    update={
+                        "warnings": list(
+                            dict.fromkeys([*result.warnings, "image_source_verification_failed"])
+                        )
+                    }
+                )
         return result, attempted
 
     async def _join(

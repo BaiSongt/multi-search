@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { callApi } from "./lib/api";
-import type { ImageReport, ImageReportRow, Job, JobStatus, Page, RightsStatus } from "./lib/contracts";
+import type { ImageReport, ImageReportRow, ImageSourceStatus, Job, JobStatus, Page, RightsStatus } from "./lib/contracts";
 import { CopyId, dateTime, Dialog, Empty, ExternalLink, Failure, formatNumber, Loading, Pagination, safeLink, Table, usePagination, useResource } from "./ui";
 import { Metrics } from "./usage-view";
 
@@ -159,35 +159,55 @@ function JobDetails({ id, csrf, close, changed }: { id: string; csrf: string; cl
 const RIGHTS: Record<RightsStatus, string> = {
   unknown: "授权未知", declared_unverified: "已声明 · 未核验", verified_license: "许可已核验", conflict: "许可信息冲突",
 };
+const SOURCE_STATUS: Record<ImageSourceStatus, string> = {
+  missing: "来源缺失", invalid: "来源页失效", failed: "来源核验失败", not_matched: "未匹配原图",
+  unverified: "待核查", verified: "已核查",
+};
 
 function ImageQualityBadge({ status }: { status: RightsStatus }) {
   return <span className={`badge ${status === "verified_license" ? "positive" : status === "conflict" ? "danger" : "warning"}`}>{RIGHTS[status] ?? RIGHTS.unknown}</span>;
 }
 
+function imageSourceStatus(row: ImageReportRow): ImageSourceStatus {
+  if (row.source_status) return row.source_status;
+  if (!row.source_page_url) return "missing";
+  if (row.source_page_status === "invalid") return "invalid";
+  if (row.source_page_verified) return "verified";
+  return row.source_page_status === "checked" ? "not_matched" : "unverified";
+}
+
 function SourceStatus({ row }: { row: ImageReportRow }) {
-  if (!row.source_page_url) return <span className="badge danger">来源缺失</span>;
-  if (row.source_page_verified) return <span className="badge positive">已核查</span>;
-  return <span className="badge warning">{row.source_page_status ?? "待核查"}</span>;
+  const status = imageSourceStatus(row);
+  const color = status === "verified" ? "positive" : status === "missing" || status === "invalid" ? "danger" : "warning";
+  return <span className={`badge ${color}`}>{SOURCE_STATUS[status]}</span>;
 }
 
 export function ImageQualityView({ showTenant }: { showTenant: boolean }) {
   const [status, setStatus] = useState("");
+  const [sourceStatus, setSourceStatus] = useState("");
   const [selected, setSelected] = useState<ImageReportRow>();
   const [preview, setPreview] = useState(false);
   const pager = usePagination();
   const query = new URLSearchParams({ limit: "20" });
   if (status) query.set("rights_status", status);
+  if (sourceStatus) query.set("source_status", sourceStatus);
   if (pager.cursor) query.set("cursor", pager.cursor);
   const resource = useResource<ImageReport>(`admin/images?${query}`);
   const data = resource.data;
+  const sourceCounts = data?.source_counts;
   const previewUrl = safeLink(selected?.thumbnail_url, { thumbnail: true });
-  const total = data ? Object.keys(RIGHTS).reduce((sum, code) => sum + (data.counts[code] ?? 0), 0) : 0;
+  const total = Object.values(data?.counts ?? {}).reduce((sum, count) => sum + count, 0);
+  const rightsRatio = (status: RightsStatus) => total ? `${formatNumber((data?.counts[status] ?? 0) * 100 / total)}%` : "—";
   return (
     <>
       <div className="actions">
-        <label>许可状态<select value={status} onChange={(event) => { setStatus(event.target.value); pager.reset(); }}>
+        <label>许可状态<select aria-label="许可状态" value={status} onChange={(event) => { setStatus(event.target.value); pager.reset(); }}>
           <option value="">全部</option>
           {Object.entries(RIGHTS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select></label>
+        <label>来源状态<select aria-label="来源状态" value={sourceStatus} disabled={data !== undefined && sourceCounts === undefined} onChange={(event) => { setSourceStatus(event.target.value); pager.reset(); }}>
+          <option value="">全部</option>
+          {Object.entries(SOURCE_STATUS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         <button type="button" disabled={resource.pending} onClick={resource.reload}>刷新记录</button>
       </div>
@@ -195,8 +215,13 @@ export function ImageQualityView({ showTenant }: { showTenant: boolean }) {
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
       {data && (
         <>
-          <Metrics values={Object.entries(RIGHTS).map(([code, label]) => [label, data.counts[code] ?? 0, "项"])} />
-          <p className="muted">许可核验比例 {total ? `${formatNumber((data.counts.verified_license ?? 0) * 100 / total)}%` : "—"}</p>
+          <Metrics values={[
+            ...Object.entries(RIGHTS).map(([code, label]): [string, number, string] => [label, data.counts[code as RightsStatus] ?? 0, "项"]),
+            [SOURCE_STATUS.missing, sourceCounts ? sourceCounts.missing ?? 0 : null, "项"],
+            [SOURCE_STATUS.invalid, sourceCounts ? sourceCounts.invalid ?? 0 : null, "项"],
+            [SOURCE_STATUS.failed, sourceCounts ? sourceCounts.failed ?? 0 : null, "项"],
+          ]} />
+          <p className="muted">近 30 天已返回的图片记录。授权未知比例 {rightsRatio("unknown")} · 许可核验比例 {rightsRatio("verified_license")}</p>
           {data.items.length === 0 ? <Empty>暂无符合条件的图片来源记录。</Empty> : (
             <Table caption="图片来源和核验记录" headers={["来源页", "状态", "许可", "请求 ID", ...(showTenant ? ["租户 ID"] : []), "检索时间", "详情"]}>
               {data.items.map((row) => (
