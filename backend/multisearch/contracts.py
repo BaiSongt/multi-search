@@ -4,6 +4,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from .evidence_contracts import EvidenceRecord
+
 
 class Mode(StrEnum):
     AUTO = "auto"
@@ -136,6 +138,11 @@ class ImageAttribution(BaseModel):
     rights_checked_at: datetime | None = None
     rights_evidence_url: str | None = None
     source_page_verified: bool = False
+    source_page_status: Literal["unverified", "checked", "invalid"] = "unverified"
+    source_checked_at: datetime | None = None
+    asset_hash: str | None = None
+    asset_hash_algorithm: Literal["sha1"] | None = None
+    asset_hash_source: Literal["wikimedia_commons"] | None = None
 
 
 class Result(BaseModel):
@@ -153,13 +160,19 @@ class Result(BaseModel):
     language: str | None = None
     snippet: str | None = None
     relevance_score: float = 0
-    evidence_status: Literal["unverified"] = "unverified"
+    evidence_status: Literal["unverified", "content_extracted", "cross_checked"] = "unverified"
     evidence_refs: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
 class TextSearchResult(Result):
     kind: Literal["text"] = "text"
+    journal: str | None = None
+    arxiv_id: str | None = None
+    version: str | None = None
+    license_name: str | None = None
+    license_url: str | None = None
+    repository_branch: str | None = None
 
 
 class ImageSearchResult(Result):
@@ -187,9 +200,11 @@ class SearchBudget(BaseModel):
     max_results: int
     max_image_results: int
     search_rounds: int
+    max_pages: int = 0
     max_image_metadata_fetches: int = 0
     image_metadata_fetches: int = 0
     pages_fetched: int = 0
+    pages_attempted: int = 0
     llm_tokens: int = 0
 
 
@@ -202,6 +217,8 @@ class SearchResponse(BaseModel):
     elapsed_ms: int
     result_count: int
     results: list[SearchResult]
+    evidence_records: list[EvidenceRecord] = Field(default_factory=list)
+    routing_policy_version: int = 0
     warnings: list[str] = Field(default_factory=list)
     provider_runs: list[ProviderRun] = Field(default_factory=list)
     next_cursor: str | None = None

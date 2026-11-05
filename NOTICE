@@ -11,6 +11,9 @@ Pydantic — MIT — https://github.com/pydantic/pydantic/blob/main/LICENSE
 Uvicorn — BSD-3-Clause — https://github.com/Kludex/uvicorn/blob/main/LICENSE.md
 HTTPX — BSD-3-Clause — https://github.com/encode/httpx/blob/master/LICENSE.md
 DDGS — MIT — https://github.com/deedy5/ddgs/blob/main/LICENSE
+Crawl4AI — Apache-2.0 — https://github.com/unclecode/crawl4ai/blob/v0.9.5/LICENSE
+lxml — BSD-3-Clause — https://github.com/lxml/lxml/blob/master/LICENSES.txt
+Protego — BSD-3-Clause — https://github.com/scrapy/protego/blob/master/LICENSE
 MCP Python SDK — MIT — https://github.com/modelcontextprotocol/python-sdk/blob/v2.3.0/LICENSE
 SQLAlchemy — MIT — https://github.com/sqlalchemy/sqlalchemy/blob/main/LICENSE
 Alembic — MIT — https://github.com/sqlalchemy/alembic/blob/main/LICENSE
@@ -29,3 +32,6 @@ SearXNG and Redis are pulled upstream images running as independent services. Re
 
 检索内容与图片各自适用其权利人的授权条款。
 Search results and images are subject to their respective rights holders' terms.
+
+This project uses Crawl4AI for web data extraction.
+https://github.com/unclecode/crawl4ai

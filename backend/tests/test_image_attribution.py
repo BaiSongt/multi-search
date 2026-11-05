@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-
 from multisearch.contracts import ImageAttribution, ImageSearchResult, Source
 from multisearch.image_attribution import ImageAttributionResolver
 
@@ -11,6 +10,7 @@ PAGE = "https://commons.wikimedia.org/wiki/File:Common_Kingfisher_Alcedo_atthis.
 ASSET = "https://upload.wikimedia.org/wikipedia/commons/c/cc/Common_Kingfisher_Alcedo_atthis.jpg"
 TITLE = "File:Common Kingfisher Alcedo atthis.jpg"
 LICENSE = "https://creativecommons.org/licenses/by-sa/2.5/"
+ASSET_HASH = "0123456789abcdef0123456789abcdef01234567"
 
 
 def hit(page=PAGE, asset=ASSET):
@@ -36,6 +36,7 @@ def wikimedia_response(*, metadata=None, image_updates=None):
         "canonicaltitle": TITLE,
         "url": f"{ASSET}?utm_source=commons.wikimedia.org&utm_campaign=imageinfo&utm_content=original",
         "descriptionurl": PAGE,
+        "sha1": ASSET_HASH,
         "extmetadata": metadata
         if metadata is not None
         else {
@@ -76,6 +77,11 @@ async def test_resolves_matching_commons_original_and_machine_readable_license()
     assert request.headers["user-agent"] == "MultiSearchBot/0.1 (local test)"
     assert request.headers["accept-encoding"] == "identity"
     assert response.image.source_page_verified
+    assert response.image.source_page_status == "checked"
+    assert response.image.source_checked_at == response.image.rights_checked_at
+    assert response.image.asset_hash == ASSET_HASH
+    assert response.image.asset_hash_algorithm == "sha1"
+    assert response.image.asset_hash_source == "wikimedia_commons"
     assert response.image.rights_status == "verified_license"
     assert response.image.license_name == "CC BY-SA 2.5"
     assert response.image.license_url == LICENSE

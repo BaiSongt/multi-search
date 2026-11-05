@@ -17,6 +17,7 @@ _MAX_RESPONSE_BYTES = 65_536
 _TRACKING = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}
 _ORIGINAL_PATH = re.compile(rb"/wikipedia/commons/([0-9a-f])/\1[0-9a-f]/[^/]+")
 _CC_PATH = re.compile(r"/licenses/(by|by-sa)/(1\.0|2\.0|2\.5|3\.0|4\.0)/?")
+_ASSET_SHA1 = re.compile(r"[0-9a-fA-F]{40}")
 _METADATA = (
     "Artist|Attribution|LicenseUrl|LicenseShortName|License|NonFree|Restrictions|DeletionReason"
 )
@@ -177,16 +178,26 @@ def _apply_attribution(result: ImageSearchResult, page: dict, info: dict) -> Ima
         if type(revision) is int and revision > 0
         else info["descriptionurl"]
     )
+    checked_at = datetime.now(UTC)
     update = {
         "source_page_verified": True,
+        "source_page_status": "checked",
+        "source_checked_at": checked_at,
         "source_site_name": "Wikimedia Commons",
         "source_site_domain": _COMMONS,
         "creator": _plain_text(_metadata(metadata, "Artist"), 512) or image.creator,
         "attribution_text": _plain_text(_metadata(metadata, "Attribution"), 1024)
         or image.attribution_text,
-        "rights_checked_at": datetime.now(UTC),
+        "rights_checked_at": checked_at,
         "rights_evidence_url": evidence,
     }
+    asset_hash = info.get("sha1")
+    if isinstance(asset_hash, str) and _ASSET_SHA1.fullmatch(asset_hash):
+        update.update(
+            asset_hash=asset_hash.lower(),
+            asset_hash_algorithm="sha1",
+            asset_hash_source="wikimedia_commons",
+        )
     warning = None
     declared = _license(_metadata(metadata, "LicenseUrl"))
     if declared is not None:
@@ -277,7 +288,7 @@ class ImageAttributionResolver:
             params={
                 "action": "query",
                 "prop": "info|imageinfo",
-                "iiprop": "url|canonicaltitle|extmetadata",
+                "iiprop": "url|canonicaltitle|extmetadata|sha1",
                 "iiextmetadatafilter": _METADATA,
                 "iilimit": "1",
                 "titles": title,
