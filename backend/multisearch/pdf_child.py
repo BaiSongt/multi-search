@@ -16,6 +16,9 @@ PDF_WALL_SECONDS = 3.0
 _CPU_SECONDS = 2
 _ADDRESS_BYTES = 160 * 1024 * 1024
 _STREAM_BYTES = 2 * 1024 * 1024
+_PAINT_OPERATORS = frozenset(
+    {b"Do", b"INLINE IMAGE", b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"sh"}
+)
 
 
 def _limits() -> None:
@@ -63,6 +66,25 @@ def _clean_page(text: str) -> str:
             char for char in text if char.isspace() or not category(char).startswith("C")
         ).split()
     )
+
+
+def _inspect_page(page) -> tuple[str, bool]:
+    visited = painted = False
+
+    def inspect_operator(operator: bytes, *_args) -> None:
+        nonlocal visited, painted
+        visited = True
+        painted |= operator in _PAINT_OPERATORS
+
+    text = _clean_page(
+        page.extract_text(extraction_mode="plain", visitor_operand_before=inspect_operator)
+    )
+    # 无资源字典的页面可能只有内联图像，文本提取器会跳过其内容流。
+    if not visited and not text and "/Contents" in page:
+        content = page.get_contents()
+        if content is not None:
+            painted = any(operator in _PAINT_OPERATORS for _, operator in content.operations)
+    return text, painted
 
 
 def _extract() -> dict:
@@ -118,8 +140,10 @@ def _extract() -> dict:
         truncated = page_count > PDF_MAX_PAGES
         remaining = PDF_MAX_CHARS
         pages = []
+        has_visual_content = False
         for index in range(min(PDF_MAX_PAGES, page_count)):
-            page_text = _clean_page(reader.pages[index].extract_text(extraction_mode="plain"))
+            page_text, painted = _inspect_page(reader.pages[index])
+            has_visual_content |= painted
             take = min(PDF_MAX_PAGE_CHARS, remaining)
             truncated |= len(page_text) > take
             pages.append(page_text[:take])
@@ -127,7 +151,12 @@ def _extract() -> dict:
             if remaining == 0:
                 truncated |= index + 1 < page_count
                 break
-        return {"status": "ok", "pages": pages, "truncated": truncated}
+        return {
+            "status": "ok",
+            "pages": pages,
+            "truncated": truncated,
+            "has_visual_content": has_visual_content,
+        }
     except (LimitReachedError, MemoryError):
         return {"status": "resource_limit"}
     except Exception:

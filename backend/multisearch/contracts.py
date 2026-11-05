@@ -160,7 +160,9 @@ class Result(BaseModel):
     language: str | None = None
     snippet: str | None = None
     relevance_score: float = 0
-    evidence_status: Literal["unverified", "content_extracted", "cross_checked"] = "unverified"
+    evidence_status: Literal["unverified", "ocr_pending", "content_extracted", "cross_checked"] = (
+        "unverified"
+    )
     evidence_refs: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 

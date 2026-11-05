@@ -176,6 +176,7 @@ function ResultCards({ results, showImage, label = "搜索结果" }: { results: 
           ) : (
             <>
               <p className="muted">{result.snippet ?? "暂无摘要"}</p>
+              {result.evidence_status === "ocr_pending" && <p className="badge warning">等待 OCR</p>}
               <ExternalLink href={result.url}>查看来源</ExternalLink>
             </>
           )}

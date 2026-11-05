@@ -29,6 +29,14 @@ _CHILD = Path(__file__).with_name("pdf_child.py")
 class ParsedPDF:
     pages: tuple[str, ...]
     truncated: bool
+    has_visual_content: bool
+
+
+class OCRPending(FetchError):
+    """已检查 PDF 绘制页面，需要部署方的 OCR 能力。"""
+
+    def __init__(self) -> None:
+        super().__init__(422, "OCR_PENDING", "已检查页面未提取到文本层，待 OCR")
 
 
 def _resource_limit() -> FetchError:
@@ -94,6 +102,7 @@ def _decode(raw: bytes) -> ParsedPDF:
         case "ok":
             pages = payload.get("pages")
             truncated = payload.get("truncated")
+            has_visual_content = payload.get("has_visual_content")
         case _:
             raise _invalid()
     if (
@@ -102,9 +111,10 @@ def _decode(raw: bytes) -> ParsedPDF:
         or not all(isinstance(page, str) and len(page) <= PDF_MAX_PAGE_CHARS for page in pages)
         or sum(map(len, pages)) > PDF_MAX_CHARS
         or not isinstance(truncated, bool)
+        or not isinstance(has_visual_content, bool)
     ):
         raise _invalid()
-    return ParsedPDF(tuple(pages), truncated)
+    return ParsedPDF(tuple(pages), truncated, has_visual_content)
 
 
 class PdfParser:

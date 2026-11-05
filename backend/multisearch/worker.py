@@ -17,6 +17,7 @@ from .identity import IdentityStore
 from .job_contracts import FetchRequest, JobError, JobKind, JobProgress, JobStatus
 from .job_store import Claim, JobOutcome, JobStore
 from .ops_store import OpsStore
+from .pdf_parser import OCRPending
 from .research import ResearchOrchestrator, ResearchPricing
 from .research_model import create_research_model
 from .runtime import build_evidence, build_search, load_search_policies
@@ -45,12 +46,15 @@ class Worker:
         records = list(checkpoint.get("evidence_records", []))
         warnings = list(checkpoint.get("warnings", []))
         errors = list(checkpoint.get("failures", []))
+        pending = list(checkpoint.get("ocr_pending", []))
         completed = min(claim.progress.completed, len(targets)) if claim.progress else 0
-        if completed > len(records) + len(errors):
+        if completed > len(records) + len(errors) + len(pending):
             warnings.append("FETCH_ATTEMPT_INTERRUPTED")
         if body.urls and len(body.urls) > len(targets):
             warnings.append("MAX_PAGES_REACHED")
         result = {"evidence_records": records, "warnings": warnings, "failures": errors}
+        if pending:
+            result["ocr_pending"] = pending
         for index in range(completed, len(targets)):
             url = targets[index]
             remaining = _remaining(claim)
@@ -84,6 +88,11 @@ class Worker:
                 errors.append(
                     {"index": index, "code": "TIME_BUDGET_EXCEEDED", "message": "抓取时限已耗尽"}
                 )
+            except OCRPending as error:
+                trace_event("fetch.extract", status="ocr_pending")
+                pending.append(index)
+                result["ocr_pending"] = pending
+                warnings.append(error.code)
             except FetchError as error:
                 trace_event("fetch.extract", status="failed")
                 errors.append({"index": index, "code": error.code, "message": str(error)})
@@ -94,12 +103,12 @@ class Worker:
             if not await self.store.progress(claim, progress, checkpoint=result):
                 return JobOutcome(JobStatus.CANCELLED, pages_fetched=len(records))
         result["warnings"] = list(dict.fromkeys(warnings))
-        if not records:
+        if not records and not pending:
             code = errors[0]["code"] if errors else "TIME_BUDGET_EXCEEDED"
             return JobOutcome(
                 JobStatus.FAILED, result, JobError(code=code, message="没有取得可用证据")
             )
-        status = JobStatus.PARTIAL if warnings or errors else JobStatus.COMPLETED
+        status = JobStatus.PARTIAL if warnings or errors or pending else JobStatus.COMPLETED
         return JobOutcome(status, result, pages_fetched=len(records))
 
     async def _watch(self, claim: Claim) -> None:
@@ -187,7 +196,13 @@ async def main() -> None:
             worker = Worker(store, evidence)
             if settings.enable_research:
                 identity = IdentityStore(db, settings.key_pepper)
-                ops = OpsStore(db, redis, identity.sessions, settings.key_pepper)
+                ops = OpsStore(
+                    db,
+                    redis,
+                    identity.sessions,
+                    settings.key_pepper,
+                    baseline=settings.deployment_policy.baseline(),
+                )
                 search = await build_search(settings, db, redis, client, ops, evidence)
                 model = create_research_model(
                     client,

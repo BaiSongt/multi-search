@@ -14,6 +14,7 @@ const POST_ROUTES = new Set([
   "admin/routing/test", "admin/routing/publish", "admin/routing/rollback", "admin/cache/invalidate",
 ]);
 const KEY_ACTION = /^keys\/[a-f0-9-]{32,36}\/(rotate|revoke)$/i;
+const REQUEST_VIEW = /^admin\/requests\/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const JOB_VIEW = /^admin\/jobs\/[a-f0-9-]{32,36}$/i;
 const JOB_CANCEL = /^admin\/jobs\/[a-f0-9-]{32,36}\/cancel$/i;
 const CONSOLE_JOB = "console/jobs/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}";
@@ -26,7 +27,7 @@ const MEMBER_UPDATE = /^(?:team|admin\/tenants\/[a-f0-9-]{32,36})\/members\/[a-f
 const BODY_LIMIT = 64 * 1024;
 
 function accepted(method: string, path: string) {
-  if (method === "GET") return GET_ROUTES.has(path) || JOB_VIEW.test(path) || CONSOLE_JOB_VIEW.test(path) || TEAM_READ.test(path);
+  if (method === "GET") return GET_ROUTES.has(path) || REQUEST_VIEW.test(path) || JOB_VIEW.test(path) || CONSOLE_JOB_VIEW.test(path) || TEAM_READ.test(path);
   if (method === "POST") return POST_ROUTES.has(path) || KEY_ACTION.test(path) || JOB_CANCEL.test(path) || TEAM_WRITE.test(path)
     || CONSOLE_JOB_CANCEL.test(path);
   return method === "PATCH" && (ADMIN_UPDATE.test(path) || MEMBER_UPDATE.test(path));

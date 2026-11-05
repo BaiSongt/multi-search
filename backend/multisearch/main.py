@@ -82,7 +82,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
                 meter = UsageMeter(app.state.db, config.max_concurrent)
                 ops = OpsStore(
-                    app.state.db, app.state.redis, app.state.identity.sessions, config.key_pepper
+                    app.state.db,
+                    app.state.redis,
+                    app.state.identity.sessions,
+                    config.key_pepper,
+                    baseline=config.deployment_policy.baseline(),
                 )
                 app.state.ops = ops
                 app.state.search = await build_search(

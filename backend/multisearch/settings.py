@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
+from .deployment_policy import DeploymentPolicy, load_deployment_policy
+
 
 def secret(name: str) -> str:
     if file := os.getenv(f"{name}_FILE"):
@@ -35,6 +37,7 @@ class Settings:
     research_cost_currency: str = ""
     research_input_per_million_tokens: str = ""
     research_output_per_million_tokens: str = ""
+    deployment_policy: DeploymentPolicy = field(default_factory=DeploymentPolicy)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -95,4 +98,5 @@ class Settings:
             research_output_per_million_tokens=os.getenv(
                 "MULTISEARCH_RESEARCH_OUTPUT_PER_MILLION_TOKENS", ""
             ),
+            deployment_policy=load_deployment_policy(os.getenv("MULTISEARCH_POLICY_FILE", "")),
         )

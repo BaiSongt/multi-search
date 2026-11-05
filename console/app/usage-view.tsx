@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { quotaLabels, type RequestRow, type Totals, type Usage, type UsageDay } from "./lib/contracts";
+import { quotaLabels, type RequestRow, type RequestTrace, type Totals, type Usage, type UsageDay } from "./lib/contracts";
 import { downloadCsv } from "./lib/csv";
 import { CopyId, dateTime, Dialog, Empty, Failure, formatNumber, Loading, Table, useResource } from "./ui";
 
@@ -11,6 +11,23 @@ const statusTitles: Record<string, string> = {
   partial: "部分完成",
   failed: "失败",
   cancelled: "取消",
+};
+
+const providerStatuses: Record<string, string> = {
+  success: "成功",
+  empty: "无结果",
+  partial: "部分完成",
+  failed: "失败",
+  timeout: "超时",
+  rate_limited: "限流",
+  circuit_open: "熔断",
+};
+
+const providerReasons: Record<string, string> = {
+  upstream_captcha: "上游验证码",
+  upstream_rate_limited: "上游限流",
+  upstream_timeout: "上游超时",
+  upstream_unavailable: "上游不可用",
 };
 
 export function Metrics({ values }: { values: [string, number | null | undefined, string?][] }) {
@@ -73,7 +90,59 @@ function requestStatus(row: RequestRow) {
   return <span className={`badge ${row.status === "failed" ? "danger" : row.status === "partial" ? "warning" : row.status === "completed" ? "positive" : ""}`}>{statusTitles[row.status] ?? row.status}</span>;
 }
 
-export function RequestTable({ rows, showTenant = false, caption = "调用记录" }: { rows: RequestRow[]; showTenant?: boolean; caption?: string }) {
+function RequestFields({ row }: { row: RequestRow }) {
+  return (
+    <dl>
+      <dt>请求 ID</dt><dd><CopyId value={row.request_id} /></dd>
+      {row.trace_id && <><dt>追踪 ID</dt><dd><CopyId value={row.trace_id} /></dd></>}
+      <dt>记录 ID</dt><dd><CopyId value={row.id} /></dd>
+      <dt>租户 ID</dt><dd><CopyId value={row.tenant_id} /></dd>
+      <dt>密钥 ID</dt><dd><CopyId value={row.key_id} /></dd>
+      <dt>发生时间</dt><dd>{dateTime(row.created_at)}</dd>
+      <dt>状态</dt><dd>{requestStatus(row)}</dd>
+      <dt>错误码</dt><dd>{row.code ?? "—"}</dd>
+      <dt>耗时</dt><dd>{row.elapsed_ms === null ? "—" : `${row.elapsed_ms} ms`}</dd>
+      <dt>缓存命中</dt><dd>{row.cache_hit ? "是" : "否"}</dd>
+      <dt>文字结果</dt><dd>{formatNumber(row.text_results_returned)}</dd>
+      <dt>图片结果</dt><dd>{formatNumber(row.image_results_returned)}</dd>
+    </dl>
+  );
+}
+
+function AdminRequestTrace({ row }: { row: RequestRow }) {
+  const resource = useResource<RequestTrace>(`admin/requests/${encodeURIComponent(row.id)}`);
+  const runs = resource.data?.provider_runs;
+  return (
+    <>
+      <RequestFields row={resource.data ?? row} />
+      <h3>来源调用</h3>
+      {resource.pending && <Loading />}
+      {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
+      {runs && (runs.length ? (
+        <Table caption="来源调用记录" headers={["Provider", "状态", "耗时", "结果数", "原因"]}>
+          {runs.map((run, ordinal) => (
+            <tr key={ordinal}>
+              <td>{run.provider_id}</td>
+              <td>{providerStatuses[run.status] ?? run.status}</td>
+              <td>{formatNumber(run.elapsed_ms)} ms</td>
+              <td>{formatNumber(run.count)}</td>
+              <td>{run.reason_codes.length ? (
+                <ul>{run.reason_codes.map((code) => <li key={code}>{providerReasons[code] ?? "未知原因"} <code>{code}</code></li>)}</ul>
+              ) : "—"}</td>
+            </tr>
+          ))}
+        </Table>
+      ) : <Empty>暂无已记录的来源调用。</Empty>)}
+    </>
+  );
+}
+
+export function RequestTable({ rows, showTenant = false, caption = "调用记录", showProviderRuns = false }: {
+  rows: RequestRow[];
+  showTenant?: boolean;
+  caption?: string;
+  showProviderRuns?: boolean;
+}) {
   const [selected, setSelected] = useState<RequestRow>();
   if (!rows.length) return <Empty>暂无符合条件的调用记录。</Empty>;
   return (
@@ -94,20 +163,7 @@ export function RequestTable({ rows, showTenant = false, caption = "调用记录
       </Table>
       {selected && (
         <Dialog title="请求详情" close={() => setSelected(undefined)}>
-          <dl>
-            <dt>请求 ID</dt><dd><CopyId value={selected.request_id} /></dd>
-            {selected.trace_id && <><dt>追踪 ID</dt><dd><CopyId value={selected.trace_id} /></dd></>}
-            <dt>记录 ID</dt><dd><CopyId value={selected.id} /></dd>
-            <dt>租户 ID</dt><dd><CopyId value={selected.tenant_id} /></dd>
-            <dt>密钥 ID</dt><dd><CopyId value={selected.key_id} /></dd>
-            <dt>发生时间</dt><dd>{dateTime(selected.created_at)}</dd>
-            <dt>状态</dt><dd>{requestStatus(selected)}</dd>
-            <dt>错误码</dt><dd>{selected.code ?? "—"}</dd>
-            <dt>耗时</dt><dd>{selected.elapsed_ms === null ? "—" : `${selected.elapsed_ms} ms`}</dd>
-            <dt>缓存命中</dt><dd>{selected.cache_hit ? "是" : "否"}</dd>
-            <dt>文字结果</dt><dd>{formatNumber(selected.text_results_returned)}</dd>
-            <dt>图片结果</dt><dd>{formatNumber(selected.image_results_returned)}</dd>
-          </dl>
+          {showProviderRuns ? <AdminRequestTrace row={selected} /> : <RequestFields row={selected} />}
         </Dialog>
       )}
     </>

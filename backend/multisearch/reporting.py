@@ -25,6 +25,13 @@ _RESOLVED_STATUS = """
     CASE WHEN status = 'running' AND reservation_expires_at <= now() THEN 'failed'
         ELSE status END
 """
+_REQUEST_COLUMNS = f"""
+    id, request_id, trace_id, tenant_id, key_id, operation, mode, modalities, source_types,
+    {_RESOLVED_STATUS} AS status,
+    CASE WHEN status = 'running' AND reservation_expires_at <= now()
+         THEN 'REQUEST_INTERRUPTED' ELSE code END AS code,
+    elapsed_ms, cache_hit, text_results_returned, image_results_returned, created_at
+"""
 
 
 @dataclass(frozen=True)
@@ -117,12 +124,7 @@ class UsageReports:
         }
         result = await connection.execute(
             text(f"""
-            SELECT id, request_id, trace_id, tenant_id, key_id, operation, mode, modalities, source_types,
-                {_RESOLVED_STATUS} AS status,
-                CASE WHEN status = 'running' AND reservation_expires_at <= now()
-                     THEN 'REQUEST_INTERRUPTED' ELSE code END AS code,
-                elapsed_ms, cache_hit, text_results_returned, image_results_returned, created_at
-            FROM usage_events WHERE {_SCOPE}
+            SELECT {_REQUEST_COLUMNS} FROM usage_events WHERE {_SCOPE}
                 AND (CAST(:status AS TEXT) IS NULL OR ({_RESOLVED_STATUS}) = :status)
                 AND (CAST(:mode AS TEXT) IS NULL OR mode = :mode)
                 AND (CAST(:modality AS TEXT) IS NULL OR :modality = ANY(modalities))
@@ -144,6 +146,26 @@ class UsageReports:
     async def requests(self, scope: ReportScope, limit: int, cursor: str | None, **filters) -> dict:
         async with self.db.connect() as connection:
             return await self._requests(connection, scope, limit, cursor, **filters)
+
+    async def request_detail(self, scope: ReportScope, usage_id: UUID) -> dict:
+        async with self.db.connect() as connection:
+            result = await connection.execute(
+                text(f"""
+                    SELECT {_REQUEST_COLUMNS}, COALESCE((
+                        SELECT jsonb_agg(jsonb_build_object(
+                            'provider_id', p.provider_id, 'status', p.status, 'elapsed_ms', p.elapsed_ms,
+                            'count', p.count, 'reason_codes', p.reason_codes
+                        ) ORDER BY p.ordinal)
+                        FROM provider_runs p WHERE p.usage_id = usage_events.id
+                    ), '[]'::JSONB) AS provider_runs
+                    FROM usage_events WHERE {_SCOPE} AND id = :id
+                """),
+                {**scope.params(), "id": usage_id},
+            )
+            row = result.mappings().one_or_none()
+            if row is None:
+                raise ApiError(404, "REQUEST_NOT_FOUND", "请求记录不存在")
+            return dict(row)
 
     async def usage(self, scope: ReportScope) -> dict:
         async with self.db.connect() as connection:

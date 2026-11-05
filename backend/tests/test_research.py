@@ -202,6 +202,36 @@ async def test_iterative_rounds_refund_unspent_reservations_and_deduplicate_evid
     )
 
 
+async def test_research_preserves_ocr_pending_through_fusion_and_recovery():
+    source, _ = _record("scan", "scan.example.org", "a")
+    source = source.model_copy(update={"evidence_refs": [], "evidence_status": "unverified"})
+    pending = source.model_copy(update={"evidence_status": "ocr_pending"})
+    pending_response = _response(Mode.EVIDENCE, [pending], attempted=1).model_copy(
+        update={"status": "partial", "partial": True, "warnings": ["OCR_PENDING"]}
+    )
+    store = Store()
+    search = Search(store, [_response(Mode.STANDARD, [source]), pending_response])
+    claim = _claim(_request(max_search_rounds=2, max_pages=1))
+    outcome = await ResearchOrchestrator(search, store).run(claim)
+    progress, checkpoint = store.checkpoints[-1]
+    assert checkpoint["results"][0]["evidence_status"] == "ocr_pending"
+
+    resumed_store = Store()
+    resumed = await ResearchOrchestrator(Search(resumed_store, []), resumed_store).run(
+        replace(claim, progress=progress, checkpoint=checkpoint)
+    )
+    for completed in (outcome, resumed):
+        result = ResearchResult.model_validate(completed.result)
+        assert completed.status == JobStatus.PARTIAL and completed.pages_fetched == 0
+        assert result.results[0].evidence_status == "ocr_pending"
+        assert (
+            not result.results[0].evidence_refs
+            and not result.evidence_records
+            and not result.findings
+        )
+        assert result.evidence_coverage_ratio == 0 and "OCR_PENDING" in result.warnings
+
+
 async def test_local_research_coverage_is_not_applicable_and_public_image_sources_are_deduplicated():
     source, _ = _record("local", "example.org", "a")
     local = source.model_copy(

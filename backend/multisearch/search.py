@@ -29,8 +29,8 @@ from .evidence import EvidenceBuilder
 from .evidence_contracts import EvidenceRecord
 from .image_attribution import ImageAttributionResolver
 from .image_source import PublicImageSourceResolver
+from .pdf_parser import OCRPending
 from .pipeline import fuse, select_results
-from .policy import ProviderPolicy
 from .providers import Provider, ProviderFailure, ProviderResult
 from .routing_policy import (
     DEFAULT_ROUTING,
@@ -160,7 +160,10 @@ class SearchService:
     ):
         self.redis = redis
         self.providers = {provider.provider_id: provider for provider in providers}
-        self.provider_policies = {provider.provider_id: ProviderPolicy() for provider in providers}
+        self.provider_policies = {
+            provider.provider_id: settings.deployment_policy.provider(provider.provider_id)
+            for provider in providers
+        }
         self.settings = settings
         self.attribution = attribution
         self.evidence = evidence
@@ -369,6 +372,7 @@ class SearchService:
                 self.cache_signature,
                 policies,
                 routing.version,
+                routing.policy.model_dump(mode="json"),
                 cache_epoch_signature(request, epochs),
                 filters,
             ],
@@ -861,7 +865,9 @@ class SearchService:
 
         attempted = 0
 
-        async def extract(result: TextSearchResult) -> EvidenceRecord | None:
+        async def extract(
+            result: TextSearchResult,
+        ) -> EvidenceRecord | Literal["ocr_pending"] | None:
             nonlocal attempted
             remaining = deadline - monotonic()
             if remaining <= 0:
@@ -879,6 +885,9 @@ class SearchService:
                 )
                 trace_event("fetch.extract", status="success")
                 return record
+            except OCRPending:
+                trace_event("fetch.extract", status="ocr_pending")
+                return "ocr_pending"
             except (FetchError, TimeoutError):
                 trace_event("fetch.extract", status="failed")
                 return None
@@ -887,6 +896,12 @@ class SearchService:
         extracted = await asyncio.gather(*(extract(result) for _, result in selected))
         records = []
         for (index, result), record in zip(selected, extracted, strict=True):
+            if record == "ocr_pending":
+                warnings.append("OCR_PENDING")
+                results[index] = result.model_copy(
+                    update={"evidence_status": "ocr_pending", "evidence_refs": []}
+                )
+                continue
             if record is None:
                 warnings.append("EVIDENCE_EXTRACTION_INCOMPLETE")
                 continue

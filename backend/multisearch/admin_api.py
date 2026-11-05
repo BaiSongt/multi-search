@@ -1,4 +1,5 @@
 import json
+from dataclasses import asdict
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -44,6 +45,15 @@ class TenantCreate(InputModel):
 def _require(role: Role, allowed: set[Role]) -> None:
     if role not in allowed:
         raise ApiError(403, "FORBIDDEN", "当前角色无权执行此操作")
+
+
+def _request_scope(actor: SessionUser, tenant_id: UUID | None = None) -> ReportScope:
+    _require(actor.role, OPS)
+    if actor.role != Role.PLATFORM_ADMIN:
+        if tenant_id is not None and tenant_id != actor.tenant_id:
+            raise ApiError(403, "FORBIDDEN", "无权查看其他租户的请求")
+        tenant_id = actor.tenant_id
+    return ReportScope(tenant_id)
 
 
 def _patch(model: InputModel) -> dict:
@@ -146,7 +156,7 @@ async def update_provider(
             .mappings()
             .one_or_none()
         )
-        old = dict(row) if row else {"enabled": True, "priority": 0, "requests_per_minute": 120}
+        old = dict(row) if row else asdict(service.settings.deployment_policy.provider(provider_id))
         updated = {**old, **changes}
         await connection.execute(
             text("""
@@ -189,11 +199,7 @@ async def requests(
     since: datetime | None = None,
     until: datetime | None = None,
 ):
-    _require(actor.role, OPS)
-    if actor.role != Role.PLATFORM_ADMIN:
-        if tenant_id is not None and tenant_id != actor.tenant_id:
-            raise ApiError(403, "FORBIDDEN", "无权查看其他租户的请求")
-        tenant_id = actor.tenant_id
+    scope = _request_scope(actor, tenant_id)
     if (
         (since and since.tzinfo is None)
         or (until and until.tzinfo is None)
@@ -201,7 +207,7 @@ async def requests(
     ):
         raise ApiError(422, "INVALID_REQUEST", "时间范围需要带时区且起点早于终点")
     return await request.app.state.reports.requests(
-        ReportScope(tenant_id),
+        scope,
         limit,
         cursor,
         status=status,
@@ -212,6 +218,12 @@ async def requests(
         since=since,
         until=until,
     )
+
+
+@router.get("/admin/requests/{usage_id}")
+async def request_detail(usage_id: UUID, request: Request, actor: SessionUser):
+    scope = _request_scope(actor)
+    return await request.app.state.reports.request_detail(scope, usage_id)
 
 
 @router.get("/admin/tenants")

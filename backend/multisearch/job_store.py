@@ -83,10 +83,12 @@ class JobStore:
         total: int,
         *,
         worker_available: bool = True,
+        idempotency_payload: dict | None = None,
     ) -> JobView:
         mode = Mode.EVIDENCE if kind == JobKind.FETCH else Mode.DEEP
         encoded = _json(payload)
-        fingerprint = sha256(encoded.encode()).hexdigest()
+        fingerprint_input = encoded if idempotency_payload is None else _json(idempotency_payload)
+        fingerprint = sha256(fingerprint_input.encode()).hexdigest()
         async with self.db.begin() as connection:
             await lock_tenant(connection, principal.tenant_id)
             now = (await connection.scalar(text("SELECT clock_timestamp()"))).astimezone(UTC)
@@ -199,6 +201,8 @@ class JobStore:
                     WHEN status = 'cancelling' THEN 'cancelled'
                     WHEN deadline_at <= now() OR attempts >= max_attempts THEN
                         CASE WHEN jsonb_array_length(COALESCE(result -> 'evidence_records', '[]'::JSONB)) > 0
+                            OR jsonb_array_length(COALESCE(result -> 'ocr_pending', '[]'::JSONB)) > 0
+                            OR result @? '$.results[*] ? (@.evidence_status == "ocr_pending")'
                             THEN 'partial' ELSE 'failed' END
                     ELSE 'queued' END AS next_status,
                     CASE

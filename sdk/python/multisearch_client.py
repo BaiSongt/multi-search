@@ -162,7 +162,7 @@ class _SearchItem(TypedDict):
     language: str | None
     snippet: str | None
     relevance_score: float
-    evidence_status: Literal["unverified", "content_extracted", "cross_checked"]
+    evidence_status: Literal["unverified", "content_extracted", "cross_checked", "ocr_pending"]
     evidence_refs: list[str]
     warnings: list[str]
 

@@ -344,11 +344,12 @@ def _attach_evidence(
                 (canonical_url(record.origin_url), canonical_url(record.canonical_url))
             )
         )
+        status = "ocr_pending" if result.evidence_status == "ocr_pending" else "unverified"
         output.append(
             result.model_copy(
                 update={
                     "evidence_refs": refs,
-                    "evidence_status": "content_extracted" if refs else "unverified",
+                    "evidence_status": "content_extracted" if refs else status,
                 }
             )
         )

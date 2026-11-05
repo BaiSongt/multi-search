@@ -374,6 +374,36 @@ async def test_evidence_route_respects_page_budget_and_preserves_locator():
     assert "EVIDENCE_PAGE_BUDGET_REACHED" in result.warnings
 
 
+async def test_evidence_route_marks_only_the_pdf_candidate_as_ocr_pending():
+    from multisearch.pdf_parser import OCRPending
+    from multisearch.safe_fetch import FetchError
+
+    class Evidence:
+        async def extract(self, url, **_kwargs):
+            if url.endswith("scanned.pdf"):
+                raise OCRPending()
+            raise FetchError(422, "FETCH_NO_EXCERPT", "没有可提取正文")
+
+    search = service(
+        FakeProvider("ddgs", url="https://example.org/scanned.pdf"),
+        FakeProvider("searxng", url="https://example.org/blank.pdf"),
+    )
+    search.evidence = Evidence()
+    result = await search.search(
+        SearchRequest(query="fact", mode="evidence", max_pages=2), "tenant", "test"
+    )
+    assert result.partial and not result.evidence_records
+    assert {item.url: item.evidence_status for item in result.results} == {
+        "https://example.org/scanned.pdf": "ocr_pending",
+        "https://example.org/blank.pdf": "unverified",
+    }
+    assert all(not item.evidence_refs for item in result.results)
+    assert {"OCR_PENDING", "EVIDENCE_EXTRACTION_INCOMPLETE", "EVIDENCE_UNAVAILABLE"}.issubset(
+        result.warnings
+    )
+    assert result.budget.pages_attempted == 2 and result.budget.pages_fetched == 0
+
+
 async def test_published_routing_and_tenant_cache_epoch_change_execution():
     ddgs = FakeProvider("ddgs", handler=failed)
     searxng = FakeProvider("searxng")

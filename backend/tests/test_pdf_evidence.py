@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 from pypdf import PdfWriter
 from pypdf.actions import JavaScript
-from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, NumberObject
 
 from multisearch import pdf_parser
 from multisearch.evidence import EvidenceBuilder
 from multisearch.pdf_child import PDF_MAX_OUTPUT, PDF_MAX_PAGES
-from multisearch.pdf_parser import PdfParser
+from multisearch.pdf_parser import OCRPending, PdfParser
 from multisearch.safe_fetch import FetchedPage, FetchError
 
 ORIGIN = "https://example.org/reference.pdf"
@@ -44,6 +44,41 @@ def make_pdf(*pages: str, encrypted: bool = False, active_content: bool = False)
         writer.add_open_action(JavaScript('app.launchURL("https://example.org/external", true);'))
     if encrypted:
         writer.encrypt("sample-password")
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def make_image_pdf(*, inline: bool, blank: bool = False) -> bytes:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    stream = DecodedStreamObject()
+    if blank:
+        stream.set_data(b"q Q\n")
+    elif inline:
+        stream.set_data(b"q 10 0 0 10 0 0 cm BI /W 1 /H 1 /BPC 8 /CS /RGB ID \xff\x00\x00 EI Q\n")
+    else:
+        image = DecodedStreamObject()
+        image.set_data(b"\xff\x00\x00")
+        image.update(
+            {
+                NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Image"),
+                NameObject("/Width"): NumberObject(1),
+                NameObject("/Height"): NumberObject(1),
+                NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+                NameObject("/BitsPerComponent"): NumberObject(8),
+            }
+        )
+        page[NameObject("/Resources")] = DictionaryObject(
+            {
+                NameObject("/XObject"): DictionaryObject(
+                    {NameObject("/Im0"): writer._add_object(image)}
+                ),
+            }
+        )
+        stream.set_data(b"q 10 0 0 10 0 0 cm /Im0 Do Q\n")
+    page.replace_contents(stream)
     output = BytesIO()
     writer.write(output)
     return output.getvalue()
@@ -103,19 +138,34 @@ async def test_pdf_active_content_is_ignored_and_page_count_is_bounded():
     ("kind", "code"),
     [
         ("blank", "FETCH_NO_EXCERPT"),
+        ("blank_stream", "FETCH_NO_EXCERPT"),
         ("encrypted", "FETCH_PDF_ENCRYPTED"),
         ("malformed", "FETCH_PDF_INVALID"),
     ],
 )
-async def test_invalid_encrypted_and_scanned_only_pdfs_do_not_emit_evidence(kind, code):
+async def test_invalid_encrypted_and_blank_pdfs_do_not_emit_evidence(kind, code):
     body = {
         "blank": lambda: make_pdf(""),
+        "blank_stream": lambda: make_image_pdf(inline=False, blank=True),
         "encrypted": lambda: make_pdf("Hidden", encrypted=True),
         "malformed": lambda: b"%PDF-1.7\nnot a valid cross reference or trailer",
     }[kind]()
     with pytest.raises(FetchError) as error:
         await EvidenceBuilder(PDFFetcher(body)).extract(ORIGIN, timeout_s=3)
     assert error.value.code == code
+
+
+@pytest.mark.parametrize("inline", [True, False])
+async def test_image_only_pdf_requires_ocr_without_emitting_fake_evidence(inline):
+    body = make_image_pdf(inline=inline)
+    parsed = await PdfParser().parse(body, timeout_s=3)
+    assert parsed.has_visual_content and not any(parsed.pages)
+    with pytest.raises(OCRPending) as error:
+        await EvidenceBuilder(PDFFetcher(body)).extract(ORIGIN, timeout_s=3)
+    assert error.value.code == "OCR_PENDING" and not error.value.retryable
+    with pytest.raises(FetchError) as denied:
+        await EvidenceBuilder(PDFFetcher(body, max_snippet=0)).extract(ORIGIN, timeout_s=3)
+    assert denied.value.code == "FETCH_NO_EXCERPT"
 
 
 @pytest.mark.parametrize(

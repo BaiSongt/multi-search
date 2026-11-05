@@ -59,6 +59,12 @@ docker compose exec -T multisearch-api python -m multisearch.keys revoke --id KE
 
 配置文件启用 JSON 格式，保留 Web、新闻和图片类别所需的候选引擎，关闭 SearXNG 图片代理。每个引擎的实际覆盖与可用性受网络环境及上游限制。冒烟脚本会从 API 容器测试 `categories=images&format=json`，分别记录候选数与上游未响应数。[SearXNG Search API](https://docs.searxng.org/dev/search_api.html)
 
+## 部署策略基线
+
+Compose 将 `config.example.yaml` 以只读方式挂载到 API 和 Worker。自定义时将其复制为 `config.local.yaml`，编辑后在 `.env` 中设置 `MULTISEARCH_POLICY_PATH=./config.local.yaml`，再重新创建两个服务。独立启动 Python 服务时可用 `MULTISEARCH_POLICY_FILE` 指定同一文件。文件支持模式预算、自动快速模式阈值、快速回退、缓存时限、来源优先级／限流及图片过滤默认值。配置应与发布记录一起保存。 [配置示例](../config.example.yaml)
+
+管理台发布的路由版本和已保存的来源策略优先。路由回滚到版本 0 使用当前部署基线。调用方可逐项覆盖图片默认值，已受理的研究任务保存其有效图片选项。策略文件只接受受支持的字段，凭据继续通过专用 Secret 配置。
+
 ## 可选专业来源
 
 可在 `.env` 中设置 `MULTISEARCH_VERTICAL_SOURCES=crossref,arxiv` 选择来源，或设置 `MULTISEARCH_ENABLE_ACADEMIC=true` 启用 OpenAlex、Crossref 和 arXiv。学术请求使用 `source_types=["academic"]`。OpenAlex 匿名查询使用上游较低的额度，可配置 `MULTISEARCH_OPENALEX_KEY`。如需使用 Crossref 的礼貌访问池，可提供 `MULTISEARCH_CROSSREF_EMAIL`。
@@ -88,7 +94,7 @@ docker compose --profile fetch ps
 
 Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心跳。Crawl4AI 只在独立内部网络接受 Worker 传入的已验证 HTML，使用令牌鉴权。公开 URL 由 SafeFetcher 逐跳检查并固定目标 IP，遵守 robots 和摘录限制。解析器不接收 URL，且无需浏览器或公网访问。API 的同步 L3 默认使用静态提取。如需让同步 L3 使用隔离解析器，在启用 `fetch` 配置时设置 `CRAWL4AI_BASE_URL=http://crawl4ai:11235`。
 
-PDF 需要匹配 MIME 和文件签名，输入上限为 1 MiB。每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。当前镜像支持 PDF 文本层，OCR 引擎需另行集成。
+PDF 需要匹配 MIME 和文件签名，输入上限为 1 MiB。每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。当前镜像提取 PDF 文本层，将需要 OCR 的图像型 PDF 标记为待处理。部署方可通过 OCR 契约接入获准的引擎。
 
 ## 深度研究与指标
 

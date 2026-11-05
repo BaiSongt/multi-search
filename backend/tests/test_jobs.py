@@ -1,4 +1,6 @@
 import asyncio
+from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -14,6 +16,7 @@ from multisearch.job_api import router
 from multisearch.job_application import JobApplication
 from multisearch.job_contracts import FetchRequest, JobKind, JobStatus
 from multisearch.job_store import Claim
+from multisearch.pdf_parser import OCRPending
 from multisearch.safe_fetch import FetchError
 from multisearch.worker import Worker
 
@@ -81,6 +84,41 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
     assert outcome.result["failures"][0]["index"] == 1
     assert outcome.result["warnings"] == ["MAX_PAGES_REACHED"]
     assert evidence.calls == targets[:2] and store.completed == [1, 1, 2, 2]
+
+
+async def test_fetch_keeps_ocr_pending_after_checkpoint_and_does_not_refetch():
+    class Store:
+        def __init__(self):
+            self.saved = None
+
+        async def progress(self, _job, progress, *, checkpoint):
+            self.saved = (progress.model_copy(), deepcopy(checkpoint))
+            return True
+
+    class Evidence:
+        calls = 0
+
+        async def extract(self, *_args, **_kwargs):
+            self.calls += 1
+            raise OCRPending()
+
+    store, evidence = Store(), Evidence()
+    worker = Worker(store, evidence)
+    request = claim(url="https://example.org/scanned.pdf")
+    initial = await worker.fetch(request)
+    progress, checkpoint = store.saved
+    recovered = await worker.fetch(replace(request, progress=progress, checkpoint=checkpoint))
+
+    assert recovered == initial and evidence.calls == 1
+    assert (
+        initial.status == JobStatus.PARTIAL and initial.error is None and initial.pages_fetched == 0
+    )
+    assert initial.result == {
+        "evidence_records": [],
+        "warnings": ["OCR_PENDING"],
+        "failures": [],
+        "ocr_pending": [0],
+    }
 
 
 async def test_worker_cancellation_stops_inflight_handler_and_finishes_cancelled(monkeypatch):

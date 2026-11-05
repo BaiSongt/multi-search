@@ -1,0 +1,25 @@
+# 本文件提供 API 和 Worker 的部署基线。管理台发布的路由和来源策略优先。
+routing:
+  budgets:
+    local: {max_latency_ms: 2000, max_results: 30}
+    quick: {max_latency_ms: 4000, max_results: 10}
+    standard: {max_latency_ms: 12000, max_results: 30}
+  auto_quick_max_latency_ms: 4000
+  quick_fallback: true
+  cache_ttl_seconds:
+    web: 3600
+    news: 600
+    image: 1800
+    academic: 86400
+    code: 3600
+    negative: 30
+
+providers:
+  ddgs: {enabled: true, priority: 0, requests_per_minute: 120}
+  searxng: {enabled: true, priority: 0, requests_per_minute: 120}
+
+# 取消注释以设置图片请求的默认过滤。调用方可逐项覆盖。
+# image_options:
+#   min_width: 640
+#   source_page_required: true
+#   license_policy: any_with_status

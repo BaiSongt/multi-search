@@ -94,11 +94,20 @@ async def _audit(
 
 
 class OpsStore:
-    def __init__(self, db: AsyncEngine, redis: Redis, sessions: SessionStore, pepper: str):
+    def __init__(
+        self,
+        db: AsyncEngine,
+        redis: Redis,
+        sessions: SessionStore,
+        pepper: str,
+        *,
+        baseline: RoutingVersion = DEFAULT_ROUTING,
+    ):
         self.db = db
         self.redis = redis
         self.sessions = sessions
         self._pepper = pepper.encode()
+        self.baseline = baseline
 
     @staticmethod
     async def _tenant(connection: AsyncConnection, tenant_id: UUID, *, active: bool = False) -> str:
@@ -481,7 +490,7 @@ class OpsStore:
         """,
             {},
         )
-        return RoutingVersion.model_validate(row) if row is not None else DEFAULT_ROUTING
+        return RoutingVersion.model_validate(row) if row is not None else self.baseline
 
     async def active_routing(self) -> RoutingVersion:
         async with self.db.connect() as connection:
@@ -500,7 +509,7 @@ class OpsStore:
             )
             items = [RoutingVersion.model_validate(row) for row in result.mappings()]
         if len(items) <= limit and (cursor is None or cursor > 0):
-            items.append(DEFAULT_ROUTING)
+            items.append(self.baseline)
         return {
             "active": active,
             "items": items[:limit],
@@ -528,7 +537,7 @@ class OpsStore:
                 if rollback_of == old.version:
                     raise ApiError(409, "ROUTING_VERSION_CONFLICT", "目标版本已在使用")
                 if rollback_of == 0:
-                    policy = DEFAULT_ROUTING.policy
+                    policy = self.baseline.policy
                 else:
                     previous = await connection.scalar(
                         text("SELECT policy FROM routing_versions WHERE version = :version"),

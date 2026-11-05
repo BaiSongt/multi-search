@@ -16,7 +16,7 @@ from .evidence_contracts import STATIC_EXTRACTION_VERSION
 from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
-from .pdf_parser import PDF_EXTRACTION_VERSION, PdfParser
+from .pdf_parser import PDF_EXTRACTION_VERSION, OCRPending, PdfParser
 from .safe_fetch import FetchedPage, FetchError, SafeFetcher, snippet_limit
 
 _MAX_EXCERPT = 512
@@ -259,6 +259,8 @@ class EvidenceBuilder:
             if page.max_snippet == 0:
                 raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文")
             parsed_pdf = await self.pdf.parse(page.body, timeout_s=deadline - monotonic())
+            if parsed_pdf.has_visual_content and not any(parsed_pdf.pages):
+                raise OCRPending()
             blocks = [
                 _Block(text, None, page_number=index)
                 for index, text in enumerate(parsed_pdf.pages, start=1)

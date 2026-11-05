@@ -78,9 +78,11 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 
 正文提取成功时，`evidence_records` 返回来源、取得时间、实际摘录、规范化正文 SHA-256 和字符偏移。结果以 `evidence_refs` 指向记录，并标记为 `content_extracted`。摘要、提取失败或预算外结果保持 `unverified`。L3 图片区分来源页访问、原图匹配与许可核验。
 
-公开 PDF 的 `locator.kind` 为 `pdf_text`，`page_number` 从 1 开始，偏移针对该页规范化文本。`content_sha256` 覆盖已检查的规范化页及其边界，触及检查上限时证据带有截断警告。没有文本层、已加密或损坏的 PDF 会返回提取错误。
+公开 PDF 的 `locator.kind` 为 `pdf_text`，`page_number` 从 1 开始，偏移针对该页规范化文本。`content_sha256` 覆盖已检查的规范化页及其边界，触及检查上限时证据带有截断警告。图像型 PDF 需要 OCR 时，检索候选标记 `evidence_status=ocr_pending` 并返回 `OCR_PENDING` 告警，无证据引用。空白、加密或损坏的 PDF 分别返回相应的提取错误。
 
 `POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。
+
+抓取任务遇到图像型 PDF 时会进入 `partial` 终态，并在 `result.ocr_pending` 中返回待 OCR 的原始 URL 序号，从 0 开始。这些条目消耗抓取尝试预算，已提取页数仅统计实际生成证据的条目。当前 OCR 由外部授权适配器扩展。
 
 `POST /api/v1/research` 使用 SearchRequest，接受 `auto` 或 `deep`。同一请求也可通过 `POST /api/v1/search` 并设置 `mode=deep` 提交。REST 与 MCP 共享任务与幂等标识。研究启动只扣一次，结果记录轮次、来源、证据、页数和模型计量。恢复时保留已预留的预算，执行中断不会令预算重新计数。未知的模型用量保持未知。
 
@@ -95,5 +97,6 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 - `GET/POST /api/v1/keys` 查看掩码列表或创建密钥。创建与轮换响应的 `secret` 只返回一次。调用 `POST /api/v1/keys/{id}/rotate` 或 `/revoke` 更新生命周期。
 - `GET /api/v1/usage` 返回最近 30 个 UTC 自然日的计量、趋势和当前租户配额。开发者仅能查看自己的用量，具备权限的角色可查看本租户用量。
 - `/api/v1/admin/` 提供总览、Provider、脱敏请求、租户和审计。平台管理员可创建租户、修改租户配额与 Provider 策略。运维、审计及租户管理员按各自权限读取。
+- 平台管理员与运维可通过 `GET /api/v1/admin/requests/{id}` 读取脱敏请求及已存的来源运行记录。运维仅能读取所在租户，跨租户 ID 与不存在的 ID 均返回 404。列表支持来源、模式、模态、租户、状态、时间与追踪 ID 筛选，租户筛选按角色授权。
 
 MCP 客户端使用相同的搜索鉴权与计量。 [MCP 接入](mcp.md)

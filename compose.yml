@@ -30,7 +30,15 @@ services:
       CRAWL4AI_API_TOKEN_FILE: /run/secrets/crawl4ai_api_token
       MULTISEARCH_METRICS_TOKEN_FILE: /run/secrets/metrics_token
       MULTISEARCH_METRICS_ALLOW_LOOPBACK: ${MULTISEARCH_METRICS_ALLOW_LOOPBACK:-false}
+      MULTISEARCH_POLICY_FILE: /app/config.yaml
     secrets: [postgres_password, api_key_hash_pepper, crawl4ai_api_token, metrics_token]
+    volumes: &policy-file
+      - type: bind
+        source: ${MULTISEARCH_POLICY_PATH:-./config.example.yaml}
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "127.0.0.1:${MULTISEARCH_API_PORT:-8765}:8765"
     networks: [gateway, data, search, parser]
@@ -86,6 +94,7 @@ services:
       <<: *runtime-env
       CRAWL4AI_BASE_URL: ${CRAWL4AI_BASE_URL:-http://crawl4ai:11235}
     secrets: [postgres_password, api_key_hash_pepper, crawl4ai_api_token]
+    volumes: *policy-file
     networks: [data, search, parser]
     read_only: true
     tmpfs: [/tmp]

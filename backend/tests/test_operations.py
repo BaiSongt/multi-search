@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
+from multisearch.admin_api import router as admin_router
 from multisearch.contracts import Modality, Mode, Role, SearchRequest, Source
 from multisearch.errors import ApiError, install_errors
 from multisearch.ops_api import router
@@ -99,6 +100,48 @@ def _app(actor: SessionIdentity, store) -> FastAPI:
     app.state.search = SimpleNamespace(routing=DEFAULT_ROUTING)
     app.include_router(router)
     return app
+
+
+@pytest.mark.parametrize("role", list(Role))
+async def test_request_trace_reuses_scoped_request_permissions(role):
+    actor = _actor(role)
+    usage_id, foreign_tenant = uuid4(), uuid4()
+    trace_id = "a" * 32
+    expected_tenant = None if role == Role.PLATFORM_ADMIN else actor.tenant_id
+
+    class Reports:
+        async def requests(self, scope, limit, cursor, **filters):
+            assert scope.tenant == expected_tenant and scope.owner is None
+            assert filters["trace_id"] == trace_id
+            return {"items": [], "next_cursor": None}
+
+        async def request_detail(self, scope, identifier):
+            assert scope.tenant == expected_tenant and scope.owner is None
+            assert identifier == usage_id
+            return {"id": usage_id, "trace_id": trace_id, "provider_runs": []}
+
+    app = _app(actor, None)
+    app.state.reports = Reports()
+    app.include_router(admin_router)
+    path = "/api/v1/admin/requests"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://127.0.0.1") as client:
+        unauthenticated = await client.get(
+            f"{path}/{usage_id}", headers={"Authorization": "Bearer search-key"}
+        )
+        assert unauthenticated.status_code == 401
+        client.cookies.set(SESSION_COOKIE, "session-only")
+        listed = await client.get(path, params={"trace_id": trace_id})
+        detail = await client.get(f"{path}/{usage_id}")
+        if role not in {Role.PLATFORM_ADMIN, Role.OPERATIONS_ADMIN}:
+            assert listed.status_code == detail.status_code == 403
+        else:
+            assert listed.status_code == detail.status_code == 200
+            assert detail.json() == {"id": str(usage_id), "trace_id": trace_id, "provider_runs": []}
+        if role == Role.OPERATIONS_ADMIN:
+            cross_tenant = await client.get(
+                path, params={"trace_id": trace_id, "tenant_id": str(foreign_tenant)}
+            )
+            assert cross_tenant.status_code == 403
 
 
 @pytest.mark.parametrize("role", [Role.DEVELOPER, Role.AUDITOR, Role.OPERATIONS_ADMIN])

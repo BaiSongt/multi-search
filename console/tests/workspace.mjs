@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -132,8 +132,12 @@ async function evidenceResult(page) {
   await page.route("**/gateway/playground", async (route) => {
     assert.equal(route.request().postDataJSON().mode, "evidence");
     await route.fulfill({ json: {
-      request_id: "evidence-fixture", mode_executed: "evidence", partial: false, elapsed_ms: 100,
-      result_count: 0, warnings: [], cache_hit: false, results: [],
+      request_id: "evidence-fixture", mode_executed: "evidence", partial: true, elapsed_ms: 100,
+      result_count: 1, warnings: ["OCR_PENDING"], cache_hit: false, results: [{
+        kind: "text", result_id: "scanned-fixture", title: "扫描版示例", url: "https://example.org/scanned.pdf",
+        source_type: "web", provider_ids: ["fixture"], retrieved_at: "2026-11-05T00:00:00Z",
+        snippet: null, warnings: ["OCR_PENDING"], evidence_status: "ocr_pending",
+      }],
       evidence_records: [{
         evidence_id: "evidence-fixture-1", result_id: null, origin_url: origin, canonical_url: origin,
         document_identifier: null, retrieved_at: "2026-11-05T00:00:00Z", published_at: null,
@@ -148,6 +152,7 @@ async function evidenceResult(page) {
   await page.getByLabel("关键词").fill("证据定位测试");
   await page.getByLabel("搜索深度").selectOption("evidence");
   await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await page.getByRole("article").filter({ hasText: "扫描版示例" }).getByText("等待 OCR", { exact: true }).waitFor();
   await page.getByRole("button", { name: "证据详情" }).click();
   const dialog = page.getByRole("dialog", { name: "可定位证据" });
   await dialog.getByText("用于核对的证据摘录。").waitFor();
@@ -435,10 +440,87 @@ async function verifyOperations(page, tenantId) {
   await page.getByText(/图片缓存已更新到代数/).waitFor();
 }
 
+const traceSeed = `
+INSERT INTO usage_events (
+  id, tenant_id, principal_kind, principal_id, user_id, request_id, trace_id,
+  mode, modalities, source_types, status, code, elapsed_ms, replay_payload, reservation_expires_at
+) VALUES (
+  :'usage_id'::UUID, :'tenant_id'::UUID, 'session', :'user_id'::UUID, :'user_id'::UUID,
+  :'request_id', :'trace_id', 'standard', ARRAY['text'], ARRAY['academic'], 'failed',
+  'PROVIDER_UNAVAILABLE', 95, '{"query":"trace-redaction-fixture"}', now()
+);`;
+const traceRuns = `
+INSERT INTO provider_runs (usage_id, ordinal, provider_id, status, elapsed_ms, count, reason_codes)
+VALUES (:'usage_id'::UUID, 0, 'searxng', 'failed', 80, 0,
+  ARRAY['upstream_captcha', 'upstream_rate_limited']);`;
+
+function traceFixture(actor, id, traceId, sql) {
+  const result = spawnSync("docker", [
+    "compose", "exec", "-T", "postgres", "psql", "-Xq", "-U", "multisearch", "-d", "multisearch",
+    "-v", "ON_ERROR_STOP=1", "-v", `usage_id=${id}`, "-v", `trace_id=${traceId}`,
+    "-v", `tenant_id=${actor.tenant_id}`, "-v", `user_id=${actor.user_id}`, "-v", `request_id=trace-browser-${id}`,
+  ], { cwd: root, input: sql, timeout: 15_000, encoding: "utf8" });
+  assert.equal(result.status, 0, "无法准备或清理请求追踪测试记录");
+}
+
+async function verifyRequestTrace(page, developer, developerSession, operations, operationsSession) {
+  const id = randomUUID();
+  const traceId = randomBytes(16).toString("hex");
+  const ownId = randomUUID();
+  const ownTrace = randomBytes(16).toString("hex");
+  const route = `/gateway/admin/requests/${id}`;
+  try {
+    traceFixture(developerSession, id, traceId, `BEGIN;${traceSeed}${traceRuns}COMMIT;`);
+    traceFixture(operationsSession, ownId, ownTrace, traceSeed);
+    assert.equal((await developer.request.get(route)).status(), 403);
+    const denied = await operations.request.get(route);
+    assert.equal(denied.status(), 404);
+    assert.equal((await denied.json()).code, "REQUEST_NOT_FOUND");
+    const own = await operations.request.get(`/gateway/admin/requests/${ownId}`);
+    assert.equal(own.status(), 200);
+    assert.deepEqual((await own.json()).provider_runs, []);
+
+    await page.goto("/admin/requests");
+    await page.getByLabel("追踪 ID", { exact: true }).fill(traceId.toUpperCase());
+    await page.getByRole("combobox", { name: /^来源/ }).selectOption("academic");
+    const filtered = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === "/gateway/admin/requests" && url.searchParams.get("trace_id") === traceId
+        && url.searchParams.get("source_type") === "academic";
+    });
+    await page.getByRole("button", { name: "应用筛选" }).click();
+    const listing = await filtered;
+    assert.equal(listing.status(), 200);
+    assert.deepEqual((await listing.json()).items.map((row) => row.id), [id]);
+    await page.getByRole("row").filter({ hasText: `trace-browser-${id}` }).getByRole("button", { name: "详情" }).click();
+    const dialog = page.getByRole("dialog", { name: "请求详情" });
+    await dialog.getByText(traceId, { exact: true }).waitFor();
+    const provider = dialog.getByRole("row").filter({ hasText: "searxng" });
+    await provider.getByText("upstream_captcha", { exact: true }).waitFor();
+    await provider.getByText("upstream_rate_limited", { exact: true }).waitFor();
+    const response = await page.request.get(route);
+    assert.equal(response.status(), 200);
+    assert.equal(response.headers()["cache-control"], "no-store");
+    const body = await response.text();
+    assert.ok(!body.includes("trace-redaction-fixture"));
+    assert.deepEqual(JSON.parse(body).provider_runs, [{
+      provider_id: "searxng", status: "failed", elapsed_ms: 80, count: 0,
+      reason_codes: ["upstream_captcha", "upstream_rate_limited"],
+    }]);
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+  } finally {
+    const cleanup = "DELETE FROM usage_events WHERE id = :'usage_id'::UUID AND tenant_id = :'tenant_id'::UUID;";
+    traceFixture(developerSession, id, traceId, cleanup);
+    traceFixture(operationsSession, ownId, ownTrace, cleanup);
+  }
+}
+
 test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 120_000 }, async () => {
   const browser = await chromium.launch();
   const developer = await browser.newContext({ baseURL: base.origin, viewport: { width: 1280, height: 850 }, timezoneId: "Asia/Hong_Kong" });
   const admin = await browser.newContext({ baseURL: base.origin });
+  const operations = await browser.newContext({ baseURL: base.origin });
   const developerPage = await developer.newPage();
   const adminPage = await admin.newPage();
   const errors = [];
@@ -467,6 +549,14 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     assert.equal((await developer.request.get("/gateway/team/members")).status(), 403);
     const developerSession = await session(developer);
     tenantIds.push(developerSession.tenant_id);
+    const operationsAccount = provision("operations_admin");
+    fixtureAccounts.push(operationsAccount);
+    const operationsLogin = await operations.request.post("/gateway/auth/login", {
+      data: operationsAccount, headers: { Origin: base.origin },
+    });
+    assert.equal(operationsLogin.status(), 200);
+    const operationsSession = await session(operations);
+    tenantIds.push(operationsSession.tenant_id);
     const cookie = (await developer.cookies()).find((item) => item.name === "multisearch_session");
     assert.ok(cookie?.httpOnly && cookie.sameSite === "Lax");
     assert.equal((await developer.request.post("/gateway/auth/refresh", {
@@ -528,6 +618,7 @@ test("角色工作区、密钥生命周期、图片归属与审计", { timeout: 
     assert.deepEqual((await (await admin.request.get("/gateway/keys")).json()).keys, []);
     await adminPage.goto("/admin/providers");
     await adminPage.getByRole("region", { name: "Provider 状态和运行指标" }).waitFor();
+    await verifyRequestTrace(adminPage, developer, developerSession, operations, operationsSession);
     await adminPage.goto("/admin/tenants");
     await adminPage.getByRole("button", { name: "新建租户" }).click();
     const tenant = `browser-${randomBytes(6).toString("hex")}`;

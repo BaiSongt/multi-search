@@ -111,7 +111,7 @@ interface SearchItemBase {
   language: string | null;
   snippet: string | null;
   relevance_score: number;
-  evidence_status: "unverified" | "content_extracted" | "cross_checked";
+  evidence_status: "unverified" | "content_extracted" | "cross_checked" | "ocr_pending";
   evidence_refs: string[];
   warnings: string[];
 }

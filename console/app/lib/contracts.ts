@@ -120,6 +120,16 @@ export type RequestRow = {
   created_at: string;
 };
 
+export type RequestTrace = RequestRow & {
+  provider_runs: {
+    provider_id: string;
+    status: string;
+    elapsed_ms: number;
+    count: number;
+    reason_codes: string[];
+  }[];
+};
+
 export type Totals = {
   search_requests: number;
   text_results_returned: number;
@@ -224,6 +234,7 @@ type ResultBase = {
   retrieved_at: string;
   snippet: string | null;
   warnings: string[];
+  evidence_status?: "unverified" | "content_extracted" | "cross_checked" | "ocr_pending";
 };
 
 export type SearchResult = (ResultBase & { kind: "text" }) | (ResultBase & { kind: "image"; image: Attribution });

@@ -33,7 +33,7 @@ export function AdminOverview() {
         <h2>最近异常</h2>
         {failures.pending && <Loading />}
         {failures.error !== undefined && <Failure reason={failures.error} retry={failures.reload} />}
-        {failures.data && <RequestTable rows={failures.data.items} caption="最近失败的请求" />}
+        {failures.data && <RequestTable rows={failures.data.items} caption="最近失败的请求" showProviderRuns />}
       </section>
     </>
   );
@@ -205,6 +205,7 @@ export function RequestsView({ showTenant }: { showTenant: boolean }) {
     const values = Object.fromEntries(Array.from(fields).flatMap(([name, input]) => {
       const value = String(input).trim();
       if (!value) return [];
+      if (name === "trace_id") return [[name, value.toLowerCase()]];
       return [[name, name === "since" || name === "until" ? new Date(value).toISOString() : value]];
     }));
     pager.reset();
@@ -216,8 +217,9 @@ export function RequestsView({ showTenant }: { showTenant: boolean }) {
         <div className="form-grid">
           <label>请求状态<select name="status"><option value="">全部</option><option value="running">处理中</option><option value="completed">完成</option><option value="partial">部分完成</option><option value="failed">失败</option><option value="cancelled">取消</option></select></label>
           <label>搜索深度<select name="mode"><option value="">全部</option><option value="auto">自动</option><option value="quick">快速</option><option value="standard">标准</option><option value="local">本地</option><option value="evidence">证据</option><option value="deep">深度</option></select></label>
-          <label>模态<select name="modality"><option value="">全部</option><option value="text">文字</option><option value="image">图片</option></select></label>
-          <label>来源<select name="source_type"><option value="">全部</option><option value="web">Web</option><option value="news">新闻</option></select></label>
+          <label>模态<select name="modality"><option value="">全部</option><option value="text">文字</option><option value="image">图片</option><option value="video">视频</option></select></label>
+          <label>来源<select name="source_type"><option value="">全部</option><option value="web">Web</option><option value="news">新闻</option><option value="academic">学术</option><option value="code">代码</option><option value="patent">专利</option><option value="local">本地</option></select></label>
+          <label>追踪 ID<input name="trace_id" maxLength={32} pattern="[a-fA-F0-9]{32}" title="请输入 32 位十六进制追踪 ID" /></label>
           {showTenant && <label>租户 ID<input name="tenant_id" maxLength={36} /></label>}
           <label>开始时间<input name="since" type="datetime-local" /></label>
           <label>结束时间<input name="until" type="datetime-local" /></label>
@@ -232,7 +234,7 @@ export function RequestsView({ showTenant }: { showTenant: boolean }) {
       {resource.error !== undefined && <Failure reason={resource.error} retry={resource.reload} />}
       {resource.data && (
         <>
-          <RequestTable rows={resource.data.items} showTenant={showTenant} />
+          <RequestTable rows={resource.data.items} showTenant={showTenant} showProviderRuns />
           <Pagination next={resource.data.next_cursor} pager={pager} />
         </>
       )}

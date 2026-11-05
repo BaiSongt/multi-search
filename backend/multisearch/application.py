@@ -67,7 +67,8 @@ class SearchApplication:
         started: float,
     ) -> SearchResponse:
         routing = self.service.routing
-        mode, budget = self.service.plan(body, routing=routing)
+        request = self.service.settings.deployment_policy.apply_image_options(body)
+        mode, budget = self.service.plan(request, routing=routing)
         deadline = started + budget.max_latency_ms / 1000
         try:
             async with timeout_at(deadline):
@@ -88,7 +89,7 @@ class SearchApplication:
 
         try:
             response = await self.service.search(
-                body,
+                request,
                 str(principal.tenant_id),
                 request_id,
                 metered=True,

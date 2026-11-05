@@ -59,19 +59,26 @@ class JobApplication:
         total: int,
         *,
         session: bool = False,
+        fingerprint_body: SearchRequest | None = None,
     ) -> JobAccepted:
         ready = await self.available(kind)
         if not ready and body.idempotency_key is None:
             raise ApiError(503, "WORKER_UNAVAILABLE", "后台 Worker 暂不可用", retryable=True)
+        excludes = {"request_id", "idempotency_key"}
         job = await self.store.create(
             principal,
             kind,
-            body.model_dump(mode="json", exclude={"request_id", "idempotency_key"}),
+            body.model_dump(mode="json", exclude=excludes),
             request_id,
             body.idempotency_key,
             budget["max_latency_ms"],
             total,
             worker_available=ready,
+            idempotency_payload=(
+                fingerprint_body.model_dump(mode="json", exclude=excludes)
+                if fingerprint_body
+                else None
+            ),
         )
         prefix = "/api/v1/console/jobs" if session else "/api/v1/jobs"
         return JobAccepted(
@@ -128,15 +135,17 @@ class JobApplication:
             )
         self.search.plan(body.model_copy(update={"mode": Mode.STANDARD, "require_evidence": False}))
         normalized = body.model_copy(update={"mode": Mode.DEEP})
-        budget = research_budget(normalized)
+        effective = self.search.settings.deployment_policy.apply_image_options(normalized)
+        budget = research_budget(effective)
         return await self._submit(
             JobKind.RESEARCH,
             principal,
-            normalized,
+            effective,
             request_id,
             budget.model_dump(),
             budget.max_search_rounds,
             session=session,
+            fingerprint_body=normalized if effective is not normalized else None,
         )
 
     async def research(

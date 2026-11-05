@@ -1,5 +1,6 @@
 .git
 .env
+config.local.yaml
 .secrets
 **/.venv
 .uv-cache

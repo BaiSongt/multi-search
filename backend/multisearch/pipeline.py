@@ -300,6 +300,15 @@ class _Group:
             updates["authors"] = result.authors or other.authors
             updates["journal"] = result.journal or other.journal
             if result.canonical_url == other.canonical_url:
+                if result.canonical_url:
+                    if (
+                        result.evidence_status == "unverified"
+                        and other.evidence_status == "ocr_pending"
+                    ):
+                        updates["evidence_status"] = other.evidence_status
+                    updates["evidence_refs"] = list(
+                        dict.fromkeys(result.evidence_refs + other.evidence_refs)
+                    )
                 if result.license_name is None and result.license_url is None:
                     updates["license_name"] = other.license_name
                     updates["license_url"] = other.license_url

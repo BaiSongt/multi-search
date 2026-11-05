@@ -15,6 +15,7 @@ Crawl4AI — Apache-2.0 — https://github.com/unclecode/crawl4ai/blob/v0.9.5/LI
 lxml — BSD-3-Clause — https://github.com/lxml/lxml/blob/master/LICENSES.txt
 Protego — BSD-3-Clause — https://github.com/scrapy/protego/blob/master/LICENSE
 pypdf — BSD-3-Clause — https://pypi.org/project/pypdf/6.21.4/
+PyYAML — MIT — https://github.com/yaml/pyyaml/blob/6.0.3/LICENSE
 MCP Python SDK — MIT — https://github.com/modelcontextprotocol/python-sdk/blob/v2.3.0/LICENSE
 SQLAlchemy — MIT — https://github.com/sqlalchemy/sqlalchemy/blob/main/LICENSE
 Alembic — MIT — https://github.com/sqlalchemy/alembic/blob/main/LICENSE
