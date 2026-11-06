@@ -1,5 +1,7 @@
+import { providerReasonCodes, type ProviderDiagnostics } from "./contracts";
+
 export class ApiError extends Error {
-  constructor(public status: number, public code: string, message: string, public requestId?: string, public retryAfterMs?: number) {
+  constructor(public status: number, public code: string, message: string, public requestId?: string, public retryAfterMs?: number, public providerReasons: string[] = []) {
     super(message);
   }
 }
@@ -20,13 +22,16 @@ export async function callApi<T>(
     signal: options.signal,
   });
   if (!response.ok) {
-    const error = await response.json().catch(() => ({})) as { code?: string; message?: string; request_id?: string; retry_after_ms?: number };
+    const error = await response.json().catch(() => ({})) as ProviderDiagnostics & {
+      code?: string; message?: string; request_id?: string; retry_after_ms?: number;
+    };
     throw new ApiError(
       response.status,
       error.code ?? "HTTP_ERROR",
       error.message ?? "请求失败",
       error.request_id ?? response.headers.get("X-Request-ID") ?? undefined,
       error.retry_after_ms,
+      providerReasonCodes(error),
     );
   }
   return (response.status === 204 ? undefined : await response.json()) as T;

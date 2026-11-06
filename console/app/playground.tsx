@@ -2,9 +2,9 @@
 
 import { useState, type FormEvent } from "react";
 import { callApi } from "./lib/api";
-import type { Capabilities, EvidenceRecord, ImageResult, JobAccepted, RightsStatus, SearchResponse, SearchResult } from "./lib/contracts";
+import { providerReasonCodes, type Capabilities, type EvidenceRecord, type ImageResult, type JobAccepted, type RightsStatus, type SearchResponse, type SearchResult } from "./lib/contracts";
 import { ResearchJob } from "./research-job";
-import { Copy, CopyId, dateTime, Dialog, Empty, ExternalLink, Failure, Loading, safeLink, useResource } from "./ui";
+import { Copy, CopyId, dateTime, Dialog, Empty, ExternalLink, Failure, Loading, ProviderReasonList, safeLink, useResource } from "./ui";
 
 const RIGHTS: Record<RightsStatus, { label: string; color: string }> = {
   unknown: { label: "授权未知", color: "warning" },
@@ -154,6 +154,46 @@ function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () 
         <p className="muted">字符偏移定位到本次抓取所提取的文本。</p>
       </div>
     </Dialog>
+  );
+}
+
+function SearchSummary({ response }: { response: SearchResponse }) {
+  const { partial, result_count: count, warnings } = response;
+  const status = response.result_status ?? (count > 0
+    ? partial ? "partial_results" : "has_results"
+    : partial ? "incomplete_no_results" : "no_results");
+  const title = {
+    has_results: `${count} 条结果`,
+    no_results: "没有符合条件的结果",
+    partial_results: `返回 ${count} 条结果，覆盖不完整`,
+    incomplete_no_results: "检索未完成，暂未取得结果",
+  }[status];
+  const descriptions = {
+    has_results: null,
+    no_results: "检索已完成，未找到匹配项。",
+    partial_results: "部分来源或检索步骤未完成，以下结果可能不完整。",
+    incomplete_no_results: warnings.includes("LOCAL_CACHE_MISS")
+      ? "本地缓存未命中，未执行在线检索。"
+      : "部分来源或检索步骤未完成，暂时无法确认是否有匹配项。",
+  };
+  return (
+    <section className="panel" aria-label="搜索摘要">
+      <h2>{title}</h2>
+      <div className="status-line">
+        <span className="badge">{response.mode_executed} · {response.elapsed_ms} ms</span>
+        {response.cache_hit && <span className="badge">缓存命中</span>}
+        <CopyId value={response.request_id} />
+      </div>
+      {descriptions[status] && (
+        <div className={partial ? "notice warning" : "muted"} role="status">
+          <p>{descriptions[status]}</p>
+          <ProviderReasonList codes={providerReasonCodes(response)} />
+        </div>
+      )}
+      {warnings.length > 0 && (
+        <details><summary>查看诊断代码</summary><ul>{warnings.map((warning) => <li key={warning}><code>{warning}</code></li>)}</ul></details>
+      )}
+    </section>
   );
 }
 
@@ -337,17 +377,8 @@ export function Playground({ csrf, imageOnly = false, sessionSearch = true }: { 
         renderResults={(results) => <ResultCards results={results} showImage={setSelected} label="研究候选结果" />} />}
       {response && (
         <>
-          <section className="panel" aria-label="搜索摘要">
-            <h2>{response.result_count} 条结果</h2>
-            <div className="status-line">
-              <span className="badge">{response.mode_executed} · {response.elapsed_ms} ms</span>
-              {response.cache_hit && <span className="badge">缓存命中</span>}
-              {response.partial && <span className="badge warning">部分结果</span>}
-              <CopyId value={response.request_id} />
-            </div>
-            {response.warnings.length > 0 && <ul>{response.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
-          </section>
-          <ResultCards results={response.results} showImage={setSelected} />
+          <SearchSummary response={response} />
+          {response.results.length > 0 && <ResultCards results={response.results} showImage={setSelected} />}
           <details className="panel"><summary>查看原始响应 JSON</summary><pre>{JSON.stringify(response, null, 2)}</pre></details>
           {response.evidence_records && response.evidence_records.length > 0 && (
             <section className="panel" aria-label="证据列表">

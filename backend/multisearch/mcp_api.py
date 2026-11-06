@@ -22,7 +22,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import ImageSearchResult, InputModel, Modality, Mode, SearchRequest, SearchResponse
+from .contracts import (
+    ImageSearchResult,
+    InputModel,
+    Modality,
+    Mode,
+    ProviderReason,
+    SearchRequest,
+    SearchResponse,
+    SearchResultStatus,
+)
 from .errors import ApiError
 from .identity import MachineIdentity
 from .job_contracts import FetchRequest, JobAccepted, JobStatus, JobView
@@ -76,6 +85,8 @@ class MCPDeferredResult(BaseModel):
     trace_id: str | None = Field(default=None, max_length=128)
     job_id: UUID | None = None
     result_count: int | None = None
+    result_status: SearchResultStatus | None = None
+    provider_reason_codes: list[ProviderReason] = Field(default_factory=list)
     partial: bool
     preview: list[_ResultPreview] = Field(default_factory=list, max_length=3)
     result_ref: MCPResultReference
@@ -146,6 +157,8 @@ def _deferred(
         kind="search",
         partial=response.partial,
         result_count=response.result_count,
+        result_status=response.result_status,
+        provider_reason_codes=response.provider_reason_codes,
         preview=[
             _ResultPreview(
                 result_id=hit.result_id,
@@ -197,7 +210,10 @@ def create_mcp(
     if result_store is not None:
         search_output |= MCPDeferredResult
         job_output |= MCPDeferredResult
-    output_schema = {"type": "object", **TypeAdapter(search_output).json_schema()}
+    output_schema = {
+        "type": "object",
+        **TypeAdapter(search_output).json_schema(mode="serialization"),
+    }
     image_schema = SearchRequest.model_json_schema()
     del image_schema["properties"]["modalities"]
     read_search = ToolAnnotations(read_only_hint=True, open_world_hint=True)

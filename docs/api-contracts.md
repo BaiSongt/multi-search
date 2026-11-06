@@ -60,6 +60,17 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 ### 结果与错误
 
+同步检索的 HTTP 200 表示响应可读取。读取 `result_status` 判断本次是否实际交付了候选，以及检索覆盖是否完整：
+
+| `result_status` | 含义 |
+| --- | --- |
+| `has_results` | 检索完成且有结果 |
+| `no_results` | 检索完成，当前查询和筛选条件下没有匹配项 |
+| `partial_results` | 有可用结果，部分来源或检索步骤未完成 |
+| `incomplete_no_results` | 没有取得结果，检索未完整执行。例如上游异常时其他来源也没有结果，或本地模式缓存未命中 |
+
+保留原有 `status`（`completed` 或 `partial`）和 `partial` 字段。全部来源不可用时沿用 HTTP 502，检索超时沿用 HTTP 504。同步响应与已知来源原因的错误正文都提供 `provider_reason_codes`，例如 `upstream_rate_limited`、`upstream_captcha` 或 `upstream_timeout`。其中 `local_provider_rate_limited` 表示本地来源配额，与上游限流区分。成功重试前出现的原因仍可在 `provider_runs` 查看。
+
 `results` 按 `kind` 区分 `text` 与 `image`，图片详见 [图片归属契约](image-attribution.md)。重复来源合并时 `provider_ids` 保留各 Provider。Provider 级详情在 `provider_runs` 返回。上游部分失败时结合 `partial`、`warnings`、`provider_runs` 判断覆盖范围。快速模式只为当前可调度的来源预留时限。严格图片许可检索会在首源缺少符合要求的候选时继续检查可用候补。文字摘要为发现线索，证据状态为 `unverified`。
 
 错误对象包含 `request_id`、`code`、`message`、`retryable`，适用时含 `retry_after_ms`。响应头 `X-Request-ID` 可用于关联当前请求。典型状态如下。

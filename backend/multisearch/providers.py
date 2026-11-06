@@ -100,6 +100,8 @@ class ProviderFailure(Exception):
     ):
         self.status = status
         self.retry_after = retry_after
+        if status == "rate_limited" and not reason_codes:
+            reason_codes = (ProviderReason.UPSTREAM_RATE_LIMITED,)
         self.reason_codes = reason_codes
         super().__init__(status)
 

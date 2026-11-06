@@ -65,6 +65,7 @@ class MultiSearchClientTest(unittest.TestCase):
                             "code": "RATE_LIMITED",
                             "message": f"Unsafe echoed content {TOKEN}",
                             "retryable": True,
+                            "provider_reason_codes": ["upstream_rate_limited", TOKEN],
                         },
                     )
                 elif self.path.endswith("/capabilities"):
@@ -189,6 +190,7 @@ class MultiSearchClientTest(unittest.TestCase):
         self.assertEqual((result.request_id, result.trace_id), ("from-body", TRACE))
         self.assertTrue(result.retryable)
         self.assertEqual(result.retry_after_ms, 2000)
+        self.assertEqual(result.provider_reason_codes, ("upstream_rate_limited",))
         self.assertNotIn(TOKEN, repr(result))
 
     def test_bounds_response_and_local_timeout(self):

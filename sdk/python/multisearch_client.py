@@ -29,6 +29,7 @@ type JsonObject = dict[str, object]
 _CORRELATION = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _TRACE = re.compile(r"[a-fA-F0-9]{32}")
 _ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_PROVIDER_REASON = re.compile(r"(?:upstream|local_provider)_[a-z_]{1,40}")
 _BEARER = re.compile(r"[A-Za-z0-9._~+/=-]{1,512}")
 _BODY_LIMIT = 32_768
 _MAX_RESPONSE_LIMIT = 16 * 1024 * 1024
@@ -193,6 +194,10 @@ class SearchResponse(TypedDict):
     partial: bool
     elapsed_ms: int
     result_count: int
+    result_status: NotRequired[
+        Literal["has_results", "no_results", "partial_results", "incomplete_no_results"]
+    ]
+    provider_reason_codes: NotRequired[list[str]]
     results: list[SearchItem]
     evidence_records: list[JsonObject]
     provider_runs: list[JsonObject]
@@ -255,6 +260,7 @@ class MultiSearchError(Exception):
         trace_id: str | None = None,
         retryable: bool = False,
         retry_after_ms: int | None = None,
+        provider_reason_codes: tuple[str, ...] = (),
     ):
         super().__init__(
             f"MultiSearch {code}" + (f" (HTTP {status})" if status is not None else "")
@@ -265,6 +271,7 @@ class MultiSearchError(Exception):
         self.trace_id = trace_id
         self.retryable = retryable
         self.retry_after_ms = retry_after_ms
+        self.provider_reason_codes = provider_reason_codes
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -464,6 +471,7 @@ class MultiSearchClient:
                         payload.get("request_id"), _CORRELATION
                     )
                 if status >= 400:
+                    reasons = payload.get("provider_reason_codes")
                     raise MultiSearchError(
                         _matching(payload.get("code"), _ERROR_CODE) or "HTTP_ERROR",
                         retryable=payload.get("retryable") is True
@@ -473,6 +481,11 @@ class MultiSearchClient:
                         ),
                         retry_after_ms=_retry_delay(
                             payload, response.headers.get("Retry-After")
+                        ),
+                        provider_reason_codes=tuple(
+                            code
+                            for reason in (reasons[:16] if isinstance(reasons, list) else ())
+                            if (code := _matching(reason, _PROVIDER_REASON)) is not None
                         ),
                         **ids,
                     )

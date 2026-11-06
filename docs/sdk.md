@@ -19,7 +19,8 @@ response = client.search(
     request_id=str(uuid4()),
     idempotency_key=str(uuid4()),
 )
-print(response.status, response.request_id, response.trace_id)
+if "result_status" in response.body:
+    print(response.body["result_status"], response.body.get("provider_reason_codes", []))
 
 if capabilities["research"] == "available":
     submitted = client.research(
@@ -46,7 +47,9 @@ const response = await client.search(
   { query: "公开技术文档", mode: "quick", max_results: 5 },
   { requestId: randomUUID(), idempotencyKey: randomUUID() },
 );
-console.log(response.status, response.requestId, response.traceId);
+if ("result_status" in response.body) {
+  console.log(response.body.result_status, response.body.provider_reason_codes);
+}
 
 if (capabilities.research === "available") {
   const submitted = await client.research(
@@ -68,7 +71,7 @@ if (capabilities.research === "available") {
 | 查询任务 | `get_job(job_id)` | `getJob(jobId)` | `200`，任务状态 |
 | 取消任务 | `cancel_job(job_id)` | `cancelJob(jobId)` | `200`，任务状态 |
 
-抓取请求可传 `{"url": "https://example.org/"}` 或 `{"urls": ["https://example.org/"]}`，需要 `fetch` 作用域。研究请求需要 `research` 与相应模态的搜索作用域。请在呈现结果时保留 `partial`、警告、证据引用和图片的权利状态。
+抓取请求可传 `{"url": "https://example.org/"}` 或 `{"urls": ["https://example.org/"]}`，需要 `fetch` 作用域。研究请求需要 `research` 与相应模态的搜索作用域。请在呈现同步搜索结果时检查 `result_status` 和 `provider_reason_codes`，并保留警告、证据引用和图片的权利状态。错误对象的对应字段为 Python 的 `provider_reason_codes` 或 TypeScript 的 `providerReasonCodes`。
 
 提交请求可传独立的请求标识和幂等键，也可使用请求正文中的 `request_id` 与 `idempotency_key`。首次提交前保存幂等键。若请求超时且服务端是否受理尚未确认，重试时复用原请求内容和幂等键。可记录返回的请求与追踪标识以关联服务端日志。错误对象提供 HTTP 状态、错误码、是否可重试及服务端建议的重试间隔。客户端将重试间隔归一为毫秒，重试由应用控制。 [幂等与错误契约](api-contracts.md)
 

@@ -14,7 +14,7 @@
 
 同步搜索返回 REST `SearchResponse`。`web_fetch`、`start_deep_research` 和设置 `mode=deep` 的搜索返回 `JobAccepted`，其中包含 `job_id`、预算与 REST 状态地址。任务查询与取消返回 `JobView`。配置任务服务后可发现四个任务工具，提交任务需要相应 Worker 就绪。每个任务的查询和取消都执行与 REST 相同的租户与作用域校验。
 
-工具执行失败时返回 `isError` 与结构化错误对象。客户端应明确展示 `partial`、`warnings` 与图片 `rights_status`。搜索候选不代表获得作品授权。
+工具执行失败时返回 `isError` 与结构化错误对象。同步搜索与搜索预览提供 `result_status`，区分 `has_results`、`no_results`、`partial_results` 与 `incomplete_no_results`。有已知的未恢复来源错误时，在搜索响应、搜索预览和工具错误对象中查看 `provider_reason_codes`（例如 `upstream_rate_limited`）。客户端也应展示 `warnings` 与图片 `rights_status`。搜索候选不代表获得作品授权。 [结果与错误](api-contracts.md#结果与错误)
 
 ## 长结果取回
 

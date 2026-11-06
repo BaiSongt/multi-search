@@ -42,6 +42,7 @@ const api = createServer(async (request, response) => {
     response.writeHead(429, { ...headers, "Retry-After": "2" }).end(JSON.stringify({
       request_id: "from-body", code: "RATE_LIMITED",
       message: `Unsafe echoed content ${token}`, retryable: true,
+      provider_reason_codes: ["upstream_rate_limited", token],
     }));
     return;
   }
@@ -113,6 +114,7 @@ test("bounds responses, timeouts, and surfaced error metadata", async () => {
       ["RATE_LIMITED", 429, "from-body", traceId, true, 2000],
     );
     assert.ok(!String(error).includes(token));
+    assert.deepEqual(error.providerReasonCodes, ["upstream_rate_limited"]);
     return true;
   });
   const bounded = new MultiSearchClient(base, { apiKey: token, maxResponseBytes: 64 });

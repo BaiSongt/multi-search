@@ -141,6 +141,8 @@ export interface SearchResponse {
   partial: boolean;
   elapsed_ms: number;
   result_count: number;
+  result_status?: "has_results" | "no_results" | "partial_results" | "incomplete_no_results";
+  provider_reason_codes?: string[];
   results: SearchItem[];
   evidence_records: JsonObject[];
   provider_runs: JsonObject[];
@@ -205,6 +207,7 @@ interface ResponseIds {
 interface ErrorDetails extends ResponseIds {
   retryable?: boolean;
   retryAfterMs?: number | null;
+  providerReasonCodes?: readonly string[];
 }
 
 export class MultiSearchError extends Error {
@@ -214,6 +217,7 @@ export class MultiSearchError extends Error {
   readonly traceId: string | null;
   readonly retryable: boolean;
   readonly retryAfterMs: number | null;
+  readonly providerReasonCodes: readonly string[];
 
   constructor(code: string, details: ErrorDetails = {}) {
     super(`MultiSearch ${code}${details.status === undefined ? "" : ` (HTTP ${details.status})`}`);
@@ -224,6 +228,7 @@ export class MultiSearchError extends Error {
     this.traceId = details.traceId ?? null;
     this.retryable = details.retryable ?? false;
     this.retryAfterMs = details.retryAfterMs ?? null;
+    this.providerReasonCodes = details.providerReasonCodes ?? [];
   }
 }
 
@@ -237,6 +242,7 @@ export interface ClientOptions {
 const CORRELATION = /^[A-Za-z0-9._-]{1,128}$/;
 const TRACE = /^[a-f0-9]{32}$/i;
 const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const PROVIDER_REASON = /^(?:upstream|local_provider)_[a-z_]{1,40}$/;
 const BEARER = /^[A-Za-z0-9._~+/=-]{1,512}$/;
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const MAX_REQUEST_BYTES = 32_768;
@@ -416,11 +422,15 @@ export class MultiSearchClient {
       }
       ids.requestId ??= matching(payload.request_id, CORRELATION);
       if (!response.ok) {
+        const reasons = payload.provider_reason_codes;
         throw new MultiSearchError(matching(payload.code, ERROR_CODE) ?? "HTTP_ERROR", {
           ...ids,
           retryable: typeof payload.retryable === "boolean"
             ? payload.retryable : response.status === 429 || response.status >= 500,
           retryAfterMs: retryDelay(payload, response.headers.get("retry-after")),
+          providerReasonCodes: Array.isArray(reasons)
+            ? reasons.slice(0, 16).filter((reason): reason is string => matching(reason, PROVIDER_REASON) !== null)
+            : [],
         });
       }
       if (!expected.includes(response.status) || !Object.hasOwn(payload, response.status === 202 ? "job_id" : key)) {

@@ -2,7 +2,14 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    computed_field,
+    model_validator,
+)
 
 from .evidence_contracts import EvidenceRecord
 
@@ -209,6 +216,17 @@ class ProviderRun(BaseModel):
     )
 
 
+def unresolved_provider_reasons(runs: list[ProviderRun]) -> list[ProviderReason]:
+    return sorted(
+        {
+            reason
+            for run in runs
+            if run.status not in {"success", "empty"}
+            for reason in run.reason_codes
+        }
+    )
+
+
 class SearchBudget(BaseModel):
     max_latency_ms: int
     max_results: int
@@ -220,6 +238,11 @@ class SearchBudget(BaseModel):
     pages_fetched: int = 0
     pages_attempted: int = 0
     llm_tokens: int = 0
+
+
+SearchResultStatus = Literal[
+    "has_results", "no_results", "partial_results", "incomplete_no_results"
+]
 
 
 class SearchResponse(BaseModel):
@@ -240,6 +263,20 @@ class SearchResponse(BaseModel):
     cache_hit: bool = False
     budget: SearchBudget
 
+    @computed_field
+    @property
+    def result_status(self) -> SearchResultStatus:
+        """Whether the search delivered results and whether coverage was incomplete."""
+        if self.result_count == 0:
+            return "incomplete_no_results" if self.partial else "no_results"
+        return "partial_results" if self.partial else "has_results"
+
+    @computed_field
+    @property
+    def provider_reason_codes(self) -> list[ProviderReason]:
+        """Deduplicated reasons for sources with incomplete or failed runs."""
+        return unresolved_provider_reasons(self.provider_runs)
+
 
 class ErrorBody(BaseModel):
     request_id: str
@@ -248,3 +285,6 @@ class ErrorBody(BaseModel):
     retryable: bool = False
     retry_after_ms: int | None = None
     provider_runs: list[ProviderRun] | None = None
+    provider_reason_codes: list[ProviderReason] = Field(
+        default_factory=list, exclude_if=lambda codes: not codes
+    )

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import ErrorBody, ProviderRun
+from .contracts import ErrorBody, ProviderRun, unresolved_provider_reasons
 
 
 class ApiError(Exception):
@@ -36,6 +36,7 @@ class ApiError(Exception):
             retryable=self.retryable,
             retry_after_ms=self.retry_after_ms,
             provider_runs=self.provider_runs or None,
+            provider_reason_codes=unresolved_provider_reasons(self.provider_runs),
         )
 
 

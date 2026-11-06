@@ -60,7 +60,7 @@ export function DocsView({ canManageKeys }: { canManageKeys: boolean }) {
     Body = @{ query = "NASA"; max_results = 5 } | ConvertTo-Json
 }
 $response = Invoke-RestMethod @request
-$response.results | Select-Object title, url, snippet`} />
+$response | Select-Object result_status, result_count, provider_reason_codes, results`} />
         <Example title="Python" value={`import os
 import httpx
 
@@ -70,8 +70,11 @@ response = httpx.post(
     json={"query": "NASA", "max_results": 5},
     timeout=15,
 )
-response.raise_for_status()
-print(response.json()["results"])`} />
+data = response.json()
+if not response.is_success:
+    print(data.get("code"), data.get("provider_reason_codes", []))
+    response.raise_for_status()
+print(data["result_status"], data["provider_reason_codes"], data["results"])`} />
         <Example title="Node.js" value={`const response = await fetch("${search}", {
   method: "POST",
   headers: {
@@ -80,12 +83,17 @@ print(response.json()["results"])`} />
   },
   body: JSON.stringify({ query: "NASA", max_results: 5 }),
 });
-if (!response.ok) throw new Error("HTTP " + response.status);
-console.log((await response.json()).results);`} />
+const data = await response.json();
+if (!response.ok) {
+  throw new Error([data.code ?? "HTTP " + response.status, ...(data.provider_reason_codes ?? [])].join(" "));
+}
+console.log(data.result_status, data.provider_reason_codes, data.results);`} />
         <p className="muted">
-          文字结果位于 <code>results</code>，每条包含 <code>title</code>、<code>url</code> 和 <code>snippet</code>。
-          <code>401</code> 表示密钥缺失或无效，<code>403</code> 表示权限不足，<code>429</code> 表示达到限流或额度上限。
+          先检查 <code>result_status</code>：<code>no_results</code> 表示检索完成但没有匹配项，
+          <code>incomplete_no_results</code> 表示检索未完整执行且没有拿到结果。
+          <code>provider_reason_codes</code> 提示上游限流、验证码或超时等原因。
         </p>
+        <p className="muted"><code>401</code> 表示密钥缺失或无效，<code>403</code> 表示权限不足，<code>429</code> 表示达到本平台的限流或额度上限。</p>
       </section>
       <section className="panel">
         <h2>批量网页提取</h2>

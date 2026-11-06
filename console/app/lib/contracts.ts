@@ -412,12 +412,37 @@ export type Capabilities = {
   limits: { modes: Record<string, { max_latency_ms: number; max_results: number }>; max_image_metadata_fetches: number };
 };
 
-export type SearchResponse = {
+export const providerReasonLabels: Record<string, string> = {
+  upstream_captcha: "上游要求验证码",
+  upstream_rate_limited: "上游限流",
+  upstream_timeout: "上游超时",
+  upstream_unavailable: "上游不可用",
+  local_provider_queue_timeout: "本地来源并发等待超时",
+  local_provider_rate_limited: "本地来源配额已满",
+};
+
+export type ProviderDiagnostics = {
+  provider_reason_codes?: string[];
+  provider_runs?: { status: string; reason_codes?: string[] }[];
+};
+
+export function providerReasonCodes(response: ProviderDiagnostics) {
+  return response.provider_reason_codes ?? [...new Set(
+    (response.provider_runs ?? [])
+      .filter((run) => run.status !== "success" && run.status !== "empty")
+      .flatMap((run) => run.reason_codes ?? []),
+  )];
+}
+
+export type SearchResultStatus = "has_results" | "no_results" | "partial_results" | "incomplete_no_results";
+
+export type SearchResponse = ProviderDiagnostics & {
   request_id: string;
   mode_executed: string;
   partial: boolean;
   elapsed_ms: number;
   result_count: number;
+  result_status?: SearchResultStatus;
   results: SearchResult[];
   warnings: string[];
   cache_hit: boolean;

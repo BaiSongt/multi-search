@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { callApi } from "./lib/api";
-import { quotaLabels, type RequestRow, type RequestTrace, type Totals, type Usage, type UsageDay } from "./lib/contracts";
+import { providerReasonLabels, quotaLabels, type RequestRow, type RequestTrace, type Totals, type Usage, type UsageDay } from "./lib/contracts";
 import { downloadCsv } from "./lib/csv";
 import { CopyId, dateTime, Dialog, Empty, Failure, formatNumber, Loading, Table, useResource } from "./ui";
 
@@ -31,15 +31,6 @@ const providerStatuses: Record<string, string> = {
   timeout: "超时",
   rate_limited: "限流",
   circuit_open: "熔断",
-};
-
-const providerReasons: Record<string, string> = {
-  upstream_captcha: "上游验证码",
-  upstream_rate_limited: "上游限流",
-  upstream_timeout: "上游超时",
-  upstream_unavailable: "上游不可用",
-  local_provider_queue_timeout: "本地来源并发等待超时",
-  local_provider_rate_limited: "本地来源配额已满",
 };
 
 export function Metrics({ values }: { values: [string, number | null | undefined, string?][] }) {
@@ -188,7 +179,7 @@ function AdminRequestTrace({ row, queryCsrf }: { row: RequestRow; queryCsrf?: st
               <td>{formatNumber(run.attempts)}</td>
               <td>{formatNumber(run.count)}</td>
               <td>{run.reason_codes.length ? (
-                <ul>{run.reason_codes.map((code) => <li key={code}>{providerReasons[code] ?? "未知原因"} <code>{code}</code></li>)}</ul>
+                <ul>{run.reason_codes.map((code) => <li key={code}>{providerReasonLabels[code] ?? "未知原因"} <code>{code}</code></li>)}</ul>
               ) : "—"}</td>
             </tr>
           ))}

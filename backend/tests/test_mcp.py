@@ -132,6 +132,7 @@ def _server(jobs=None, extra_keys=None, result_store=None):
                         modality=Modality.TEXT,
                         status="rate_limited",
                         elapsed_ms=7,
+                        reason_codes=["upstream_rate_limited"],
                     )
                 ],
             )
@@ -157,7 +158,9 @@ def _server(jobs=None, extra_keys=None, result_store=None):
             else TextSearchResult(**common)
         )
         hits = [hit]
-        if request.query == "fixture-large":
+        if request.query == "fixture-empty":
+            hits = []
+        elif request.query == "fixture-large":
             hits = [
                 hit.model_copy(
                     update={
@@ -206,7 +209,9 @@ async def test_official_client_streamable_http_contract(server, mode):
         assert "modalities" in tools["multi_search"].input_schema["properties"]
         assert "modalities" not in tools["image_search"].input_schema["properties"]
         assert "不代表获得使用授权" in tools["image_search"].description
-        assert tools["multi_search"].output_schema == SearchResponse.model_json_schema()
+        assert tools["multi_search"].output_schema == SearchResponse.model_json_schema(
+            mode="serialization"
+        )
         text = await client.call_tool(
             "multi_search", {"query": " NASA ", "mode": "quick", "request_id": "search-one"}
         )
@@ -216,6 +221,12 @@ async def test_official_client_streamable_http_contract(server, mode):
         assert identity == keys["mixed"]
         assert text.structured_content == rest_response.model_dump(mode="json")
         assert text.structured_content["request_id"] == "search-one"
+        assert text.structured_content["result_status"] == "has_results"
+
+        empty = await client.call_tool("multi_search", {"query": "fixture-empty"})
+        assert not empty.is_error
+        assert empty.structured_content["result_status"] == "no_results"
+        assert empty.structured_content["results"] == []
 
         image = await client.call_tool(
             "image_search", {"query": "NASA", "image_options": {"min_width": 100}}
@@ -231,6 +242,7 @@ async def test_official_client_streamable_http_contract(server, mode):
         unavailable = await client.call_tool("multi_search", {"query": "fixture-provider-failure"})
         assert unavailable.is_error
         assert unavailable.structured_content["code"] == "PROVIDER_UNAVAILABLE"
+        assert unavailable.structured_content["provider_reason_codes"] == ["upstream_rate_limited"]
         assert unavailable.structured_content["provider_runs"][0]["status"] == "rate_limited"
         assert "fixture-provider-failure" not in unavailable.model_dump_json()
 
@@ -279,6 +291,7 @@ async def test_official_client_delivers_bounded_unicode_search_pages(mode, tool)
         assert preview.model_dump(mode="json") == result.structured_content
         assert preview.delivery == "deferred" and preview.kind == "search"
         assert preview.request_id == "large-search" and preview.result_count == 4
+        assert preview.result_status == "has_results"
         assert len(preview.preview) == 3 and all(len(hit.title) == 160 for hit in preview.preview)
         if tool == "image_search":
             assert all(

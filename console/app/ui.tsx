@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./icons";
 import { ApiError, callApi, errorMessage } from "./lib/api";
+import { providerReasonLabels } from "./lib/contracts";
 
 const numbers = new Intl.NumberFormat("zh-HK", { maximumFractionDigits: 2 });
 
@@ -63,16 +64,24 @@ export function Loading() {
   return <div className="loading" role="status"><span className="skeleton" aria-hidden />正在读取数据…</div>;
 }
 
+export function ProviderReasonList({ codes }: { codes: string[] }) {
+  if (!codes.length) return null;
+  return <ul>{codes.map((code) => <li key={code}>{providerReasonLabels[code] ?? code}</li>)}</ul>;
+}
+
 export function Failure({ reason, retry }: { reason: unknown; retry?: () => void }) {
   return (
     <div className="notice danger" role="alert">
       <p>{errorMessage(reason)}</p>
       {reason instanceof ApiError && (
-        <div className="actions">
-          <code>{reason.code}</code>
-          {reason.requestId && <CopyId value={reason.requestId} />}
-          {reason.retryAfterMs != null && <span>可在 {Math.ceil(reason.retryAfterMs / 1000)} 秒后重试。</span>}
-        </div>
+        <>
+          <ProviderReasonList codes={reason.providerReasons} />
+          <div className="actions">
+            <code>{reason.code}</code>
+            {reason.requestId && <CopyId value={reason.requestId} />}
+            {reason.retryAfterMs != null && <span>可在 {Math.ceil(reason.retryAfterMs / 1000)} 秒后重试。</span>}
+          </div>
+        </>
       )}
       {reason instanceof ApiError && reason.status === 401
         ? <a href="/auth">重新登录</a>

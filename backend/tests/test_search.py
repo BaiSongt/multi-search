@@ -7,9 +7,12 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from multisearch.api import router as search_router
 from multisearch.application import SearchApplication
+from multisearch.auth import require_machine
 from multisearch.contracts import (
     ImageAttribution,
     ImageSearchResult,
@@ -20,8 +23,9 @@ from multisearch.contracts import (
     Source,
     TextSearchResult,
 )
-from multisearch.errors import ApiError
+from multisearch.errors import ApiError, install_errors
 from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
+from multisearch.identity import MachineIdentity
 from multisearch.metering import Admission, SearchPrincipal
 from multisearch.observability import Telemetry
 from multisearch.policy import ProviderPolicy
@@ -96,6 +100,59 @@ def service(*providers, requests_per_minute=60, max_concurrent=20):
 
 async def failed():
     raise ProviderFailure("failed")
+
+
+@pytest.mark.parametrize(
+    ("available", "throttled", "result_status", "count"),
+    [
+        ("empty", False, "no_results", 0),
+        ("empty", True, "incomplete_no_results", 0),
+        ("hit", True, "partial_results", 1),
+        (None, True, None, 0),
+    ],
+)
+async def test_rest_distinguishes_empty_partial_and_upstream_failure(
+    available, throttled, result_status, count
+):
+    class EmptyProvider(FakeProvider):
+        async def search(self, *_args):
+            return ProviderResult([])
+
+    async def rate_limited():
+        raise ProviderFailure("rate_limited", retry_after=30)
+
+    providers = []
+    if available == "empty":
+        providers.append(EmptyProvider("ddgs"))
+    elif available == "hit":
+        providers.append(FakeProvider("ddgs"))
+    if throttled:
+        providers.append(FakeProvider("searxng", handler=rate_limited))
+    meter = AsyncMock()
+    meter.reserve.return_value = Admission(uuid4(), False)
+    identity = MachineIdentity(uuid4(), uuid4(), uuid4(), frozenset({"search:text"}))
+    app = FastAPI()
+    install_errors(app)
+    app.include_router(search_router)
+    app.state.application = SearchApplication(service(*providers), meter)
+    app.dependency_overrides[require_machine] = lambda: identity
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        request = {"query": "fixture", "mode": "standard"}
+        response = await client.post("/api/v1/search", json=request)
+        data = response.json()
+        assert data["provider_reason_codes"] == (["upstream_rate_limited"] if throttled else [])
+        if result_status is None:
+            assert (response.status_code, data["code"]) == (502, "PROVIDER_UNAVAILABLE")
+            assert data["retryable"] and int(response.headers["Retry-After"]) > 0
+        else:
+            assert response.status_code == 200
+            assert data["result_status"] == result_status
+            assert data["result_count"] == len(data["results"]) == count
+        if not throttled:
+            cached = (await client.post("/api/v1/search", json=request)).json()
+            assert cached["cache_hit"] and cached["result_status"] == "no_results"
 
 
 async def test_quick_falls_back_and_enforces_mode_caps():
@@ -641,6 +698,7 @@ async def test_cache_is_tenant_scoped_and_local_never_calls_providers():
     assert cached.provider_runs == [] and cached.budget.search_rounds == 0
     assert local.cache_hit and local.mode_executed == Mode.LOCAL
     assert other.partial and not other.results and other.warnings == ["LOCAL_CACHE_MISS"]
+    assert other.result_status == "incomplete_no_results"
     assert len(provider.calls) == 1
     assert all("confidential clock" not in key for key in search.redis.cache)
 
