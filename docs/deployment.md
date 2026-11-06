@@ -110,6 +110,19 @@ docker compose --profile fetch ps
 
 Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心跳。Crawl4AI 只在独立内部网络接受 Worker 传入的已验证 HTML，使用令牌鉴权。公开 URL 由 SafeFetcher 逐跳检查并固定目标 IP，遵守 robots 和摘录限制。解析器不接收 URL，且无需浏览器或公网访问。API 的同步 L3 默认使用静态提取。如需让同步 L3 使用隔离解析器，在启用 `fetch` 配置时设置 `CRAWL4AI_BASE_URL=http://crawl4ai:11235`。
 
+可选的 `compose.workers.yml` 启用三个 Worker 和默认确定性研究，均保留健康检查与共享队列租约。每个实例使用两个队列执行协程，沿用 512 MiB 内存上限，并限制为 1 CPU。使用 `.env` 中的 `MULTISEARCH_WORKER_REPLICAS` 调整副本数：
+
+```sh
+docker compose -f compose.yml -f compose.workers.yml --profile research up -d --build --wait
+docker compose -f compose.yml -f compose.workers.yml --profile research ps
+```
+
+需要后续命令默认启用时，可在 Linux 部署的 `.env` 设置 `COMPOSE_FILE=compose.yml:compose.workers.yml` 和 `COMPOSE_PROFILES=fetch,research`。本机网络、端口等设置可放在已被 Git 忽略的 `compose.override.yml`；显式使用 `-f` 或 `COMPOSE_FILE` 时需要将该文件一并列入。
+
+系统 DNS 被代理 Fake-IP 替代时，可向 API 和 Worker 显式设置 `MULTISEARCH_FETCH_DOH_URL=https://cloudflare-dns.com/dns-query`。可选固定端点还有 `https://dns.google/resolve` 与 `https://dns.alidns.com/resolve`。通过 HTTPS 查询 A/AAAA 后，所有返回地址继续经过原有公网校验并固定连接；解析失败不会退回 Fake-IP，也不会允许私网目标。未设置时保持系统 DNS。
+
+`compose.workers.yml` 将该环境变量传给 API 和 Worker。单独使用基础配置、自定义覆盖文件或动态配置时，应同样显式传入；仅在宿主机 `.env` 中设置不会自动成为容器环境变量。
+
 ### 可选动态 HTML 渲染
 
 动态模式用于公开 HTML 由脚本生成正文的场景。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。每个允许的重定向域名也需单独列入。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。

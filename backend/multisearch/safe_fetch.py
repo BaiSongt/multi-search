@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import re
 import socket
 from collections import OrderedDict
@@ -17,6 +18,7 @@ import httpx
 from protego import Protego
 
 from .contracts import Scope
+from .dns_resolver import resolve_over_https
 from .errors import ApiError
 from .pdf_child import PDF_MAX_BYTES, PDF_SIGNATURE
 
@@ -279,6 +281,8 @@ def validate_fetch_url(
 
 
 async def _resolve(host: str, port: int) -> list[str]:
+    if endpoint := os.getenv("MULTISEARCH_FETCH_DOH_URL", "").strip():
+        return await resolve_over_https(host, endpoint)
     records = await asyncio.get_running_loop().getaddrinfo(
         f"{host}.", port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
     )

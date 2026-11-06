@@ -1,0 +1,19 @@
+# Optional worker pool, independent of deployment-specific networks and secrets.
+# docker compose -f compose.yml -f compose.workers.yml --profile research up -d --build --wait
+services:
+  multisearch-api:
+    environment:
+      MULTISEARCH_ENABLE_DEEP_RESEARCH: "true"
+      MULTISEARCH_FETCH_DOH_URL: ${MULTISEARCH_FETCH_DOH_URL:-}
+
+  multisearch-worker:
+    environment:
+      MULTISEARCH_ENABLE_DEEP_RESEARCH: "true"
+      MULTISEARCH_FETCH_DOH_URL: ${MULTISEARCH_FETCH_DOH_URL:-}
+    deploy:
+      replicas: ${MULTISEARCH_WORKER_REPLICAS:-3}
+    cpus: 1.0
+    restart: unless-stopped
+
+  crawl4ai:
+    restart: unless-stopped
