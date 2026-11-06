@@ -2,6 +2,8 @@
 
 import argparse
 import asyncio
+import json
+from base64 import b64decode
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -18,6 +20,25 @@ from multisearch.settings import Settings, secret
 
 BASE = "http://127.0.0.1:8765"
 TERMINAL = {"completed", "partial", "failed", "cancelled"}
+
+
+async def job_payload(client: Client, job_id: str) -> dict:
+    result = await client.call_tool("get_search_job", {"job_id": job_id})
+    assert not result.is_error
+    state = result.structured_content
+    if state.get("delivery") != "deferred":
+        return state
+    reference = state["result_ref"]
+    chunks = []
+    for index in range(reference["page_count"]):
+        part = await client.call_tool(
+            reference["fetch_tool"], {"result_id": reference["result_id"], "page": index}
+        )
+        assert not part.is_error and part.structured_content["page"] == index
+        chunks.append(b64decode(part.structured_content["data_base64"], validate=True))
+    payload = b"".join(chunks)
+    assert len(payload) == reference["payload_bytes"]
+    return json.loads(payload)
 
 
 async def main(*, local_date_window: bool):
@@ -93,6 +114,7 @@ async def main(*, local_date_window: bool):
                 "start_deep_research",
                 "get_search_job",
                 "cancel_search_job",
+                "get_result_page",
             }
             mcp = await client.call_tool("start_deep_research", payload)
             assert not mcp.is_error and mcp.structured_content["job_id"] == accepted["job_id"]
@@ -116,10 +138,7 @@ async def main(*, local_date_window: bool):
                 assert {row["title"] for row in results} == {"Datewindow start", "Datewindow end"}
                 assert all(row["source_type"] == "local" for row in results)
                 assert state["result"]["usage"]["pages_charged"] == 0
-            mcp_state = await client.call_tool("get_search_job", {"job_id": accepted["job_id"]})
-            assert (
-                not mcp_state.is_error and mcp_state.structured_content["status"] == state["status"]
-            )
+            assert await job_payload(client, accepted["job_id"]) == state
             metrics = await api.get(
                 "/metrics",
                 headers={"Authorization": "Bearer " + secret("MULTISEARCH_METRICS_TOKEN")},

@@ -23,6 +23,7 @@ from .job_contracts import JobKind
 from .job_store import JobStore
 from .management_identity import router as identity_router
 from .mcp_api import MCPJobs, create_mcp, create_mcp_app
+from .mcp_results import MCPResultStore
 from .metering import UsageMeter
 from .observability import FetchMetrics, install_observability
 from .ops_api import router as ops_router
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mcp_search,
         version=VERSION,
         jobs=MCPJobs(fetch=mcp_fetch, research=mcp_research, get=mcp_get, cancel=mcp_cancel),
+        result_store=lambda: app.state.mcp_results,
     )
 
     @asynccontextmanager
@@ -80,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.redis = Redis.from_url(
             config.redis_url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
         )
+        app.state.mcp_results = MCPResultStore(app.state.redis)
         try:
             await bootstrap_identity(app.state.identity.sessions)
             async with (

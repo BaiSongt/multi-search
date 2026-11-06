@@ -16,16 +16,17 @@ from mcp_types import (
     Tool,
     ToolAnnotations,
 )
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .contracts import InputModel, Modality, Mode, SearchRequest, SearchResponse
+from .contracts import ImageSearchResult, InputModel, Modality, Mode, SearchRequest, SearchResponse
 from .errors import ApiError
 from .identity import MachineIdentity
-from .job_contracts import FetchRequest, JobAccepted, JobView
+from .job_contracts import FetchRequest, JobAccepted, JobStatus, JobView
+from .mcp_results import MCPResultPage, MCPResultReference, MCPResultStore, ResultID
 
 type SearchCallback = Callable[[SearchRequest, MachineIdentity, str], Awaitable[SearchResponse]]
 type AuthenticateCallback = Callable[[str, Request], Awaitable[MachineIdentity]]
@@ -36,7 +37,7 @@ type ToolOutput = SearchResponse | JobAccepted | JobView
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 _MAX_REQUEST_BYTES = 32_768
-_MAX_TOOL_TEXT_BYTES = 16_384
+_MAX_TOOL_RESULT_BYTES = 16_384
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,31 @@ class _StartResearch(SearchRequest):
     mode: Literal[Mode.DEEP] = Mode.DEEP
 
 
+class _ResultPageInput(InputModel):
+    result_id: ResultID
+    page: int = Field(ge=0, le=4095, strict=True)
+
+
+class _ResultPreview(BaseModel):
+    result_id: str = Field(max_length=128)
+    kind: Literal["text", "image"]
+    title: str = Field(max_length=160)
+    rights_status: str | None = None
+
+
+class MCPDeferredResult(BaseModel):
+    delivery: Literal["deferred"]
+    kind: Literal["search", "job"]
+    status: JobStatus
+    request_id: str | None = Field(default=None, max_length=128)
+    trace_id: str | None = Field(default=None, max_length=128)
+    job_id: UUID | None = None
+    result_count: int | None = None
+    partial: bool
+    preview: list[_ResultPreview] = Field(default_factory=list, max_length=3)
+    result_ref: MCPResultReference
+
+
 def _tool_input[Model: InputModel](model: type[Model], arguments: dict[str, object]) -> Model:
     try:
         return model.model_validate(arguments)
@@ -62,50 +88,116 @@ def _tool_input[Model: InputModel](model: type[Model], arguments: dict[str, obje
         raise ApiError(422, "INVALID_REQUEST", "请求参数验证失败") from None
 
 
+def _json_result(payload: str, *, is_error: bool = False) -> CallToolResult:
+    return CallToolResult(
+        is_error=is_error,
+        content=[TextContent(type="text", text=payload)],
+        structured_content=json.loads(payload),
+    )
+
+
+def _fits(result: CallToolResult) -> bool:
+    return len(result.model_dump_json(by_alias=True, exclude_unset=True).encode()) <= (
+        _MAX_TOOL_RESULT_BYTES
+    )
+
+
+def _bounded_json_result(payload: str) -> CallToolResult:
+    result = _json_result(payload)
+    if not _fits(result):
+        raise ApiError(413, "MCP_RESULT_TOO_LARGE", "MCP 工具响应超出交付上限")
+    return result
+
+
 def _tool_error(error: ApiError, request_id: str) -> CallToolResult:
     body = error.body(request_id)
-    return CallToolResult(
-        is_error=True,
-        structured_content=body.model_dump(mode="json", exclude_none=True),
-        content=[TextContent(type="text", text=body.model_dump_json(exclude_none=True))],
+    result = _json_result(body.model_dump_json(exclude_none=True), is_error=True)
+    if _fits(result):
+        return result
+    body = body.model_copy(
+        update={
+            "provider_runs": None,
+            "request_id": request_id[:128],
+            "message": body.message[:256],
+        }
+    )
+    return _json_result(body.model_dump_json(exclude_none=True), is_error=True)
+
+
+def _deferred(
+    response: SearchResponse | JobView, reference: MCPResultReference
+) -> MCPDeferredResult:
+    common = {
+        "delivery": "deferred",
+        "status": response.status,
+        "request_id": response.request_id[:128] if response.request_id else None,
+        "trace_id": response.trace_id[:128] if response.trace_id else None,
+        "result_ref": reference,
+    }
+    if isinstance(response, JobView):
+        return MCPDeferredResult(
+            **common,
+            kind="job",
+            job_id=response.job_id,
+            partial=response.status == JobStatus.PARTIAL,
+        )
+    return MCPDeferredResult(
+        **common,
+        kind="search",
+        partial=response.partial,
+        result_count=response.result_count,
+        preview=[
+            _ResultPreview(
+                result_id=hit.result_id,
+                kind=hit.kind,
+                title=hit.title[:160],
+                rights_status=hit.image.rights_status
+                if isinstance(hit, ImageSearchResult)
+                else None,
+            )
+            for hit in response.results[:3]
+            if len(hit.result_id) <= 128
+        ],
     )
 
 
-def _tool_result(response: ToolOutput) -> CallToolResult:
-    data = response.model_dump(mode="json")
-    model_text = response.model_dump_json()
-    if len(model_text.encode("utf-8")) > _MAX_TOOL_TEXT_BYTES:
-        # 将较长的结果保留在 structuredContent，避免为模型复制大量摘要和链接。
-        if isinstance(response, SearchResponse):
-            preview = {
-                "request_id": response.request_id,
-                "status": response.status,
-                "result_count": response.result_count,
-                "preview": [
-                    {"result_id": hit.result_id, "kind": hit.kind, "title": hit.title}
-                    for hit in response.results[:5]
-                ],
-                "message": "完整结果见 structuredContent。图片候选不代表获得使用授权。",
-            }
-        else:
-            preview = {
-                "job_id": str(response.job_id),
-                "status": response.status,
-                "message": "完整任务状态和结果见 structuredContent。",
-            }
-        model_text = json.dumps(preview, ensure_ascii=False)
-    return CallToolResult(
-        content=[TextContent(type="text", text=model_text)],
-        structured_content=data,
-    )
+async def _tool_result(
+    response: ToolOutput,
+    identity: MachineIdentity,
+    result_store: Callable[[], MCPResultStore] | None,
+    *,
+    cancelling: bool,
+) -> CallToolResult:
+    serialized = response.model_dump_json()
+    payload = serialized.encode()
+    if len(payload) <= _MAX_TOOL_RESULT_BYTES:
+        result = _json_result(serialized)
+        if _fits(result):
+            return result
+    if cancelling and isinstance(response, JobView):
+        # 取消已落库，返回可重新查询的任务状态，避免因正文暂存失败误报取消失败。
+        return _bounded_json_result(response.model_copy(update={"result": None}).model_dump_json())
+    if result_store is None or isinstance(response, JobAccepted):
+        raise ApiError(
+            503, "MCP_RESULT_STORE_UNAVAILABLE", "MCP 长结果暂时无法交付", retryable=True
+        )
+    reference = await result_store().put(identity, payload)
+    return _bounded_json_result(_deferred(response, reference).model_dump_json())
 
 
-def create_mcp(search: SearchCallback, *, version: str, jobs: MCPJobs | None = None) -> Server:
-    output_schema = (
-        {"type": "object", **TypeAdapter(SearchResponse | JobAccepted).json_schema()}
-        if jobs is not None
-        else SearchResponse.model_json_schema()
-    )
+def create_mcp(
+    search: SearchCallback,
+    *,
+    version: str,
+    jobs: MCPJobs | None = None,
+    result_store: Callable[[], MCPResultStore] | None = None,
+) -> Server:
+    search_output = SearchResponse | JobAccepted if jobs is not None else SearchResponse
+    job_output = JobView
+    if result_store is not None:
+        search_output |= MCPDeferredResult
+        job_output |= MCPDeferredResult
+    output_schema = {"type": "object", **TypeAdapter(search_output).json_schema()}
     image_schema = SearchRequest.model_json_schema()
     del image_schema["properties"]["modalities"]
     read_search = ToolAnnotations(read_only_hint=True, open_world_hint=True)
@@ -149,7 +241,7 @@ def create_mcp(search: SearchCallback, *, version: str, jobs: MCPJobs | None = N
                 name="get_search_job",
                 description="查询当前租户内、当前 API Key 获准访问的任务。",
                 input_schema=_JobReference.model_json_schema(),
-                output_schema=JobView.model_json_schema(),
+                output_schema={"type": "object", **TypeAdapter(job_output).json_schema()},
                 annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
             ),
             cancel_search_job=Tool(
@@ -161,6 +253,14 @@ def create_mcp(search: SearchCallback, *, version: str, jobs: MCPJobs | None = N
                     read_only_hint=False, destructive_hint=True, open_world_hint=False
                 ),
             ),
+        )
+    if result_store is not None:
+        tools["get_result_page"] = Tool(
+            name="get_result_page",
+            description="用产生结果的 API Key 读取长结果的一页。逐页解码 Base64 后按页码拼接 UTF-8 JSON。",
+            input_schema=_ResultPageInput.model_json_schema(),
+            output_schema=MCPResultPage.model_json_schema(),
+            annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
         )
 
     async def list_tools(
@@ -182,6 +282,10 @@ def create_mcp(search: SearchCallback, *, version: str, jobs: MCPJobs | None = N
         if params.name == "image_search":
             args = {**args, "modalities": [Modality.IMAGE]}
         try:
+            if result_store is not None and params.name == "get_result_page":
+                page = _tool_input(_ResultPageInput, args)
+                part = await result_store().get(identity, page.result_id, page.page)
+                return _bounded_json_result(part.model_dump_json())
             if jobs is not None and params.name in {"get_search_job", "cancel_search_job"}:
                 reference = _tool_input(_JobReference, args)
                 lookup = jobs.get if params.name == "get_search_job" else jobs.cancel
@@ -200,11 +304,13 @@ def create_mcp(search: SearchCallback, *, version: str, jobs: MCPJobs | None = N
                 http.state.request_id = request_id
                 dispatch = jobs.research if jobs is not None and body.mode == Mode.DEEP else search
                 response = await dispatch(body, identity, request_id)
+            if isinstance(response, SearchResponse):
+                request_id = http.state.request_id = response.request_id
+            return await _tool_result(
+                response, identity, result_store, cancelling=params.name == "cancel_search_job"
+            )
         except ApiError as error:
             return _tool_error(error, request_id)
-        if isinstance(response, SearchResponse):
-            http.state.request_id = response.request_id
-        return _tool_result(response)
 
     return Server("MultiSearch", version=version, on_list_tools=list_tools, on_call_tool=call_tool)
 
