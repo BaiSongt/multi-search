@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { BrandMark } from "./icons";
 import { apiUrl, publicApiUrl } from "./lib/api-server";
 import { ThemeToggle } from "./ui";
 
@@ -19,7 +20,7 @@ export default async function Home() {
   return (
     <>
       <header className="topbar">
-        <span className="brand"><span className="brand-mark" aria-hidden>MS</span> MultiSearch</span>
+        <span className="brand"><BrandMark />MultiSearch</span>
         <ThemeToggle />
       </header>
       <main id="main" className="entry">

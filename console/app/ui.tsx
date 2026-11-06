@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Icon } from "./icons";
 import { ApiError, callApi, errorMessage } from "./lib/api";
 
 const numbers = new Intl.NumberFormat("zh-HK", { maximumFractionDigits: 2 });
@@ -51,7 +52,7 @@ export function ThemeToggle() {
     document.documentElement.dataset.theme = next;
     document.cookie = `multisearch_theme=${next}; Path=/; Max-Age=31536000; SameSite=Lax${location.protocol === "https:" ? "; Secure" : ""}`;
   }
-  return <button type="button" className="quiet" onClick={toggle} aria-label="切换浅色或深色主题">◐ <span className="desktop-only">主题</span></button>;
+  return <button type="button" className="quiet theme-toggle" onClick={toggle} aria-label="切换浅色或深色主题"><Icon name="theme" /><span className="desktop-only">主题</span></button>;
 }
 
 export function Empty({ children = "暂无数据。" }: { children?: ReactNode }) {

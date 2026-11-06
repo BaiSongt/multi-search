@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
+import { Icon } from "./icons";
 import { ProviderCapabilities } from "./provider-capabilities";
 import { callApi } from "./lib/api";
 import { quotaLabels, type Audit, type AuditRiskReport, type DependencyHealth, type Overview, type Page, type Provider, type RequestRow, type ServiceStatus, type Tenant, type TenantQuotaUsage } from "./lib/contracts";
@@ -29,10 +30,10 @@ function DependencyChecks({ health }: { health: DependencyHealth }) {
   return (
     <>
       <p className="muted">采样时间 <time dateTime={health.checked_at}>{dateTime(health.checked_at)}</time></p>
-      <dl>
+      <dl className="service-grid">
         {(Object.keys(dependencyLabels) as (keyof typeof dependencyLabels)[]).map((key) => {
           const status = serviceStatuses[health.checks[key] ?? "unknown"] ?? serviceStatuses.unknown;
-          return <div className="definition" key={key}>
+          return <div className="service-check" key={key}>
             <dt>{dependencyLabels[key]}</dt>
             <dd><span className={`badge ${status.tone}`}>{status.label}</span></dd>
           </div>;
@@ -83,7 +84,7 @@ export function AdminOverview() {
     <>
       <div className="actions">
         <span className="muted">QPS 取最近 1 分钟，其他用量和延迟取最近 30 天。没有样本时显示「—」。</span>
-        <button type="button" onClick={() => { resource.reload(); failures.reload(); health.reload(); }}>刷新指标</button>
+        <button type="button" onClick={() => { resource.reload(); failures.reload(); health.reload(); }}><Icon name="refresh" />刷新指标</button>
       </div>
       <section className="panel stack" aria-labelledby="dependency-health">
         <h2 id="dependency-health">服务状态</h2>

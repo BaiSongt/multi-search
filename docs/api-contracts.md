@@ -16,14 +16,20 @@
 | `POST /api/v1/jobs/{id}/cancel` | 对应任务作用域 | 取消当前租户的非终态任务 |
 | `GET /api/v1/evidence/{id}` | API Key 的 `fetch` 或 `research` | 读取当前租户的证据 |
 
-搜索凭据使用 `Authorization: Bearer <API_KEY>`。文字需要 `search:text`，图片需要 `search:image`，混合请求需要两者。按 [部署文档](deployment.md#签发测试凭据) 签发凭据后，在当前终端将明文存入 `MULTISEARCH_KEY`。以下 POSIX shell 示例将同一个 Web 查询同时用于文字和图片。
+### 首次调用
+
+本地 Base URL 为 `http://127.0.0.1:8765/api/v1`，搜索路径为 `POST /search`。部署到其他环境时，以控制台的「API 文档」页显示的 Base URL 为准。
+
+在控制台的「API 密钥」页新建密钥，或按 [部署文档](deployment.md#签发测试凭据) 通过命令行签发。保存仅显示一次的明文，并将其存入调用进程的环境变量 `MULTISEARCH_KEY`。请求使用 `Authorization: Bearer <API_KEY>`。文字需要 `search:text`，图片需要 `search:image`，混合请求需要两者。
 
 ```sh
 curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search \
   -H "Authorization: Bearer ${MULTISEARCH_KEY}" \
   -H 'Content-Type: application/json' \
-  -d '{"query":"Golden Gate Bridge","mode":"standard","source_types":["web"],"modalities":["text","image"],"max_results":10}'
+  -d '{"query":"NASA","max_results":5}'
 ```
+
+这会发起一次网页文字搜索。响应的 `results` 数组包含标题（`title`）、链接（`url`）和摘要（`snippet`）。要同时检索文字和图片，可在请求中增加 `"modalities":["text","image"]`。
 
 ### 路由与预算
 

@@ -1,6 +1,6 @@
 [project]
 name = "multisearch"
-version = "0.3.0a17"
+version = "0.3.0a18"
 requires-python = ">=3.12,<3.13"
 license = "Apache-2.0"
 dependencies = [

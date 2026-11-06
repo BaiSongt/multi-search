@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { Account } from "./account";
 import { AdminOverview, AuditView, ProvidersView, RequestsView, TenantsView } from "./admin-view";
 import { DocsView } from "./docs-view";
+import { BrandMark, Icon } from "./icons";
 import { KeysView } from "./keys-view";
 import { readSession } from "./lib/api-server";
 import { adminNav, canView, consoleNav, roleLabels, workspaceHome, type Session, type Workspace as WorkspaceKind } from "./lib/contracts";
@@ -13,6 +14,7 @@ import { CacheView, SettingsView } from "./system-view";
 import { TeamView } from "./team-view";
 import { ThemeToggle } from "./ui";
 import { UsageView } from "./usage-view";
+import { sectionIcons, WorkspaceNav } from "./workspace-nav";
 
 const subtitles: Record<string, string> = {
   overview: "按当前权限查看请求与资源使用情况。",
@@ -41,7 +43,7 @@ function Body({ section, workspace, session, tenant }: { section: string; worksp
       case "keys": return <KeysView csrf={session.csrf_token} />;
       case "playground": return <Playground csrf={session.csrf_token} sessionSearch={session.role !== "operations_admin"} />;
       case "images": return <Playground csrf={session.csrf_token} sessionSearch={session.role !== "operations_admin"} imageOnly />;
-      case "docs": return <DocsView />;
+      case "docs": return <DocsView canManageKeys={canView(session.role, workspace, "keys")} />;
       case "team": return <TeamView csrf={session.csrf_token} platform={platform} />;
       case "settings": return <Account session={session} />;
     }
@@ -80,44 +82,40 @@ export async function WorkspacePage({ workspace, route }: { workspace: Workspace
     ? workspace === "admin" ? "核对运行环境、会话安全和数据保留策略。" : "查看当前租户、身份和会话有效期。"
     : workspace === "admin" && section === "images" ? "检查来源完整性与图片许可核验结果。"
     : tenant ? "查看成员、调整角色和邀请新成员。" : subtitles[section];
+  const sectionIcon = sectionIcons[section as keyof typeof sectionIcons];
   return (
-    <>
+    <div className="workspace-shell">
       <header className="topbar">
-        <Link href="/" className="brand"><span className="brand-mark" aria-hidden>MS</span> MultiSearch</Link>
-        <div className="actions">
-          <span className="muted desktop-only">{session.tenant}</span>
-          <span className="badge">{roleLabels[session.role]}</span>
+        <Link href="/" className="brand"><BrandMark />MultiSearch</Link>
+        <div className="actions workspace-actions">
+          <div className="workspace-identity">
+            <span className="identity-tenant desktop-only">{session.tenant}</span>
+            <span className="badge">{roleLabels[session.role]}</span>
+          </div>
           <ThemeToggle />
-          <Link className="button" href="/auth?switch=1">切换租户</Link>
-          <Link className="button" href="/console/settings">账户</Link>
+          <Link className="button workspace-icon-button" href="/auth?switch=1" aria-label="切换租户"><Icon name="swap" /><span className="desktop-only">切换租户</span></Link>
+          <Link className="button workspace-icon-button" href="/console/settings" aria-label="账户"><Icon name="user" /><span className="desktop-only">账户</span></Link>
         </div>
       </header>
       <div className="layout">
-        <nav className="sidenav" aria-label="工作区导航">
-          {([["console", consoleNav, "开发者门户"], ["admin", adminNav, "运维管理台"]] as const).map(([space, sections, label]) => {
-            const entries = Object.entries(sections).filter(([id]) => canView(session.role, space, id));
-            return entries.length > 0 && (
-              <div key={space}>
-                <h2>{label}</h2>
-                <ul>{entries.map(([id, text]) => (
-                  <li key={id}><Link aria-current={space === workspace && id === section ? "page" : undefined} href={`/${space}/${id}`}>{text}</Link></li>
-                ))}</ul>
+        <WorkspaceNav role={session.role} workspace={workspace} section={section} target={target} />
+        <main className="workspace-main" id="main" key={target} tabIndex={-1}>
+          <div className="content">
+            <div className="heading">
+              <span className="heading-icon"><Icon name={sectionIcon} /></span>
+              <div className="heading-copy">
+                <p className="eyebrow">{workspace === "admin" ? "运维管理台" : "开发者门户"}</p>
+                <h1>{title}</h1>
+                <p className="muted">{description}</p>
+                {tenant && allowed && <Link href="/admin/tenants">返回租户列表</Link>}
               </div>
-            );
-          })}
-        </nav>
-        <main className="content" id="main">
-          <div className="heading">
-            <p className="eyebrow">{workspace === "admin" ? "运维管理台" : "开发者门户"} / {title}</p>
-            <h1>{title}</h1>
-            <p className="muted">{description}</p>
-            {tenant && allowed && <Link href="/admin/tenants">返回租户列表</Link>}
+            </div>
+            {allowed ? <Body section={section} workspace={workspace} session={session} tenant={tenant} /> : (
+              <div className="notice warning" role="alert"><p>当前角色无权访问此页面。</p><Link href={workspaceHome(session.role)}>返回可用工作区</Link></div>
+            )}
           </div>
-          {allowed ? <Body section={section} workspace={workspace} session={session} tenant={tenant} /> : (
-            <div className="notice warning" role="alert"><p>当前角色无权访问此页面。</p><Link href={workspaceHome(session.role)}>返回可用工作区</Link></div>
-          )}
         </main>
       </div>
-    </>
+    </div>
   );
 }

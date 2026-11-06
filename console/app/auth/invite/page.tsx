@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { BrandMark } from "../../icons";
 import { ThemeToggle } from "../../ui";
 import { AcceptInvitation } from "./accept-invitation";
 
@@ -6,7 +7,7 @@ export default function InvitePage() {
   return (
     <>
       <header className="topbar">
-        <Link href="/" className="brand"><span className="brand-mark" aria-hidden>MS</span> MultiSearch</Link>
+        <Link href="/" className="brand"><BrandMark />MultiSearch</Link>
         <ThemeToggle />
       </header>
       <main id="main" className="entry">
