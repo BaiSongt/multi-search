@@ -59,6 +59,8 @@ _RESOURCE_MIME = re.compile(
     re.IGNORECASE | re.ASCII,
 )
 _RESOURCE_POLICIES = frozenset({"same-origin", "same-site", "cross-origin"})
+_IMAGE_PREVIEW = re.compile(r"(?:^|[\s,:;])max-image-preview\s*:\s*(none|standard|large)\b")
+_NO_IMAGE_INDEX = re.compile(r"(?:^|[\s,:;])noimageindex(?:$|[\s,;])")
 MAX_RESOURCE_BYTES = 256 * 1024
 
 
@@ -79,6 +81,7 @@ class FetchedPage:
     cross_origin_embedder_policy: tuple[str, ...] = ()
     allow_origin: str | None = None
     resource_policy: str | None = None
+    allows_image_references: bool = True
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,7 @@ class _Response:
     cross_origin_embedder_policy: tuple[str, ...] = ()
     allow_origin: str | None = None
     resource_policy: str | None = None
+    allows_image_references: bool = True
 
 
 @dataclass
@@ -298,7 +302,7 @@ def _transport() -> httpx.AsyncBaseTransport:
 def snippet_limit(directives: Sequence[str]) -> int | None:
     limit: int | None = None
     for entry in directives:
-        lowered = entry.casefold()
+        lowered = _IMAGE_PREVIEW.sub(" ", entry.casefold())
         if re.search(r"(?:^|[\s,:;])(?:noindex|none|nosnippet|noarchive)(?:$|[\s,;])", lowered):
             raise FetchError(403, "FETCH_SITE_RESTRICTED", "站点禁止保存或摘录此内容")
         for match in re.finditer(r"(?:^|[\s,:;])max-snippet\s*:\s*(-?\d{1,9})(?!\d)", lowered):
@@ -308,6 +312,16 @@ def snippet_limit(directives: Sequence[str]) -> int | None:
             if value > 0:
                 limit = min(limit, value) if limit is not None else value
     return limit
+
+
+def allows_image_references(directives: Sequence[str]) -> bool:
+    for entry in directives:
+        lowered = entry.casefold()
+        if _NO_IMAGE_INDEX.search(lowered) or any(
+            match[1] == "none" for match in _IMAGE_PREVIEW.finditer(lowered)
+        ):
+            return False
+    return True
 
 
 def _cross_origin_policies(
@@ -619,7 +633,8 @@ class SafeFetcher:
                 max_bytes = min(max_bytes, PDF_MAX_BYTES)
             mime = Message()
             mime["Content-Type"] = mime_header
-            maximum = snippet_limit(response.headers.get_list("x-robots-tag"))
+            directives = response.headers.get_list("x-robots-tag")
+            maximum = snippet_limit(directives)
             allow_origin, resource_policy = (
                 _cross_origin_policies(response.headers, request_origin, kind)
                 if request_origin is not None
@@ -652,6 +667,7 @@ class SafeFetcher:
                 ),
                 allow_origin=allow_origin,
                 resource_policy=resource_policy,
+                allows_image_references=allows_image_references(directives),
             )
 
     @staticmethod
@@ -676,4 +692,5 @@ class SafeFetcher:
             cross_origin_embedder_policy=response.cross_origin_embedder_policy,
             allow_origin=response.allow_origin,
             resource_policy=response.resource_policy,
+            allows_image_references=response.allows_image_references,
         )

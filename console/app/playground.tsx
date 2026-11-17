@@ -130,8 +130,14 @@ function searchBody(fields: FormData, imageOnly: boolean) {
   };
 }
 
+const ARTICLE_IMAGE_SOURCES = {
+  structured_data: "结构化数据",
+  page_metadata: "页面元数据",
+  article_body: "文章正文",
+};
+
 function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () => void }) {
-  const locator = record.locator;
+  const { locator, images } = record;
   return (
     <Dialog title="可定位证据" close={close}>
       <div className="stack">
@@ -139,6 +145,7 @@ function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () 
         <blockquote className="notice evidence-excerpt">{record.evidence_text}</blockquote>
         <dl>
           <dt>来源页面</dt><dd><ExternalLink href={record.origin_url}>{record.origin_url}</ExternalLink></dd>
+          {record.canonical_url !== record.origin_url && <><dt>最终页面</dt><dd><ExternalLink href={record.canonical_url}>{record.canonical_url}</ExternalLink></dd></>}
           <dt>证据 ID</dt><dd><CopyId value={record.evidence_id} /></dd>
           <dt>抓取时间</dt><dd>{dateTime(record.retrieved_at)}</dd>
           <dt>位置类型</dt><dd>{locator.kind}</dd>
@@ -152,6 +159,17 @@ function EvidenceDetails({ record, close }: { record: EvidenceRecord; close: () 
           <dt>证据状态</dt><dd>{record.verification_status}</dd>
         </dl>
         <p className="muted">字符偏移定位到本次抓取所提取的文本。</p>
+        {!!images?.length && (
+          <div className="stack evidence-images">
+            <h3>文章图片</h3>
+            <ul>{images.map((image, index) => (
+              <li key={image.url}>
+                <ExternalLink href={image.url}>{image.caption || image.alt || `打开第 ${index + 1} 张图片`}</ExternalLink>
+                {" · "}<span className="muted">{ARTICLE_IMAGE_SOURCES[image.source]}</span>
+              </li>
+            ))}</ul>
+          </div>
+        )}
       </div>
     </Dialog>
   );

@@ -12,7 +12,15 @@ from typing import Literal, Protocol
 
 import httpx
 
-from .contracts import Modality, ProviderReason, Scope, SearchRequest, SearchResult, Source
+from .contracts import (
+    ImageOptions,
+    Modality,
+    ProviderReason,
+    Scope,
+    SearchRequest,
+    SearchResult,
+    Source,
+)
 from .pipeline import normalize, public_link
 from .settings import Settings
 
@@ -26,6 +34,7 @@ _DDGS_METHODS = {
     "images": ("images", "bing"),
     "news": ("news", "bing"),
 }
+_DDGS_FILTER_CANDIDATE_CAP = 30
 _MAX_UPSTREAM_BYTES = 1024 * 1024
 _ENGINE_REASONS = {
     "captcha": ProviderReason.UPSTREAM_CAPTCHA,
@@ -328,11 +337,29 @@ class DDGSProvider(PublicProvider):
         language, region = _locale(request)
         if region == "GB" and engine == "duckduckgo":
             region = "UK"
+        options = request.image_options or ImageOptions()
+        candidate_limit = limit
+        if (
+            request.time_range
+            or request.domain_allowlist
+            or request.domain_denylist
+            or (
+                modality == Modality.IMAGE
+                and (
+                    options.source_page_required
+                    or options.min_width
+                    or options.min_height
+                    or options.orientation
+                )
+            )
+        ):
+            # DDGS 按候选数截断同一页结果，本地校验后再应用调用方的结果上限。
+            candidate_limit = max(limit, min(_DDGS_FILTER_CANDIDATE_CAP, max(10, 2 * limit)))
         args = {
             "method": method,
             "backend": engine,
             "query": request.query,
-            "max_results": limit,
+            "max_results": candidate_limit,
             "region": f"{region.lower()}-{language or 'en'}" if region else "us-en",
             "timeout": max(1, math.ceil(timeout_s)),
         }

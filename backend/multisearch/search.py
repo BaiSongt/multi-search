@@ -57,6 +57,8 @@ _PROVIDER_CONCURRENT = 5
 _PROVIDER_REQUESTS_PER_MINUTE = 120
 _PROVIDER_WINDOW_SECONDS = 60
 _TERMINAL_FALLBACK_MAX_SECONDS = 1.5
+_MIN_FUSION_CANDIDATES = 5
+_SEARCH_CACHE_VERSION = 2
 _RATE_WINDOW_MS = 60_000
 _SUCCESS = {"success", "empty", "partial"}
 _RATE_SCRIPT = """
@@ -430,6 +432,7 @@ class SearchService:
         )
         payload = json.dumps(
             [
+                _SEARCH_CACHE_VERSION,
                 self.cache_signature,
                 policies,
                 routing.version,
@@ -722,16 +725,28 @@ class SearchService:
             group = terminal if getattr(provider, "fallback_only", False) else primary
             group.append(provider)
         now = monotonic()
+        available_primary = sum(self._dispatchable(provider, pair, now) for provider in primary)
         primary_deadline = deadline
         if (
             deadline - now >= 1.25
-            and any(self._dispatchable(provider, pair, now) for provider in primary)
+            and available_primary
             and any(self._dispatchable(provider, pair, now) for provider in terminal)
         ):
             primary_deadline -= min(1.0, (deadline - now) * 0.2)
         if mode in {Mode.STANDARD, Mode.EVIDENCE}:
+            candidate_limit = limit
+            if (
+                available_primary >= 2
+                and pair[0] in {Source.WEB, Source.NEWS}
+                and pair[1] == Modality.TEXT
+            ):
+                # 为并行来源保留靠前的重叠候选，融合后再应用返回条数。
+                candidate_limit = max(limit, _MIN_FUSION_CANDIDATES)
             runs = await asyncio.gather(
-                *(self._run_provider(p, request, pair, limit, primary_deadline) for p in primary)
+                *(
+                    self._run_provider(p, request, pair, candidate_limit, primary_deadline)
+                    for p in primary
+                )
             )
         else:
             runs = []

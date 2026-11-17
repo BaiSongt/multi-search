@@ -99,6 +99,10 @@ SearXNG 来源记录可带 `reason_codes`，取值为 `upstream_captcha`、`upst
 
 正文提取成功时，`evidence_records` 返回来源、取得时间、实际摘录、规范化正文 SHA-256 和字符偏移。结果以 `evidence_refs` 指向记录，并标记为 `content_extracted`。摘要、提取失败或预算外结果保持 `unverified`。L3 图片区分来源页访问、原图匹配与许可核验。
 
+HTML 证据可附带最多 8 条 `images`。每条包含 `url`、`source` 和可选的 `alt`、`caption`。`source` 对应发布者的文章结构化数据 `structured_data`、页面图片元数据 `page_metadata` 或正文图 `article_body`。候选地址基于最终页面解析，动态抓取可读取渲染后的正文图。输出为页面声明的候选地址，图片可达性和使用许可需另行核验。页面声明 `noimageindex` 或 `max-image-preview: none` 时仅返回正文证据。
+
+聚合链接经标准 HTTP 重定向抵达发布者页面时，`origin_url` 保留输入链接，`canonical_url` 指向最终页面，`images` 取自该页面。聚合入口只提供中间页时，使用发布者的原文 URL 抓取正文和配图。
+
 公开 PDF 的 `locator.kind` 为 `pdf_text`，`page_number` 从 1 开始，偏移针对该页规范化文本。`content_sha256` 覆盖已检查的规范化页及其边界，触及检查上限时证据带有截断警告。图像型 PDF 需要 OCR 时，检索候选标记 `evidence_status=ocr_pending` 并返回 `OCR_PENDING` 告警，无证据引用。空白、加密或损坏的 PDF 分别返回相应的提取错误。
 
 `POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。

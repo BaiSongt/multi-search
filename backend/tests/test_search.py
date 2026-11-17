@@ -190,6 +190,50 @@ async def test_quick_allocates_full_time_to_usable_source_when_fallback_is_open(
     assert not searxng.calls
 
 
+@pytest.mark.parametrize(
+    ("mode", "source", "expected_limit", "expected_path"),
+    [
+        ("quick", Source.NEWS, 1, "/ddgs"),
+        ("standard", Source.WEB, 5, "/shared"),
+        ("evidence", Source.NEWS, 5, "/shared"),
+    ],
+)
+async def test_web_and_news_fuse_overlapping_candidates_before_output_cap(
+    mode, source, expected_limit, expected_path
+):
+    class RankedProvider(FakeProvider):
+        async def search(self, request, source, modality, limit, timeout_s):
+            top = (await super().search(request, source, modality, limit, timeout_s)).results[0]
+            shared = top.model_copy(
+                update={
+                    "result_id": "shared",
+                    "url": "https://example.org/shared",
+                    "canonical_url": "https://example.org/shared",
+                }
+            )
+            return ProviderResult([top, shared][:limit])
+
+    ddgs = RankedProvider("ddgs", url="https://example.org/ddgs")
+    searxng = RankedProvider("searxng", url="https://example.org/searxng")
+    search = service(ddgs, searxng)
+    search.evidence = AsyncMock()
+    response = await search.search(
+        SearchRequest(query="clock", source_types=[source], mode=mode, max_results=1, max_pages=0),
+        "tenant",
+        "test",
+    )
+
+    assert response.result_count == response.budget.max_results == 1
+    assert response.results[0].url == f"https://example.org{expected_path}"
+    assert len(ddgs.calls) == 1 and ddgs.calls[0][3] == expected_limit
+    if mode == "quick":
+        assert not searxng.calls
+    else:
+        assert len(searxng.calls) == 1 and searxng.calls[0][3] == expected_limit
+        assert response.results[0].provider_ids == ["ddgs", "searxng"]
+    search.evidence.extract.assert_not_awaited()
+
+
 class TerminalProvider(FakeProvider):
     fallback_only = True
     pairs = frozenset({(Source.WEB, Modality.TEXT)})

@@ -4,6 +4,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 STATIC_EXTRACTION_VERSION = "1"
+MAX_ARTICLE_IMAGES = 8
 type ExtractionMode = Literal["static", "dynamic"]
 type FetchStatus = Literal["blocked", "cancelled", "completed", "failed", "ocr_pending", "timeout"]
 
@@ -25,6 +26,15 @@ class EvidenceLocator(BaseModel):
         if (self.kind == "pdf_text") != (self.page_number is not None):
             raise ValueError("仅 PDF 文本证据使用页码")
         return self
+
+
+class ArticleImage(BaseModel):
+    url: str = Field(max_length=4096)
+    source: Literal["structured_data", "page_metadata", "article_body"]
+    alt: str | None = Field(default=None, max_length=256, exclude_if=lambda value: value is None)
+    caption: str | None = Field(
+        default=None, max_length=256, exclude_if=lambda value: value is None
+    )
 
 
 class EvidenceRecord(BaseModel):
@@ -50,3 +60,6 @@ class EvidenceRecord(BaseModel):
     verification_status: Literal["content_extracted"] = "content_extracted"
     access_policy: Literal["metadata_and_excerpt"] = "metadata_and_excerpt"
     warnings: list[str] = Field(default_factory=list)
+    images: list[ArticleImage] = Field(
+        default_factory=list, max_length=MAX_ARTICLE_IMAGES, exclude_if=lambda value: not value
+    )

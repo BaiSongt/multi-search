@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from multisearch.auth import require_machine
 from multisearch.dynamic_renderer import HEARTBEAT_KEY
 from multisearch.errors import install_errors
-from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
+from multisearch.evidence_contracts import ArticleImage, EvidenceLocator, EvidenceRecord
 from multisearch.identity import MachineIdentity
 from multisearch.job_api import router
 from multisearch.job_application import JobApplication
@@ -66,11 +66,14 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
                 origin_url=url,
                 canonical_url=url,
                 retrieved_at=datetime.now(UTC),
-                content_type="text/plain",
+                content_type="text/html",
                 evidence_text="fact",
-                locator=EvidenceLocator(kind="plain_text", text_offset_start=0, text_offset_end=4),
+                locator=EvidenceLocator(kind="html_text", text_offset_start=0, text_offset_end=4),
                 content_sha256="0" * 64,
-                extraction_method="plain_text",
+                extraction_method="static_html",
+                images=[
+                    ArticleImage(url="https://cdn.example.org/photo.jpg", source="article_body")
+                ],
             )
 
     evidence = Evidence()
@@ -84,6 +87,9 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
     outcome = await worker.fetch(claim(urls=targets, max_pages=2))
     assert outcome.status == JobStatus.PARTIAL and outcome.pages_fetched == 1
     assert outcome.result["evidence_records"][0]["evidence_text"] == "fact"
+    assert outcome.result["evidence_records"][0]["images"] == [
+        {"url": "https://cdn.example.org/photo.jpg", "source": "article_body"}
+    ]
     assert outcome.result["failures"][0]["index"] == 1
     assert outcome.result["warnings"] == ["MAX_PAGES_REACHED"]
     assert evidence.calls == targets[:2] and store.completed == [1, 1, 2, 2]

@@ -166,6 +166,8 @@ async function unknownImage(page) {
 
 async function evidenceResult(page) {
   const origin = "https://example.org/evidence";
+  const publisher = "https://example.net/news/article";
+  const image = "https://example.net/news/article-photo.jpg";
   const published = "2026-10-21T10:00:00Z";
   const retrieved = "2026-11-05T00:00:00Z";
   await page.route("**/gateway/capabilities", (route) => route.fulfill({ json: {
@@ -189,13 +191,14 @@ async function evidenceResult(page) {
         snippet: null, warnings: ["OCR_PENDING"], evidence_status: "ocr_pending",
       }],
       evidence_records: [{
-        evidence_id: "evidence-fixture-1", result_id: null, origin_url: origin, canonical_url: origin,
+        evidence_id: "evidence-fixture-1", result_id: null, origin_url: origin, canonical_url: publisher,
         document_identifier: null, retrieved_at: "2026-11-05T00:00:00Z", published_at: null,
         title: "示例来源", content_type: "text/html", evidence_text: "用于核对的证据摘录。",
         locator: { kind: "rendered_html_text", section: "检索范围", text_offset_start: 10, text_offset_end: 20, page_number: null },
         content_sha256: "0".repeat(64), extraction_method: "browser_dom", extraction_version: "chromium.157.renderer.2+normalizer.1",
         render_bundle_sha256: "a".repeat(64),
         verification_status: "content_extracted", access_policy: "metadata_and_excerpt",
+        images: [{ url: image, source: "article_body", caption: "新闻现场图" }],
       }],
     } });
   });
@@ -221,6 +224,11 @@ async function evidenceResult(page) {
   await dialog.getByText("a".repeat(64), { exact: true }).waitFor();
   await dialog.getByText("10–20", { exact: true }).waitFor();
   assert.equal(await dialog.getByRole("link", { name: origin }).getAttribute("href"), origin);
+  assert.equal(await dialog.getByRole("link", { name: publisher }).getAttribute("href"), publisher);
+  await dialog.getByRole("heading", { name: "文章图片" }).waitFor();
+  assert.equal(await dialog.getByRole("link", { name: "新闻现场图" }).getAttribute("href"), image);
+  await dialog.getByText("文章正文", { exact: true }).waitFor();
+  assert.equal(await dialog.locator("img").count(), 0);
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "detached" });
   await page.unroute("**/gateway/playground");

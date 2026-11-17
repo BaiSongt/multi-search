@@ -15,15 +15,16 @@ from urllib.parse import urlsplit
 
 from lxml import etree, html
 
+from .article_images import extract_article_images
 from .contracts import Scope
 from .crawl_parser import CRAWL4AI_VERSION, CrawlParser
-from .evidence_contracts import STATIC_EXTRACTION_VERSION, ExtractionMode, FetchStatus
+from .evidence_contracts import STATIC_EXTRACTION_VERSION, ArticleImage, ExtractionMode, FetchStatus
 from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
 from .pdf_parser import PDF_EXTRACTION_VERSION, OCRPending, PdfParser
 from .render_resources import MAX_RESOURCE_BUNDLE_BYTES, MAX_RESOURCE_BYTES, ResourceSpec
-from .safe_fetch import FetchedPage, FetchError, SafeFetcher, snippet_limit
+from .safe_fetch import FetchedPage, FetchError, SafeFetcher, allows_image_references, snippet_limit
 from .tracing import trace_event
 
 if TYPE_CHECKING:
@@ -175,7 +176,7 @@ def parse_static_html(page: FetchedPage) -> html.HtmlElement:
         raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文") from None
 
 
-def _html_metadata(document: html.HtmlElement) -> tuple[dict[str, str], int | None]:
+def _html_metadata(document: html.HtmlElement) -> tuple[dict[str, str], int | None, bool]:
     directives: list[str] = []
     metadata: dict[str, str] = {}
     for meta in document.iter("meta"):
@@ -190,7 +191,7 @@ def _html_metadata(document: html.HtmlElement) -> tuple[dict[str, str], int | No
     title = document.find(".//title")
     if title is not None:
         metadata.setdefault("title", _clean(title.text_content())[:512])
-    return metadata, snippet_limit(directives)
+    return metadata, snippet_limit(directives), allows_image_references(directives)
 
 
 def _html_body(document: html.HtmlElement) -> list[_Block]:
@@ -362,6 +363,8 @@ class EvidenceBuilder:
         render_version = None
         bundle_sha = None
         resource_limit = None
+        original = document = None
+        include_images = False
         if dynamic and page.content_type != "text/html":
             raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染仅支持 HTML")
         if page.content_type == "application/pdf":
@@ -379,14 +382,16 @@ class EvidenceBuilder:
             if parsed_pdf.truncated:
                 warnings.append("pdf_page_or_text_limit_reached")
         elif page.content_type in {"text/html", "application/xhtml+xml"}:
-            document = parse_static_html(page)
-            metadata, meta_limit = _html_metadata(document)
+            original = document = parse_static_html(page)
+            metadata, meta_limit, image_policy = _html_metadata(document)
+            include_images = page.allows_image_references and image_policy
             kind = "html_text"
             if dynamic:
                 document, render_version, bundle_sha, resource_limit = await self._render_document(
                     page, deadline, domain_allowlist, domain_denylist
                 )
-                _, rendered_limit = _html_metadata(document)
+                _, rendered_limit, rendered_image_policy = _html_metadata(document)
+                include_images = include_images and rendered_image_policy
                 if rendered_limit is not None:
                     meta_limit = (
                         min(meta_limit, rendered_limit)
@@ -414,6 +419,9 @@ class EvidenceBuilder:
             if value is not None
         )
         excerpt, locator, text_sha, selected = _content(blocks, kind, query, excerpt_limit, hints)
+        images: list[ArticleImage] = []
+        if include_images and original is not None and document is not None:
+            images = extract_article_images(original, document, page.url, excerpt_limit)
         if monotonic() >= deadline:
             raise FetchError(504, "TIME_BUDGET_EXCEEDED", "正文提取时限已耗尽", retryable=True)
         doi = metadata.get("citation_doi", "").removeprefix("https://doi.org/")
@@ -434,6 +442,11 @@ class EvidenceBuilder:
         else:
             method = "static_html" if locator.kind == "html_text" else "plain_text"
             extraction_version = STATIC_EXTRACTION_VERSION
+        if images:
+            image_snapshot = json.dumps(
+                [image.model_dump() for image in images], ensure_ascii=False, separators=(",", ":")
+            )
+            identity += f"\nimages:{sha256(image_snapshot.encode('utf-8')).hexdigest()}"
         return EvidenceRecord(
             evidence_id=f"ev_{sha256(identity.encode('utf-8')).hexdigest()[:32]}",
             result_id=result_id,
@@ -453,6 +466,7 @@ class EvidenceBuilder:
             extraction_version=extraction_version,
             render_bundle_sha256=bundle_sha,
             warnings=warnings,
+            images=images,
         )
 
     async def _render_document(

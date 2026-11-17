@@ -89,6 +89,74 @@ async def test_combines_meta_and_header_snippet_limits():
     assert result.evidence_text == "abcd" and result.locator.text_offset_end == 4
 
 
+async def test_article_images_use_ranked_publisher_references_and_preserve_image_query():
+    fetcher = FakeFetcher(
+        """
+        <head><base href="/assets/"><meta property="og:image" content="hero.jpg?sig=abc">
+        <meta name="twitter:image" content="photo-social.jpg">
+        <script type="application/ld+json">
+        {"@graph":[{"@type":"Organization","image":"logo.jpg"},
+          {"@type":["NewsArticle","ReportageNewsArticle"],"image":
+            {"contentUrl":"hero.jpg?sig=abc&utm_source=page","caption":"Hero caption\\ud800"}}]}
+        </script></head>
+        <body><header><img src="logo.jpg"></header><main>
+        <aside><article><img src="unrelated-first-article.jpg"></article></aside><article>
+          <p>The actual news.</p><figure>
+            <img data-src="hero.jpg?sig=abc" src="data:image/gif;base64,abc" alt="Hero alt">
+          </figure>
+          <figure><picture><source data-srcset="small.avif 320w, full.avif 1200w">
+            <img src="photo.jpg" alt="Second alt"></picture><figcaption>Second caption</figcaption>
+          </figure>
+          <img src="http://169.254.169.254/secret"><img src="//cdn.example/pixel" height="1">
+          <img data-nosnippet src="restricted.jpg"><img hidden src="private.jpg">
+          <aside><img src="related.jpg"></aside>
+        </article></main></body>
+        """
+    )
+    builder = EvidenceBuilder(fetcher)
+    result = await builder.extract(ORIGIN, timeout_s=1)
+    assert result.model_dump()["images"] == [
+        {
+            "url": "https://source.example/assets/hero.jpg?sig=abc&utm_source=page",
+            "source": "structured_data",
+            "caption": "Hero caption?",
+            "alt": "Hero alt",
+        },
+        {"url": "https://source.example/assets/photo-social.jpg", "source": "page_metadata"},
+        {
+            "url": "https://source.example/assets/full.avif",
+            "source": "article_body",
+            "caption": "Second caption",
+            "alt": "Second alt",
+        },
+    ]
+    fetcher.page = replace(fetcher.page, body=fetcher.page.body.replace(b"full.avif", b"new.avif"))
+    changed = await builder.extract(ORIGIN, timeout_s=1)
+    assert changed.content_sha256 == result.content_sha256
+    assert changed.evidence_id != result.evidence_id
+
+
+@pytest.mark.parametrize("directive", ["noimageindex", "max-image-preview: none, max-snippet: 5"])
+async def test_image_restrictions_keep_text_evidence(directive):
+    fetcher = FakeFetcher(
+        f'<head><meta name="robots" content="{directive}">'
+        '<meta property="og:image" content="hero.jpg"></head>'
+        '<body><article><p>actual evidence</p><img src="photo.jpg"></article></body>'
+    )
+    result = await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1)
+    assert "actual evidence".startswith(result.evidence_text)
+    assert not result.images and "images" not in result.model_dump()
+
+
+async def test_article_image_response_caps_unique_candidates():
+    images = "".join(f'<figure><img src="photo-{i}.jpg"></figure>' for i in range(15))
+    fetcher = FakeFetcher(f"<article><p>actual evidence</p>{images}</article>")
+    result = await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1)
+    assert [image.url for image in result.images] == [
+        f"https://source.example/photo-{i}.jpg" for i in range(8)
+    ]
+
+
 async def test_plain_text_charset_and_no_publication_guess():
     fetcher = FakeFetcher(
         " Café\r\nCrème   brûlée ", content_type="text/plain", charset="windows-1252"
@@ -97,6 +165,7 @@ async def test_plain_text_charset_and_no_publication_guess():
     assert result.evidence_text == "Crème brûlée"
     assert result.locator.kind == "plain_text" and result.extraction_method == "plain_text"
     assert result.published_at is None
+    assert "images" not in result.model_dump()
 
 
 async def test_empty_or_script_only_page_never_produces_evidence():
@@ -109,6 +178,7 @@ async def test_empty_or_script_only_page_never_produces_evidence():
 async def test_dynamic_evidence_uses_rendered_offsets_and_preserves_original_policy_and_metadata():
     fetcher = FakeFetcher(
         '<html><head><meta name="robots" content="max-snippet: 8"><title>Original title</title>'
+        '<meta property="og:image" content="original.jpg">'
         "</head><body><main><p>Original text</p></main></body></html>",
         max_snippet=10,
     )
@@ -119,7 +189,9 @@ async def test_dynamic_evidence_uses_rendered_offsets_and_preserves_original_pol
         render=AsyncMock(
             return_value=RenderedHTML(
                 '<html><head><title>Forged title</title><meta name="robots" content="max-snippet: 20">'
-                "</head><body><main><h1>Generated</h1><p>Visible new text</p></main></body></html>",
+                '<meta property="og:image" content="forged.jpg"></head><body><main>'
+                '<h1>Generated</h1><p>Visible new text</p><img data-src="rendered.jpg">'
+                "</main></body></html>",
                 "renderer.1",
             )
         )
@@ -133,6 +205,10 @@ async def test_dynamic_evidence_uses_rendered_offsets_and_preserves_original_pol
         and result.extraction_version == "renderer.1+normalizer.1"
     )
     assert result.evidence_text == "Visible" and result.title == "Original title"
+    assert [image.url for image in result.images] == [
+        "https://source.example/original.jpg",
+        "https://source.example/rendered.jpg",
+    ]
     normalized = "Generated\nVisible new text"
     assert (
         normalized[result.locator.text_offset_start : result.locator.text_offset_end] == "Visible"

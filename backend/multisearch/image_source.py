@@ -1,49 +1,16 @@
-import re
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
 
 from lxml import html
 
+from .article_images import IMAGE_META, srcset_candidates
 from .contracts import ImageSearchResult
 from .evidence import parse_static_html
 from .pipeline import canonical_url, public_link
 from .safe_fetch import FetchError, SafeFetcher, snippet_limit
 
-_IMAGE_META = {
-    "og:image",
-    "og:image:url",
-    "og:image:secure_url",
-    "twitter:image",
-    "twitter:image:src",
-}
-_DESCRIPTOR = re.compile(r"(?:[1-9][0-9]*w|(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)x)")
-_URL_TOKEN = re.compile(r"[^ \t\r\n\f]+")
-_SKIP = re.compile(r"[ \t\r\n\f,]*")
 _INERT = {"script", "style", "template", "noscript"}
-
-
-def _srcset(value: str) -> Iterator[str]:
-    # HTML 将 URL 内的逗号视为 URL 字符。仅接受常规宽度/倍率描述符。
-    if len(value) > 16_384:
-        return
-    cursor = 0
-    while cursor < len(value):
-        cursor = _SKIP.match(value, cursor).end()
-        match = _URL_TOKEN.match(value, cursor)
-        if match is None:
-            break
-        url = match[0]
-        cursor = match.end()
-        if url.endswith(","):
-            yield url.rstrip(",")
-            continue
-        end = value.find(",", cursor)
-        end = len(value) if end < 0 else end
-        descriptor = value[cursor:end].strip()
-        if not descriptor or _DESCRIPTOR.fullmatch(descriptor):
-            yield url
-        cursor = end + 1
 
 
 def _references(document: html.HtmlElement) -> Iterator[str]:
@@ -53,13 +20,13 @@ def _references(document: html.HtmlElement) -> Iterator[str]:
         if element.tag == "img":
             if src := element.get("src"):
                 yield src
-            yield from _srcset(element.get("srcset", ""))
+            yield from (url for url, _ in srcset_candidates(element.get("srcset", "")))
         elif element.tag == "source":
             if (parent := element.getparent()) is not None and parent.tag == "picture":
-                yield from _srcset(element.get("srcset", ""))
+                yield from (url for url, _ in srcset_candidates(element.get("srcset", "")))
         elif element.tag == "meta":
             name = (element.get("property") or element.get("name") or "").casefold()
-            if name in _IMAGE_META and (content := element.get("content")):
+            if name in IMAGE_META and (content := element.get("content")):
                 yield content
         elif "image_src" in element.get("rel", "").casefold().split() and (
             href := element.get("href")

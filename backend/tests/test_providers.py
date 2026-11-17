@@ -1,5 +1,6 @@
 import asyncio
-from urllib.parse import parse_qs
+import json
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -449,6 +450,80 @@ print(json.dumps({"status":"success", "results":[{
     assert isinstance(result, ImageSearchResult)
     assert result.image.search_engines == ["bing"]
     assert "ddgs:image_type_unsupported" in response.warnings
+
+
+@pytest.mark.parametrize(
+    ("source", "modality", "filters", "limit", "candidate_limit", "expected_paths"),
+    [
+        (Source.NEWS, Modality.TEXT, {}, 1, 1, ("/old",)),
+        (
+            Source.NEWS,
+            Modality.TEXT,
+            {"time_range": {"from": "2026-04-02", "to": "2026-04-05"}},
+            1,
+            10,
+            ("/first",),
+        ),
+        (
+            Source.NEWS,
+            Modality.TEXT,
+            {"domain_allowlist": ["example.org"]},
+            20,
+            30,
+            ("/first", "/second"),
+        ),
+        (
+            Source.WEB,
+            Modality.IMAGE,
+            {"image_options": {"min_width": 800}},
+            1,
+            10,
+            ("/first",),
+        ),
+    ],
+)
+async def test_ddgs_keeps_candidates_for_post_filters(
+    monkeypatch, source, modality, filters, limit, candidate_limit, expected_paths
+):
+    rows = [
+        {
+            "url": "https://other.example.net/old",
+            "image": "https://example.net/old.png",
+            "date": "2026-04-01",
+            "width": 300,
+        },
+        {
+            "url": "https://example.org/first",
+            "image": "https://example.net/first.png",
+            "date": "2026-04-03",
+            "width": 1200,
+        },
+        {
+            "url": "https://example.org/second",
+            "image": "https://example.net/second.png",
+            "date": "2026-04-04",
+            "width": 1800,
+        },
+    ]
+    limits = []
+
+    class Child:
+        returncode = 0
+
+        async def communicate(self, data):
+            max_results = json.loads(data)["max_results"]
+            limits.append(max_results)
+            return json.dumps({"status": "success", "results": rows[:max_results]}).encode(), b""
+
+    async def spawn(*_args, **_kwargs):
+        return Child()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    request = SearchRequest(query="moon", source_types=[source], modalities=[modality], **filters)
+    response = await DDGSProvider().search(request, source, modality, limit, 1)
+
+    assert limits == [candidate_limit]
+    assert tuple(urlsplit(result.url).path for result in response.results) == expected_paths
 
 
 async def test_ddgs_cancellation_terminates_the_sdk_child(monkeypatch):

@@ -357,6 +357,7 @@ export type EvidenceRecord = {
   render_bundle_sha256?: string;
   verification_status: string;
   access_policy: string;
+  images?: { url: string; source: "structured_data" | "page_metadata" | "article_body"; alt?: string; caption?: string }[];
 };
 
 export type ResearchResult = {

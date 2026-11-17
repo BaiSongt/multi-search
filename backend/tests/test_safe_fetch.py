@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from multisearch import safe_fetch
+from multisearch.evidence import EvidenceBuilder
 from multisearch.render_resources import MAX_RESOURCE_BYTES, FetchedResource, ResourceSpec
 from multisearch.safe_fetch import FetchError, SafeFetcher
 
@@ -40,6 +41,33 @@ def network(monkeypatch):
     monkeypatch.setattr(safe_fetch, "_resolve", resolve)
     monkeypatch.setattr(safe_fetch, "_transport", lambda: httpx.MockTransport(send))
     return dns, requests, answers, responses
+
+
+@pytest.mark.parametrize("directive", [None, "noimageindex", "max-image-preview: none"])
+async def test_redirect_extracts_publisher_image_references_without_downloading(network, directive):
+    _, requests, _, responses = network
+    publisher = "https://publisher.example/coverage/actual-article"
+    responses[("aggregator.example", "/read/public-redirect")] = httpx.Response(
+        302, headers={"Location": publisher}
+    )
+    headers = {"Content-Type": "text/html; charset=utf-8"}
+    if directive:
+        headers["X-Robots-Tag"] = directive
+    responses[("publisher.example", "/coverage/actual-article")] = httpx.Response(
+        200,
+        headers=headers,
+        text='<meta property="og:image" content="./hero.webp"><p>Publisher text</p>',
+    )
+
+    origin = "https://aggregator.example/read/public-redirect"
+    result = await EvidenceBuilder(SafeFetcher()).extract(origin, timeout_s=2)
+    assert result.evidence_text == "Publisher text"
+    assert (result.origin_url, result.canonical_url) == (origin, publisher)
+    assert [image.url for image in result.images] == (
+        [] if directive else ["https://publisher.example/coverage/hero.webp"]
+    )
+    assert len(requests) == 4
+    assert all(request.url.path != "/coverage/hero.webp" for request in requests)
 
 
 @pytest.mark.parametrize(
