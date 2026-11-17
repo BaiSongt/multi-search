@@ -89,8 +89,9 @@ test("fixed API paths, idempotency, tracing and unauthenticated capability disco
     path: "/proxy/api/v1/search", method: "POST", authorization: `Bearer ${token}`,
     body: { query: "moon", request_id: "caller", idempotency_key: "id-001" },
   });
-  const fetched = await client.fetch({ url: "https://example.org" });
+  const fetched = await client.fetch({ url: "https://example.org", extraction_mode: "auto" });
   assert.equal(fetched.status, 202);
+  assert.equal(received.at(-1).body.extraction_mode, "auto");
   assert.equal((await client.research({ query: "moon", idempotency_key: "research-001" })).status, 202);
   assert.equal((await client.search({ query: "moon", mode: "deep" })).status, 202);
   assert.equal((await client.getJob(fetched.body.job_id)).body.status, "running");

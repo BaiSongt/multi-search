@@ -1,6 +1,6 @@
 {
   "name": "multisearch-console",
-  "version": "0.3.0-alpha.20",
+  "version": "0.3.0-alpha.21",
   "private": true,
   "license": "Apache-2.0",
   "scripts": {

@@ -9,23 +9,32 @@ from unittest.mock import AsyncMock, Mock, call
 import httpx
 import pytest
 
+from multisearch import safe_fetch
 from multisearch.crawl_parser import CrawlParser
 from multisearch.dynamic_renderer import RenderedHTML
 from multisearch.evidence import EvidenceBuilder
 from multisearch.pdf_parser import OCRPending
 from multisearch.render_resources import MAX_RESOURCE_BYTES, FetchedResource, ResourceSpec
-from multisearch.safe_fetch import FetchedPage, FetchError
+from multisearch.safe_fetch import FetchedPage, FetchError, SafeFetcher
 from multisearch.tracing import bind_trace
 
 ORIGIN = "https://origin.example/doc"
 CANONICAL = "https://source.example/doc"
 WHEN = datetime(2026, 11, 5, tzinfo=UTC)
+SCRIPT_SHELL = '<script>document.body.append("Rendered evidence")</script><main></main>'
 
 
 class FakeFetcher:
     def __init__(self, text, *, content_type="text/html", charset="utf-8", max_snippet=None):
         self.page = FetchedPage(
-            ORIGIN, CANONICAL, content_type, text.encode(charset), WHEN, charset, max_snippet
+            ORIGIN,
+            CANONICAL,
+            content_type,
+            text.encode(charset),
+            WHEN,
+            charset,
+            max_snippet,
+            redirect_chain=(ORIGIN, CANONICAL),
         )
         self.options = {}
 
@@ -175,6 +184,143 @@ async def test_empty_or_script_only_page_never_produces_evidence():
     assert error.value.code == "FETCH_NO_EXCERPT"
 
 
+async def test_auto_prefers_available_static_excerpt():
+    fetcher = FakeFetcher(f"<html><body><p>Static excerpt</p>{SCRIPT_SHELL}</body></html>")
+    renderer = Mock(render=AsyncMock())
+    builder = EvidenceBuilder(
+        fetcher, renderer=renderer, dynamic_hosts=frozenset({"origin.example", "source.example"})
+    )
+    result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="auto")
+    assert result.evidence_text == "Static excerpt"
+    assert result.extraction_method == "static_html"
+    renderer.render.assert_not_awaited()
+
+
+async def test_auto_renders_shell_with_an_approved_external_script():
+    spec = ResourceSpec("https://source.example/app.js", "script")
+    asset = FetchedResource(spec.url, spec.kind, "text/javascript", "renderArticle()")
+    fetcher = FakeFetcher('<main></main><script src="/app.js"></script>')
+    fetcher.fetch_resource = AsyncMock(return_value=asset)
+    rendered = RenderedHTML("<main><p>Rendered paragraph.</p></main>", "renderer.2")
+    renderer = Mock(render=AsyncMock(), render_bundle=AsyncMock(return_value=rendered))
+    builder = EvidenceBuilder(
+        fetcher,
+        renderer=renderer,
+        dynamic_hosts=frozenset({"origin.example", "source.example"}),
+        dynamic_resources={CANONICAL: (spec,)},
+    )
+
+    result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="auto")
+
+    assert result.evidence_text == "Rendered paragraph." and result.render_bundle_sha256
+    fetcher.fetch_resource.assert_awaited_once()
+    assert fetcher.fetch_resource.await_args.args == (spec,)
+    assert renderer.render_bundle.await_args.args[2] == [asset]
+    renderer.render.assert_not_awaited()
+
+
+@pytest.mark.parametrize("allow_redirect", [False, True])
+async def test_auto_reuses_single_approved_redirect_chain(monkeypatch, allow_redirect):
+    relay = "https://relay.example/hop"
+    visits = []
+
+    async def resolve(host, port):
+        return ["8.8.8.8"]
+
+    async def respond(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        host = request.headers["host"]
+        visits.append((host, request.url.path))
+        if host == "origin.example":
+            return httpx.Response(302, headers={"Location": relay})
+        if host == "relay.example":
+            return httpx.Response(302, headers={"Location": CANONICAL})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "max-snippet: 8"},
+            text=SCRIPT_SHELL,
+        )
+
+    monkeypatch.setattr(safe_fetch, "_resolve", resolve)
+    monkeypatch.setattr(safe_fetch, "_transport", lambda: httpx.MockTransport(respond))
+    renderer = Mock(
+        render=AsyncMock(
+            return_value=RenderedHTML("<main><p>Rendered evidence</p></main>", "browser.1")
+        )
+    )
+    hosts = {"origin.example", "source.example"}
+    if allow_redirect:
+        hosts.add("relay.example")
+    builder = EvidenceBuilder(SafeFetcher(), renderer=renderer, dynamic_hosts=frozenset(hosts))
+    if allow_redirect:
+        result = await builder.extract(ORIGIN, timeout_s=2, extraction_mode="auto")
+        assert result.origin_url == ORIGIN and result.canonical_url == CANONICAL
+        assert result.locator.kind == "rendered_html_text" and result.evidence_text == "Rendered"
+        assert result.extraction_method == "browser_dom"
+        renderer.render.assert_awaited_once()
+    else:
+        with pytest.raises(FetchError, match="来源未包含可提取正文") as error:
+            await builder.extract(ORIGIN, timeout_s=2, extraction_mode="auto")
+        assert error.value.code == "FETCH_NO_EXCERPT"
+        renderer.render.assert_not_awaited()
+    assert visits == [
+        ("origin.example", "/doc"),
+        ("relay.example", "/hop"),
+        ("source.example", "/doc"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("markup", "max_snippet", "error_code"),
+    [
+        ("<main></main>", None, "FETCH_NO_EXCERPT"),
+        ('<script type="application/ld+json">{}</script>', None, "FETCH_NO_EXCERPT"),
+        ('<script src="/app.js"></script>', None, "FETCH_NO_EXCERPT"),
+        (SCRIPT_SHELL, 0, "FETCH_NO_EXCERPT"),
+        (
+            '<meta name="robots" content="max-snippet: 0">' + SCRIPT_SHELL,
+            None,
+            "FETCH_SITE_RESTRICTED",
+        ),
+        ('<meta name="robots" content="nosnippet">' + SCRIPT_SHELL, None, "FETCH_SITE_RESTRICTED"),
+    ],
+)
+async def test_auto_skips_nonrenderable_or_disallowed_shell(markup, max_snippet, error_code):
+    fetcher = FakeFetcher(markup, max_snippet=max_snippet)
+    renderer = Mock(render=AsyncMock())
+    builder = EvidenceBuilder(
+        fetcher, renderer=renderer, dynamic_hosts=frozenset({"origin.example", "source.example"})
+    )
+    with pytest.raises(FetchError) as error:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="auto")
+    assert error.value.code == error_code
+    renderer.render.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "FETCH_ROBOTS_DENIED",
+        "FETCH_SITE_RESTRICTED",
+        "FETCH_UNAVAILABLE",
+        "FETCH_TARGET_BLOCKED",
+        "FETCH_RATE_LIMITED",
+    ],
+)
+async def test_auto_preserves_transport_errors(error_code):
+    fetcher = Mock(fetch=AsyncMock(side_effect=FetchError(403, error_code, "fixture")))
+    renderer = Mock(render=AsyncMock())
+    builder = EvidenceBuilder(
+        fetcher, renderer=renderer, dynamic_hosts=frozenset({"origin.example", "source.example"})
+    )
+    with pytest.raises(FetchError) as error:
+        await builder.extract(ORIGIN, timeout_s=1, extraction_mode="auto")
+    assert error.value.code == error_code
+    fetcher.fetch.assert_awaited_once()
+    renderer.render.assert_not_awaited()
+
+
 async def test_dynamic_evidence_uses_rendered_offsets_and_preserves_original_policy_and_metadata():
     fetcher = FakeFetcher(
         '<html><head><meta name="robots" content="max-snippet: 8"><title>Original title</title>'
@@ -258,14 +404,15 @@ async def test_dynamic_extraction_honors_original_and_rendered_robots_and_requir
     renderer.render.assert_not_awaited()
 
 
-async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_fingerprint():
+@pytest.mark.parametrize("mode", ["dynamic", "auto"])
+async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_fingerprint(mode):
     script = ResourceSpec("https://source.example/app.js", "script")
     data = ResourceSpec("https://source.example/api", "json")
     script_asset = FetchedResource(
         script.url, "script", "text/javascript", "a" * MAX_RESOURCE_BYTES
     )
     json_asset = FetchedResource(data.url, "json", "application/json", '{"data":1}', 6)
-    fetcher = FakeFetcher("<p>Shell</p>")
+    fetcher = FakeFetcher('<script src="/app.js"></script>' if mode == "auto" else "<p>Shell</p>")
     fetcher.fetch_resource = AsyncMock(side_effect=[script_asset, json_asset])
     rendered = RenderedHTML(
         "<html><head></head><body><p>Generated paragraph</p></body></html>", "renderer.2"
@@ -278,7 +425,7 @@ async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_finger
         dynamic_hosts=hosts,
         dynamic_resources={CANONICAL: (script, data)},
     )
-    result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode=mode)
     assert result.evidence_text == "Genera"
     assert result.extraction_version == "renderer.2+normalizer.1"
     legacy_inputs = [
@@ -297,7 +444,7 @@ async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_finger
         assert request.kwargs["authorized_hosts"] == hosts
 
     fetcher.fetch_resource.side_effect = [script_asset, replace(json_asset, body='{"data":2}')]
-    changed = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
+    changed = await builder.extract(ORIGIN, timeout_s=1, extraction_mode=mode)
     assert changed.content_sha256 == result.content_sha256
     assert changed.render_bundle_sha256 != result.render_bundle_sha256
     assert changed.evidence_id != result.evidence_id

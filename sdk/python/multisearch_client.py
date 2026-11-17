@@ -87,6 +87,7 @@ class ResearchRequest(SearchOptions):
 class FetchOptions(RequestMetadata, total=False):
     max_latency_ms: int
     max_pages: int
+    extraction_mode: Literal["static", "dynamic", "auto"]
     network_scope: Literal["public"]
     domain_allowlist: list[str]
     domain_denylist: list[str]
@@ -115,6 +116,7 @@ class Capabilities(TypedDict):
     network_scopes: dict[NetworkScope, Availability]
     combinations: list[AvailableCombination]
     fetch: Availability
+    fetch_dynamic: NotRequired[Availability]
     research: Availability
     ocr: Availability
     limits: JsonObject

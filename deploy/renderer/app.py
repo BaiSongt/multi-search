@@ -31,6 +31,8 @@ MAX_ASSET_TOTAL = 512 * 1024
 MAX_CROSS_REPLAYS = 64
 RENDER_SECONDS = 5
 SETTLE_SECONDS = 0.2
+INLINE_CONTENT_GRACE_SECONDS = 0.4
+INLINE_CONTENT_POLL_SECONDS = 0.05
 CHROMIUM = "/usr/bin/chromium"
 MIN_CHROMIUM_VERSION = (157, 0, 8103, 38)
 CSP = (
@@ -380,6 +382,29 @@ async def enable_cross_replay(
     )
 
 
+async def wait_for_inline_content(session: CDPSession, world_id: int) -> None:
+    # 只为已经存在但没有可见正文的语义容器保留少量等待时间。
+    try:
+        async with asyncio.timeout(INLINE_CONTENT_GRACE_SECONDS):
+            while True:
+                result = await session.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": (
+                            "document.querySelector('article, main, [role=main]')"
+                            "?.innerText?.trim() === ''"
+                        ),
+                        "contextId": world_id,
+                        "returnByValue": True,
+                    },
+                )
+                if result["result"].get("value") is not True:
+                    return
+                await asyncio.sleep(INLINE_CONTENT_POLL_SECONDS)
+    except TimeoutError:
+        return
+
+
 async def render(browser: Browser, snapshot: Snapshot) -> str:
     async with browser_context(browser) as context:
         page = await context.new_page()
@@ -460,6 +485,9 @@ async def render(browser: Browser, snapshot: Snapshot) -> str:
                 "worldName": "multisearch-extract",
             },
         )
+        world_id = world["executionContextId"]
+        if not snapshot.assets:
+            await wait_for_inline_content(session, world_id)
         result = await session.send(
             "Runtime.evaluate",
             {
@@ -467,7 +495,7 @@ async def render(browser: Browser, snapshot: Snapshot) -> str:
                     "(() => {const html = document.documentElement?.outerHTML ?? '';"
                     f"return html.length <= {MAX_HTML} ? html : null;}})()"
                 ),
-                "contextId": world["executionContextId"],
+                "contextId": world_id,
                 "returnByValue": True,
             },
         )

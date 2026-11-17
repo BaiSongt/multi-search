@@ -1,4 +1,6 @@
 from collections.abc import Iterable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -8,6 +10,20 @@ from starlette.exceptions import HTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .contracts import ErrorBody, ProviderRun, unresolved_provider_reasons
+
+
+def retry_after_seconds(header: object) -> float | None:
+    if not isinstance(header, str) or not header:
+        return None
+    try:
+        if len(header) <= 10 and header.isascii() and header.isdecimal():
+            return float(header)
+        target = parsedate_to_datetime(header)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=UTC)
+        return max(0.0, (target - datetime.now(UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 class ApiError(Exception):

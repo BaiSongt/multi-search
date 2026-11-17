@@ -12,6 +12,7 @@ from xml.etree import ElementTree
 import httpx
 
 from .contracts import Modality, SearchRequest, Source, TextSearchResult
+from .errors import retry_after_seconds
 from .pipeline import _id, _matches_domain, _publication_date, _text, canonical_url, public_link
 from .providers import (
     Provider,
@@ -19,7 +20,6 @@ from .providers import (
     ProviderFailure,
     ProviderFilters,
     ProviderResult,
-    _retry_after,
 )
 
 _MAX_UPSTREAM_BYTES = 2 * 1024 * 1024
@@ -207,7 +207,7 @@ class _VerticalProvider:
         ) as response:
             if response.status_code == 404 and missing_ok:
                 return None
-            retry_after = _retry_after(response.headers.get("retry-after"))
+            retry_after = retry_after_seconds(response.headers.get("retry-after"))
             github_limit = self.provider_id == "github" and (
                 retry_after is not None or response.headers.get("x-ratelimit-remaining") == "0"
             )

@@ -130,6 +130,54 @@ async def test_fetch_keeps_ocr_pending_after_checkpoint_and_does_not_refetch():
     }
 
 
+@pytest.mark.parametrize(
+    ("mode", "dynamic_ready", "expected"),
+    [
+        ("auto", False, "static"),
+        ("auto", True, "auto"),
+        ("static", True, "static"),
+        ("dynamic", True, "dynamic"),
+    ],
+)
+async def test_worker_selects_extract_mode_per_page(mode, dynamic_ready, expected):
+    store = SimpleNamespace(progress=AsyncMock(return_value=True))
+    evidence = SimpleNamespace(extract=AsyncMock(side_effect=OCRPending()))
+    worker = Worker(store, evidence)
+    worker.dynamic_ready = dynamic_ready
+
+    outcome = await worker.fetch(claim(url="https://example.org/", extraction_mode=mode))
+
+    evidence.extract.assert_awaited_once()
+    assert evidence.extract.await_args.kwargs["extraction_mode"] == expected
+    assert outcome.result["ocr_pending"] == [0]
+
+
+async def test_fetch_keeps_optional_retry_after_for_a_rate_limited_page():
+    store = SimpleNamespace(progress=AsyncMock(return_value=True))
+    evidence = SimpleNamespace(
+        extract=AsyncMock(
+            side_effect=[
+                FetchError(
+                    429, "FETCH_RATE_LIMITED", "来源限流", retryable=True, retry_after_ms=2000
+                ),
+                FetchError(404, "FETCH_NOT_FOUND", "来源不存在"),
+            ]
+        )
+    )
+    worker = Worker(store, evidence)
+
+    outcome = await worker.fetch(claim(urls=["https://example.org/one", "https://example.org/two"]))
+
+    limited, missing = outcome.result["failures"]
+    assert limited == {
+        "index": 0,
+        "code": "FETCH_RATE_LIMITED",
+        "message": "来源限流",
+        "retry_after_ms": 2000,
+    }
+    assert missing == {"index": 1, "code": "FETCH_NOT_FOUND", "message": "来源不存在"}
+
+
 async def test_worker_cancellation_stops_inflight_handler_and_finishes_cancelled(monkeypatch):
     started = asyncio.Event()
     closed = asyncio.Event()
@@ -181,7 +229,7 @@ async def test_fetch_enforces_scope_network_and_worker_gate():
         assert pending.status_code == 503 and pending.json()["code"] == "WORKER_UNAVAILABLE"
 
 
-async def test_dynamic_fetch_requires_approved_hosts_and_its_own_worker_readiness():
+async def test_fetch_modes_apply_their_own_readiness_and_preserve_payloads():
     app = FastAPI()
     install_errors(app)
     app.include_router(router)
@@ -203,6 +251,7 @@ async def test_dynamic_fetch_requires_approved_hosts_and_its_own_worker_readines
     app.state.job_application = JobApplication(store, redis, search, enable_research=False)
     static = {"url": "https://example.org"}
     dynamic = {**static, "extraction_mode": "dynamic"}
+    auto = {**static, "extraction_mode": "auto", "idempotency_key": "fetch-auto"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         denied = await client.post("/api/v1/fetch", json=dynamic)
         assert denied.status_code == 422 and denied.json()["code"] == "MODE_UNAVAILABLE"
@@ -218,6 +267,13 @@ async def test_dynamic_fetch_requires_approved_hosts_and_its_own_worker_readines
         assert no_renderer.status_code == 503 and no_renderer.json()["code"] == "WORKER_UNAVAILABLE"
         store.create.assert_not_called()
 
+        settings.dynamic_fetch_domains = frozenset()
+        assert (await client.post("/api/v1/fetch", json=auto)).status_code == 202
+        assert store.create.call_args.args[2]["extraction_mode"] == "auto"
+        assert store.create.call_args.args[4] == "fetch-auto"
+        assert store.create.call_args.kwargs["worker_available"] is True
+        assert store.create.call_args.kwargs["idempotency_payload"] is None
+        settings.dynamic_fetch_domains = frozenset({"example.org"})
         ready.add(HEARTBEAT_KEY)
         assert (await client.post("/api/v1/fetch", json=dynamic)).status_code == 202
         assert store.create.call_args.args[2]["extraction_mode"] == "dynamic"

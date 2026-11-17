@@ -585,6 +585,7 @@ async def test_official_client_discovers_and_runs_typed_job_tools(jobs_server, m
             {
                 "urls": ["https://example.org/first", "https://example.org/second"],
                 "max_pages": 1,
+                "extraction_mode": "auto",
                 "request_id": "fetch-fixture",
                 "idempotency_key": "fetch-once",
             },
@@ -600,6 +601,7 @@ async def test_official_client_discovers_and_runs_typed_job_tools(jobs_server, m
         assert (
             body.targets() == ["https://example.org/first"] and body.idempotency_key == "fetch-once"
         )
+        assert body.extraction_mode == "auto"
         assert "fetch-fixture" in correlation_ids
         assert accepted.status_url == f"/api/v1/jobs/{accepted.job_id}"
         job_ref = {"job_id": str(accepted.job_id)}

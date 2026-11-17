@@ -77,6 +77,9 @@ class Worker:
             if remaining <= 0:
                 warnings.append("TIME_BUDGET_EXCEEDED")
                 break
+            extraction_mode = body.extraction_mode
+            if extraction_mode == "auto" and not self.dynamic_ready:
+                extraction_mode = "static"
             try:
                 async with asyncio.timeout(min(remaining, 20)):
                     record = await self.evidence.extract(
@@ -85,7 +88,7 @@ class Worker:
                         network_scope=body.network_scope,
                         domain_allowlist=body.domain_allowlist,
                         domain_denylist=body.domain_denylist,
-                        extraction_mode=body.extraction_mode,
+                        extraction_mode=extraction_mode,
                     )
             except TimeoutError:
                 errors.append(
@@ -96,7 +99,10 @@ class Worker:
                 result["ocr_pending"] = pending
                 warnings.append(error.code)
             except FetchError as error:
-                errors.append({"index": index, "code": error.code, "message": str(error)})
+                failure = {"index": index, "code": error.code, "message": str(error)}
+                if error.retry_after_ms is not None:
+                    failure["retry_after_ms"] = error.retry_after_ms
+                errors.append(failure)
             else:
                 records.append(record.model_dump(mode="json"))
             progress.pages_fetched = len(records)

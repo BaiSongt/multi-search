@@ -158,6 +158,44 @@ async def test_only_connect_errors_can_try_another_address(network, failure):
     assert [item.url.host for item in requests] == [PUBLIC_IP, PUBLIC_IP]
 
 
+@pytest.mark.parametrize(
+    ("limiting_path", "headers", "delay"),
+    [
+        ("/first", {"Retry-After": "45"}, 45),
+        ("/robots.txt", {"Retry-After": "45"}, 45),
+        ("/first", {}, 15),
+        ("/first", {"Retry-After": "invalid"}, 15),
+    ],
+)
+async def test_retry_after_blocks_additional_requests_to_limited_host(
+    network, monkeypatch, limiting_path, headers, delay
+):
+    dns, requests, _, responses = network
+    now = 100.0
+    monkeypatch.setattr(safe_fetch, "monotonic", lambda: now)
+    host = "limited.example"
+    responses[(host, limiting_path)] = httpx.Response(429, headers=headers)
+    fetcher = SafeFetcher()
+
+    with pytest.raises(FetchError) as limited:
+        await fetcher.fetch(f"https://{host}/first", timeout_s=1)
+    assert limited.value.status == 429 and limited.value.code == "FETCH_RATE_LIMITED"
+    assert limited.value.retryable and limited.value.retry_after_ms == delay * 1000
+    request_count, dns_count = len(requests), len(dns)
+
+    now += 1
+    with pytest.raises(FetchError) as cooling_down:
+        await fetcher.fetch(f"https://{host}/next", timeout_s=1)
+    assert cooling_down.value.code == "FETCH_RATE_LIMITED"
+    assert cooling_down.value.retry_after_ms == (delay - 1) * 1000
+    assert (len(requests), len(dns)) == (request_count, dns_count)
+    assert (await fetcher.fetch("https://other.example/next", timeout_s=1)).body == b"public text"
+
+    del responses[(host, limiting_path)]
+    now = 100 + delay
+    assert (await fetcher.fetch(f"https://{host}/next", timeout_s=1)).body == b"public text"
+
+
 async def test_connect_fallback_deduplicates_and_bounds_attempts(network):
     dns, requests, answers, responses = network
     host = "public.example"
@@ -550,7 +588,7 @@ async def test_robots_specific_allow_wildcard_and_crawl_delay(network):
     assert requests[-1].url.path == "/robots.txt"
 
 
-@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+@pytest.mark.parametrize("status", [401, 403, 500, 503])
 async def test_unreachable_robots_fails_closed(network, status):
     _, requests, _, responses = network
     responses[("one.example", "/robots.txt")] = httpx.Response(status)

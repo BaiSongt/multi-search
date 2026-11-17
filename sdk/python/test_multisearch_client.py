@@ -156,8 +156,9 @@ class MultiSearchClientTest(unittest.TestCase):
                 },
             ),
         )
-        fetched = client.fetch({"url": "https://example.org"})
+        fetched = client.fetch({"url": "https://example.org", "extraction_mode": "auto"})
         self.assertEqual(fetched.status, 202)
+        self.assertEqual(self.received[-1][3]["extraction_mode"], "auto")
         self.assertEqual(
             client.research(
                 {"query": "moon", "idempotency_key": "research-001"}

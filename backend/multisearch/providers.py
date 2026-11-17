@@ -5,8 +5,6 @@ import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -21,6 +19,7 @@ from .contracts import (
     SearchResult,
     Source,
 )
+from .errors import retry_after_seconds
 from .pipeline import normalize, public_link
 from .settings import Settings
 
@@ -147,20 +146,6 @@ def _locale(request: SearchRequest) -> tuple[str | None, str | None]:
     return language, request.region or language_region
 
 
-def _retry_after(header: object) -> float | None:
-    if not isinstance(header, str) or not header:
-        return None
-    try:
-        if len(header) <= 10 and header.isascii() and header.isdecimal():
-            return float(header)
-        target = parsedate_to_datetime(header)
-        if target.tzinfo is None:
-            target = target.replace(tzinfo=UTC)
-        return max(0.0, (target - datetime.now(UTC)).total_seconds())
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
 def _engine_diagnostics(errors: list) -> tuple[FailureStatus, tuple[ProviderReason, ...]]:
     reasons: set[ProviderReason] = set()
     for error in errors:
@@ -229,7 +214,7 @@ class SearXNGProvider(PublicProvider):
                 if response.status_code == 429:
                     raise ProviderFailure(
                         "rate_limited",
-                        _retry_after(response.headers.get("retry-after")),
+                        retry_after_seconds(response.headers.get("retry-after")),
                         reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,),
                     )
                 if response.status_code in {408, 504}:
@@ -419,7 +404,7 @@ class DDGSProvider(PublicProvider):
             case "rate_limited":
                 raise ProviderFailure(
                     "rate_limited",
-                    _retry_after(payload.get("retry_after")),
+                    retry_after_seconds(payload.get("retry_after")),
                     reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,),
                 )
             case "upstream_unavailable":

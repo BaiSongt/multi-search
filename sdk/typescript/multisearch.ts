@@ -51,6 +51,7 @@ export type ResearchRequest = Omit<SearchRequest, "mode"> & { mode?: "auto" | "d
 interface FetchOptions extends RequestMetadata {
   max_latency_ms?: number;
   max_pages?: number;
+  extraction_mode?: "static" | "dynamic" | "auto";
   network_scope?: "public";
   domain_allowlist?: string[];
   domain_denylist?: string[];
@@ -65,6 +66,7 @@ export interface Capabilities {
   network_scopes: Record<NetworkScope, Availability>;
   combinations: { source_type: SourceType; modality: Modality }[];
   fetch: Availability;
+  fetch_dynamic?: Availability;
   research: Availability;
   ocr: Availability;
   limits: JsonObject;

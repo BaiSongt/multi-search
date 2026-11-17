@@ -6,6 +6,7 @@ from typing import NoReturn
 import httpx
 
 from .contracts import Modality, ProviderReason, Scope, SearchRequest, Source
+from .errors import retry_after_seconds
 from .pipeline import _matches_domain, normalize
 from .providers import (
     _MAX_UPSTREAM_BYTES,
@@ -15,7 +16,6 @@ from .providers import (
     ProviderFilters,
     ProviderResult,
     _locale,
-    _retry_after,
 )
 from .vertical_providers import academic_identifier
 
@@ -97,7 +97,7 @@ class WikipediaProvider:
             follow_redirects=False,
             timeout=timeout_s,
         ) as response:
-            retry_after = _retry_after(response.headers.get("retry-after"))
+            retry_after = retry_after_seconds(response.headers.get("retry-after"))
             if response.status_code == 429:
                 self._defer(retry_after, "rate_limited", _RATE_LIMITED)
             if response.status_code == 503:

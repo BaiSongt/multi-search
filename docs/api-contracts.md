@@ -107,13 +107,17 @@ HTML 证据可附带最多 8 条 `images`。每条包含 `url`、`source` 和可
 
 `POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。
 
-`POST /api/v1/fetch` 与 MCP `web_fetch` 接受 `extraction_mode`，默认 `static`。设置 `dynamic` 时，仅对部署允许的 HTTPS 域名执行隔离渲染，重定向逐跳应用同一授权。`GET /api/v1/capabilities` 的 `fetch_dynamic` 表示配置和渲染 Worker 就绪状态。部署未授权动态抓取时返回 `MODE_UNAVAILABLE`，已授权但暂时无可用 Worker 时返回 `WORKER_UNAVAILABLE`。同一幂等标识从静态模式改为动态模式会产生冲突。
+`POST /api/v1/fetch` 与 MCP `web_fetch` 接受 `extraction_mode`，默认 `static`。可显式选择 `auto`，先静态提取，再对符合条件的脚本页面尝试隔离渲染。页面须成功取得 HTML、缺少可提取正文，有可执行的内嵌脚本或预先授权的资源，并且动态 Worker 就绪。输入地址、重定向每一跳和最终地址都须是部署允许的 HTTPS 地址。渲染复用本次取得的页面快照。其余场景沿用静态路径。
+
+设置 `dynamic` 时，仅对部署允许的 HTTPS 域名执行隔离渲染，重定向逐跳应用同一授权。`GET /api/v1/capabilities` 的 `fetch_dynamic` 表示配置和渲染 Worker 就绪状态。显式选择 `dynamic` 时，部署未授权动态抓取会返回 `MODE_UNAVAILABLE`，已授权但暂时无可用 Worker 时会返回 `WORKER_UNAVAILABLE`。用同一幂等标识提交不同的 `extraction_mode` 会产生冲突。
 
 动态证据使用 `extraction_method=browser_dom`、`locator.kind=rendered_html_text`。偏移和 `content_sha256` 基于规范化的渲染正文，`extraction_version` 记录 Chromium 和规范化器版本。标题、DOI 和发布日期使用原始响应的元数据。动态抓取支持 UTF-8 或 ASCII HTML 的内嵌脚本，以及部署方为该页面逐项授权的同源和跨源 JavaScript 与 JSON GET 资源。 [部署配置](deployment.md#可选动态-html-渲染)
 
 使用资源清单时，`render_bundle_sha256` 对按 URL 排序的资源 URL、种类、MIME 和响应体 SHA-256 计算指纹。包含跨源资源时，指纹同时纳入页面的 COEP 策略和跨源资源的 CORS、CORP 响应头。同源资源包沿用原有指纹格式。
 
 资源预取失败时任务返回对应诊断，包括 `FETCH_RESOURCE_REDIRECT`、`FETCH_ROBOTS_DENIED`、`FETCH_CONTENT_UNSUPPORTED`、`FETCH_BODY_TOO_LARGE`、`FETCH_RESOURCE_CORS_DENIED` 和 `FETCH_RESOURCE_POLICY_UNSUPPORTED`。含跨源资源的页面若提供无法安全回放的 COEP，则返回 `FETCH_RENDER_POLICY_UNSUPPORTED`。
+
+来源响应 HTTP 429 时，任务的 `result.failures` 对应条目返回 `FETCH_RATE_LIMITED` 和 `retry_after_ms`。抓取进程在等待期内暂停向该主机发出后续请求。等待期来自有效的 `Retry-After`，缺失或无效时为 15 秒。
 
 抓取任务遇到图像型 PDF 时会进入 `partial` 终态，并在 `result.ocr_pending` 中返回待 OCR 的原始 URL 序号，从 0 开始。这些条目消耗抓取尝试预算，已提取页数仅统计实际生成证据的条目。当前 OCR 由外部授权适配器扩展。
 

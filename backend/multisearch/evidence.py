@@ -24,7 +24,14 @@ from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
 from .pdf_parser import PDF_EXTRACTION_VERSION, OCRPending, PdfParser
 from .render_resources import MAX_RESOURCE_BUNDLE_BYTES, MAX_RESOURCE_BYTES, ResourceSpec
-from .safe_fetch import FetchedPage, FetchError, SafeFetcher, allows_image_references, snippet_limit
+from .safe_fetch import (
+    FetchedPage,
+    FetchError,
+    SafeFetcher,
+    allows_image_references,
+    snippet_limit,
+    validate_fetch_url,
+)
 from .tracing import trace_event
 
 if TYPE_CHECKING:
@@ -80,6 +87,15 @@ _HIDDEN = {
     "video",
 }
 _BOT_NAMES = {"robots", "multisearchbot"}
+_SCRIPT_TYPES = {
+    "",
+    "module",
+    "text/javascript",
+    "application/javascript",
+    "text/ecmascript",
+    "application/ecmascript",
+    "application/x-javascript",
+}
 _DOI = re.compile(r"10\.\d{4,9}/[!-~]+", re.IGNORECASE)
 _COEP = re.compile(
     r'(unsafe-none|require-corp|credentialless)(?:[ \t]*;[ \t]*report-to="[\x20\x21\x23-\x5b\x5d-\x7e]{1,256}")?'
@@ -206,6 +222,17 @@ def _html_body(document: html.HtmlElement) -> list[_Block]:
     return blocks
 
 
+def _has_inline_script(document: html.HtmlElement) -> bool:
+    return any(
+        node.get("src") is None
+        and node.text
+        and node.text.strip()
+        and node.get("type", "").strip().casefold() in _SCRIPT_TYPES
+        and not any(parent.tag in {"template", "noscript"} for parent in node.iterancestors())
+        for node in document.iter("script")
+    )
+
+
 def _publication(value: str) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value)
@@ -313,7 +340,7 @@ class EvidenceBuilder:
                 deadline,
                 result_id,
                 query,
-                dynamic=dynamic,
+                extraction_mode=extraction_mode,
                 domain_allowlist=domain_allowlist,
                 domain_denylist=domain_denylist,
             )
@@ -354,7 +381,7 @@ class EvidenceBuilder:
         result_id: str | None,
         query: str | None,
         *,
-        dynamic: bool,
+        extraction_mode: ExtractionMode,
         domain_allowlist: Sequence[str],
         domain_denylist: Sequence[str],
     ) -> EvidenceRecord:
@@ -365,6 +392,7 @@ class EvidenceBuilder:
         resource_limit = None
         original = document = None
         include_images = False
+        dynamic = extraction_mode == "dynamic"
         if dynamic and page.content_type != "text/html":
             raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "动态渲染仅支持 HTML")
         if page.content_type == "application/pdf":
@@ -386,6 +414,13 @@ class EvidenceBuilder:
             metadata, meta_limit, image_policy = _html_metadata(document)
             include_images = page.allows_image_references and image_policy
             kind = "html_text"
+            blocks = [] if dynamic else _html_body(document)
+            if (
+                extraction_mode == "auto"
+                and not any(not block.heading for block in blocks)
+                and monotonic() < deadline
+            ):
+                dynamic = self._can_render_shell(page, document)
             if dynamic:
                 document, render_version, bundle_sha, resource_limit = await self._render_document(
                     page, deadline, domain_allowlist, domain_denylist
@@ -399,8 +434,8 @@ class EvidenceBuilder:
                         else rendered_limit
                     )
                 kind = "rendered_html_text"
-            blocks = _html_body(document)
-            if not dynamic and self.parser and any(not block.heading for block in blocks):
+                blocks = _html_body(document)
+            elif self.parser and any(not block.heading for block in blocks):
                 raw_html = page.body.decode(_charset(page.charset) or "utf-8-sig", errors="replace")
                 parser_budget = min(4.5, (deadline - monotonic()) * 0.75)
                 parsed = await self.parser.select(raw_html, timeout_s=parser_budget)
@@ -468,6 +503,23 @@ class EvidenceBuilder:
             warnings=warnings,
             images=images,
         )
+
+    def _can_render_shell(self, page: FetchedPage, document: html.HtmlElement) -> bool:
+        if (
+            self.renderer is None
+            or not self.dynamic_hosts
+            or page.content_type != "text/html"
+            or not page.redirect_chain
+            or (page.max_snippet is not None and page.max_snippet <= 0)
+            or not (self.dynamic_resources.get(page.url) or _has_inline_script(document))
+        ):
+            return False
+        try:
+            for url in page.redirect_chain:
+                validate_fetch_url(url, authorized_hosts=self.dynamic_hosts)
+        except FetchError:
+            return False
+        return True
 
     async def _render_document(
         self,

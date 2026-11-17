@@ -19,7 +19,7 @@ from protego import Protego
 
 from .contracts import Scope
 from .dns_resolver import resolve_over_https
-from .errors import ApiError
+from .errors import ApiError, retry_after_seconds
 from .pdf_child import PDF_MAX_BYTES, PDF_SIGNATURE
 
 _USER_AGENT = "MultiSearchBot/0.1"
@@ -45,6 +45,8 @@ _MAX_TIMEOUT_S = 60
 _MAX_CONNECT_ATTEMPTS = 3
 _CONNECT_FALLBACK_TIMEOUT_S = 2
 _MIN_HOST_DELAY = 0.2
+_DEFAULT_RATE_LIMIT_SECONDS = 15
+_MAX_RATE_LIMITED_HOSTS = 256
 
 type IP = IPv4Address | IPv6Address
 type ResourceKind = Literal["script", "json"]
@@ -82,6 +84,7 @@ class FetchedPage:
     allow_origin: str | None = None
     resource_policy: str | None = None
     allows_image_references: bool = True
+    redirect_chain: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,16 @@ def _budget_exhausted() -> FetchError:
 
 def _robots_unavailable() -> FetchError:
     return FetchError(403, "FETCH_ROBOTS_UNAVAILABLE", "无法确认站点抓取规则")
+
+
+def _rate_limited(remaining: float) -> FetchError:
+    return FetchError(
+        429,
+        "FETCH_RATE_LIMITED",
+        "站点已限制请求速率",
+        retryable=True,
+        retry_after_ms=math.ceil(remaining * 1000),
+    )
 
 
 def _public_ip(value: str) -> IP:
@@ -360,6 +373,7 @@ class SafeFetcher:
         self._host_locks = tuple(asyncio.Lock() for _ in range(64))
         self._max_body_bytes = max_body_bytes
         self._robots_cache: OrderedDict[str, _RobotsPolicy] = OrderedDict()
+        self._rate_limits: OrderedDict[str, float] = OrderedDict()
 
     async def fetch(
         self,
@@ -458,17 +472,22 @@ class SafeFetcher:
         target = _target(url)
         origin_url = target.url
         deadline = monotonic() + timeout_s
-        seen: set[str] = set()
+        seen: dict[str, None] = {}
         try:
             async with asyncio.timeout(timeout_s), self._slots:
                 for _ in range(_MAX_REDIRECTS + 1):
                     if target.url in seen:
                         break
-                    seen.add(target.url)
+                    seen[target.url] = None
                     _check_dynamic_hosts(target, authorized_hosts)
                     _check_domains(target, domain_allowlist, domain_denylist)
                     lock = self._host_locks[hash(target.host) % len(self._host_locks)]
                     async with lock:
+                        if (retry_at := self._rate_limits.get(target.host)) is not None:
+                            remaining = retry_at - monotonic()
+                            if remaining > 0:
+                                raise _rate_limited(remaining)
+                            del self._rate_limits[target.host]
                         rules = await self._robots_policy(target, deadline)
                         if not rules.rules.can_fetch(target.url, _USER_AGENT):
                             raise FetchError(
@@ -489,7 +508,7 @@ class SafeFetcher:
                             request_origin=request_origin,
                         )
                     if response.status not in _REDIRECTS:
-                        return self._page(origin_url, target, response)
+                        return self._page(origin_url, target, response, tuple(seen))
                     if resource_request:
                         raise FetchError(403, "FETCH_RESOURCE_REDIRECT", "渲染资源禁止重定向")
                     target = _redirect(target, response.location)
@@ -524,7 +543,11 @@ class SafeFetcher:
             else:
                 raise _robots_unavailable()
         except FetchError as error:
-            if error.code in {"FETCH_TARGET_BLOCKED", "FETCH_ROBOTS_UNAVAILABLE"}:
+            if error.code in {
+                "FETCH_TARGET_BLOCKED",
+                "FETCH_ROBOTS_UNAVAILABLE",
+                "FETCH_RATE_LIMITED",
+            }:
                 raise
             raise _robots_unavailable() from None
         except UnicodeError:
@@ -613,6 +636,14 @@ class SafeFetcher:
                 else:
                     break
             status = response.status_code
+            if status == 429:
+                retry_after = retry_after_seconds(response.headers.get("retry-after"))
+                delay = _DEFAULT_RATE_LIMIT_SECONDS if retry_after is None else retry_after
+                self._rate_limits[target.host] = monotonic() + delay
+                self._rate_limits.move_to_end(target.host)
+                if len(self._rate_limits) > _MAX_RATE_LIMITED_HOSTS:
+                    self._rate_limits.popitem(last=False)
+                raise _rate_limited(delay)
             if status != 200:
                 return _Response(status, response.headers.get("location"))
             if response.headers.get("cf-mitigated", "").casefold() == "challenge":
@@ -671,13 +702,13 @@ class SafeFetcher:
             )
 
     @staticmethod
-    def _page(origin_url: str, target: _Target, response: _Response) -> FetchedPage:
+    def _page(
+        origin_url: str, target: _Target, response: _Response, redirect_chain: tuple[str, ...]
+    ) -> FetchedPage:
         if response.status in (401, 403, 407, 451):
             raise FetchError(403, "FETCH_SITE_RESTRICTED", "站点限制访问此内容")
         if response.status in (404, 410):
             raise FetchError(404, "FETCH_NOT_FOUND", "来源不存在或已移除")
-        if response.status == 429:
-            raise FetchError(429, "FETCH_RATE_LIMITED", "站点已限制请求速率", retryable=True)
         if response.status != 200:
             raise FetchError(502, "FETCH_UNAVAILABLE", "来源未返回可提取的正文", retryable=True)
         return FetchedPage(
@@ -693,4 +724,5 @@ class SafeFetcher:
             allow_origin=response.allow_origin,
             resource_policy=response.resource_policy,
             allows_image_references=response.allows_image_references,
+            redirect_chain=redirect_chain,
         )

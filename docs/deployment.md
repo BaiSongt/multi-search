@@ -110,6 +110,8 @@ docker compose --profile fetch ps
 
 Worker 通过 PostgreSQL 持久化队列和租约恢复，Redis 提供就绪心跳。Crawl4AI 只在独立内部网络接受 Worker 传入的已验证 HTML，使用令牌鉴权。公开 URL 由 SafeFetcher 逐跳检查并固定目标 IP，遵守 robots 和摘录限制。解析器不接收 URL，且无需浏览器或公网访问。API 的同步 L3 默认使用静态提取。如需让同步 L3 使用隔离解析器，在启用 `fetch` 配置时设置 `CRAWL4AI_BASE_URL=http://crawl4ai:11235`。
 
+来源返回 HTTP 429 时，当前抓取进程按 `Retry-After` 暂停该主机的抓取。响应没有有效等待指示时暂停 15 秒。暂停期间直接返回 `FETCH_RATE_LIMITED` 和等待提示。 [HTTP 429 规范](https://www.rfc-editor.org/rfc/rfc6585.html#section-4)
+
 可选的 `compose.workers.yml` 启用三个 Worker 和默认确定性研究，均保留健康检查与共享队列租约。每个实例使用两个队列执行协程，沿用 512 MiB 内存上限，并限制为 1 CPU。使用 `.env` 中的 `MULTISEARCH_WORKER_REPLICAS` 调整副本数：
 
 ```sh
@@ -125,14 +127,14 @@ docker compose -f compose.yml -f compose.workers.yml --profile research ps
 
 ### 可选动态 HTML 渲染
 
-动态模式用于公开 HTML 由脚本生成正文的场景。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。每个允许的重定向域名也需单独列入。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。
+动态模式用于公开 HTML 由脚本生成正文的场景。Fetch 默认静态提取。调用方可传 `extraction_mode=auto`，只在页面已成功抓取、静态正文为空且存在内嵌脚本或已授权资源时，交给就绪的动态 Worker 渲染同一快照。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。输入地址、重定向各跳与最终文档都须通过 HTTPS 域名授权。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。
 
 ```sh
 python scripts/init-secrets.py
 docker compose -f compose.yml -f compose.dynamic.yml --profile dynamic up -d --build --wait
 ```
 
-默认动态模式向断网 Chromium 传递获准 HTML，执行内嵌脚本。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权资源 URL，查询字符串按原样匹配。同源资源沿用页面域名授权。跨源资源的精确主机名须额外加入 `MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS`，该配置只授予清单内的资源访问权限。
+动态渲染向断网 Chromium 传递获准 HTML，执行内嵌脚本。仅回放内嵌脚本的页面在 DOM 加载后等待 0.2 秒。如果已有可定位的正文容器且可见文本为空，再观察至多 0.4 秒。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权资源 URL，查询字符串按原样匹配。同源资源沿用页面域名授权。跨源资源的精确主机名须额外加入 `MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS`，该配置只授予清单内的资源访问权限。
 
 ```dotenv
 MULTISEARCH_DYNAMIC_FETCH_DOMAINS=docs.example.org
