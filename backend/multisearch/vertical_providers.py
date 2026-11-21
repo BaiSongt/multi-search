@@ -165,6 +165,7 @@ class _VerticalProvider:
     identifier_kind: AcademicIdentifierKind | None = None
     date_field: Literal["published_at", "submitted_at", "created_at"] = "published_at"
     requires_api_key = False
+    supports_dates = True
     provider_id: str
     endpoint: str
 
@@ -174,7 +175,9 @@ class _VerticalProvider:
         self.capabilities = ProviderCapabilities(
             {
                 Modality.TEXT: ProviderFilters(
-                    date_range="upstream_and_metadata_postfilter",
+                    date_range="upstream_and_metadata_postfilter"
+                    if self.supports_dates
+                    else "unsupported",
                     date_field=self.date_field,
                     exact_identifier_date_range=(
                         "metadata_postfilter" if self.identifier_kind else None

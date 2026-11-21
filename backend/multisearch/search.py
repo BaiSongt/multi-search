@@ -538,7 +538,10 @@ class SearchService:
         result = ProviderResult([])
         status: RunStatus = "timeout"
         circuit = state.circuits[pair]
-        max_attempts = 1 if getattr(provider, "fallback_only", False) else 2
+        single_attempt = getattr(provider, "fallback_only", False) or getattr(
+            provider, "official_search", False
+        )
+        max_attempts = 1 if single_attempt else 2
         try:
             async with asyncio.timeout(deadline - monotonic()):
                 for index in range(max_attempts):
@@ -720,8 +723,31 @@ class SearchService:
                 preferred.index(p.provider_id) if p.provider_id in preferred else len(preferred),
             )
         )
+        official = [
+            provider for provider in eligible if getattr(provider, "official_search", False)
+        ]
+        general = [provider for provider in eligible if provider not in official]
+        supplement = next(
+            (provider for provider in official if self._dispatchable(provider, pair, monotonic())),
+            None,
+        )
+        ordinary = self._run_general_routes(
+            request, pair, mode, limit, deadline, rules, permitted_rights, general
+        )
+        if supplement is None:
+            return await ordinary
+        supplement_deadline = min(deadline, monotonic() + 2.5)
+        ordinary_runs, official_run = await asyncio.gather(
+            ordinary,
+            self._run_provider(supplement, request, pair, min(3, limit), supplement_deadline),
+        )
+        return [official_run, *ordinary_runs]
+
+    async def _run_general_routes(
+        self, request, pair, mode, limit, deadline, rules, permitted_rights, providers
+    ) -> list[tuple[ProviderResult, ProviderRun]]:
         primary, terminal = [], []
-        for provider in eligible:
+        for provider in providers:
             group = terminal if getattr(provider, "fallback_only", False) else primary
             group.append(provider)
         now = monotonic()

@@ -10,6 +10,7 @@ from .image_attribution import ImageAttributionResolver
 from .image_source import PublicImageSourceResolver
 from .local_index import LocalIndex
 from .observability import FetchMetrics
+from .official_providers import create_official_providers
 from .ops_store import OpsStore
 from .policy import ProviderPolicy
 from .providers import create_providers
@@ -69,6 +70,7 @@ async def build_search(
     providers = create_providers(config, client)
     if config.enable_wikipedia:
         providers.append(WikipediaProvider(client))
+    providers.extend(create_official_providers(client, config.official_sources))
     providers.extend(
         create_vertical_providers(
             client,

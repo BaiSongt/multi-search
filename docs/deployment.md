@@ -71,9 +71,19 @@ docker compose exec -T multisearch-api python -m multisearch.keys revoke --id KE
 
 ## 可选 Wikipedia 候补
 
-设置 `MULTISEARCH_ENABLE_WIKIPEDIA=true` 并重新创建 API 和 Worker。仅在公网网页文字检索的常规来源都未返回合适候选时，平台才会将查询发送到 Wikimedia Action API。快速模式同时受 `quick_fallback` 控制。查询语言的 `en` 和 `zh` 前缀分别选择英文和中文项目，未指定语言时选择英文。显式地区、日期和精确学术标识符请求会跳过该来源，域名白名单和黑名单继续生效。
+Compose 默认启用 Wikipedia 候补，可设置 `MULTISEARCH_ENABLE_WIKIPEDIA=false` 后重新创建 API 和 Worker。仅在公网网页文字检索的常规来源都未返回合适候选时，平台才会将查询发送到 Wikimedia Action API。快速模式同时受 `quick_fallback` 控制。查询语言的 `en` 和 `zh` 前缀分别选择英文和中文项目，未指定语言时选择英文。显式地区、日期和精确学术标识符请求会跳过该来源，域名白名单和黑名单继续生效。
 
 每个进程默认每分钟最多发起 10 次 Wikipedia 请求，并串行访问上游。管理台可暂停此来源或调整部署额度，仍需遵守 Wikimedia 的共享出口限制。响应最多含 5 个条目的标题、Wikipedia 页面链接及来源标识。需要正文证据时，现有抓取与权限检查照常执行。 [Wikimedia API 访问政策](https://www.mediawiki.org/wiki/Wikimedia_APIs/Access_policy) · [Action API 搜索](https://www.mediawiki.org/wiki/API:Search)
+
+## 权威公开数据来源
+
+Compose 默认通过 `MULTISEARCH_OFFICIAL_SOURCES=federal-register,uk-open-data,nasa-earthdata` 启用以下目录。可指定来源子集，或赋空值关闭整组。新增来源时，在服务端注册固定 API 地址、主题和返回字段，再将来源 ID 加入部署配置。
+
+- **Federal Register** 提供联邦监管、适航指令和产业政策公告索引。 [Federal Register API](https://www.federalregister.gov/reader-aids/developer-resources/rest-api)
+- **英国国家数据目录** 提供交通、能源、环境、公共卫生和经济数据。 [Data.gov.uk API](https://guidance.data.gov.uk/get_data/api_documentation/)
+- **NASA Earthdata** 提供遥感、气候、大气和卫星观测数据集元数据。 [NASA CMR Search API](https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html)
+
+公网文字检索按主题或限定站点，最多并行补查一个目录、请求三条候选。补查超时为 2.5 秒，一次请求直接返回结果或错误。部署示例将通用来源限制为每个进程、每个来源每分钟 30 次，Wikipedia 和各权威目录每分钟 10 次。默认快速搜索返回上限为 6 条，标准搜索为 10 条。管理台已发布的策略可以覆盖这些默认值。
 
 ## 部署策略基线
 

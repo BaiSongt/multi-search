@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from .client_address import IPAddress, parse_client_address
-from .deployment_policy import DeploymentPolicy, load_deployment_policy
+from .deployment_policy import OFFICIAL_SOURCES, DeploymentPolicy, load_deployment_policy
 from .render_resources import ResourceSpec, parse_resource_manifest
 from .safe_fetch import FetchError, validate_fetch_url
 
@@ -87,6 +87,7 @@ class Settings:
     )
     trusted_proxies: frozenset[IPAddress] = frozenset()
     enable_wikipedia: bool = False
+    official_sources: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -114,6 +115,13 @@ class Settings:
             vertical_sources.update(academic)
         if not vertical_sources <= academic | {"github"}:
             raise ValueError("MULTISEARCH_VERTICAL_SOURCES 包含不支持的来源")
+        official_sources = frozenset(
+            source.strip().lower()
+            for source in os.getenv("MULTISEARCH_OFFICIAL_SOURCES", "").split(",")
+            if source.strip()
+        )
+        if not official_sources <= OFFICIAL_SOURCES:
+            raise ValueError("MULTISEARCH_OFFICIAL_SOURCES 包含不支持的来源")
         crawl4ai_url = os.getenv("CRAWL4AI_BASE_URL", "").rstrip("/")
         crawl4ai_token = secret("CRAWL4AI_API_TOKEN")
         if crawl4ai_url and (crawl4ai_url != "http://crawl4ai:11235" or len(crawl4ai_token) < 32):
@@ -167,4 +175,5 @@ class Settings:
             dynamic_fetch_resources=dynamic_resources,
             trusted_proxies=_trusted_proxies(),
             enable_wikipedia=os.getenv("MULTISEARCH_ENABLE_WIKIPEDIA", "false").lower() == "true",
+            official_sources=official_sources,
         )

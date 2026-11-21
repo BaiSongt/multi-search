@@ -102,6 +102,27 @@ async def failed():
     raise ProviderFailure("failed")
 
 
+async def test_quick_text_search_supplements_at_most_one_official_source():
+    class Official(FakeProvider):
+        official_search = True
+
+        def supports_request(self, request):
+            return request.query.startswith("FAA")
+
+    general = FakeProvider("ddgs")
+    preferred = Official("federal-register", url="https://www.federalregister.gov/documents/demo")
+    other = Official("uk-open-data")
+    router = service(general, preferred, other)
+    results = await router.search(
+        SearchRequest(query="FAA rulemaking", mode="quick", max_results=6), "research", "targeted"
+    )
+    assert {row.provider_ids[0] for row in results.results} == {"ddgs", "federal-register"}
+    assert preferred.calls[0][3] == 3
+    assert not other.calls
+    await router.search(SearchRequest(query="generic search terms", mode="quick"), "research", "general")
+    assert len(preferred.calls) == 1
+
+
 @pytest.mark.parametrize(
     ("available", "throttled", "result_status", "count"),
     [

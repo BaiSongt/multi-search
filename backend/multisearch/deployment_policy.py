@@ -9,7 +9,19 @@ from .policy import ProviderPolicy
 from .routing_policy import DEFAULT_ROUTING, RoutingRules, RoutingVersion
 
 _MAX_POLICY_BYTES = 32 * 1024
-ProviderName = Literal["ddgs", "searxng", "openalex", "crossref", "arxiv", "github", "wikipedia"]
+ProviderName = Literal[
+    "ddgs",
+    "searxng",
+    "openalex",
+    "crossref",
+    "arxiv",
+    "github",
+    "wikipedia",
+    "federal-register",
+    "uk-open-data",
+    "nasa-earthdata",
+]
+OFFICIAL_SOURCES = frozenset({"federal-register", "uk-open-data", "nasa-earthdata"})
 
 
 class _PolicyLoader(yaml.SafeLoader):
@@ -43,7 +55,7 @@ class DeploymentPolicy(BaseModel):
     def provider(self, name: str) -> ProviderPolicy:
         values = self.providers.get(name)
         overrides = values.model_dump(exclude_unset=True) if values else {}
-        if name == "wikipedia":
+        if name == "wikipedia" or name in OFFICIAL_SOURCES:
             overrides.setdefault("requests_per_minute", 10)
         return ProviderPolicy(**overrides)
 
