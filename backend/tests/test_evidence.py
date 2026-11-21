@@ -43,6 +43,25 @@ class FakeFetcher:
         return self.page
 
 
+async def test_focused_fetch_prefers_body_to_navigation_even_without_a_literal_query_match():
+    body = "统计公报显示，全市城镇调查失业率为5.1%，比上月下降0.1个百分点。"
+    pages = FakeFetcher(f"<main><div>失业率</div><p>{body}</p><p>本地新闻</p></main>")
+    for query in ("失业率", "劳动力市场统计口径"):
+        result = await EvidenceBuilder(pages).extract(ORIGIN, timeout_s=1, query=query)
+        assert result.evidence_text == body
+        assert result.locator.text_offset_start == len("失业率\n")
+    generic = await EvidenceBuilder(pages).extract(ORIGIN, timeout_s=1)
+    assert generic.evidence_text == "失业率"
+
+
+async def test_focused_fetch_does_not_treat_a_repeated_numeric_title_as_the_body():
+    headline = "农民工总量首破3亿 月均收入超5000元"
+    body = "报告显示，去年全国外出务工人员的收入和规模均比上年有所增长。"
+    page = FakeFetcher(f"<title>{headline}_统计公报</title><div>{headline}</div><p>{body}</p>")
+    result = await EvidenceBuilder(page).extract(ORIGIN, timeout_s=1, query="农民工总量 月均收入")
+    assert result.evidence_text == body
+
+
 async def test_extraction_has_reproducible_hash_offsets_and_original_excerpt():
     fetcher = FakeFetcher(
         """

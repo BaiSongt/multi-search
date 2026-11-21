@@ -25,11 +25,13 @@ class JobStatus(StrEnum):
 
 
 UrlInput = Annotated[str, StringConstraints(min_length=8, max_length=2048)]
+FetchQuery = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=600)]
 
 
 class FetchRequest(InputModel):
     url: UrlInput | None = None
     urls: list[UrlInput] = Field(default_factory=list, max_length=20)
+    queries: dict[UrlInput, FetchQuery] | None = Field(default=None, max_length=20)
     max_latency_ms: int = Field(default=120_000, ge=1_000, le=900_000)
     max_pages: int = Field(default=20, ge=1, le=20)
     extraction_mode: ExtractionMode = "static"
@@ -45,6 +47,8 @@ class FetchRequest(InputModel):
             raise ValueError("请提供 url 或 urls 其中之一")
         if len(set(self.urls)) != len(self.urls):
             raise ValueError("批量 URL 不得重复")
+        if self.queries and not self.queries.keys() <= ({self.url} if self.url else set(self.urls)):
+            raise ValueError("正文检索词必须对应本次请求的 URL")
         return self
 
     def targets(self) -> list[str]:

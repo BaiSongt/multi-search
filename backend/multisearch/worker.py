@@ -85,6 +85,7 @@ class Worker:
                     record = await self.evidence.extract(
                         url,
                         timeout_s=min(remaining, 20),
+                        query=(body.queries or {}).get(url),
                         network_scope=body.network_scope,
                         domain_allowlist=body.domain_allowlist,
                         domain_denylist=body.domain_denylist,

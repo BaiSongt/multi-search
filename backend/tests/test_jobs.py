@@ -31,6 +31,7 @@ from multisearch.worker import Worker
         {"url": "https://example.org", "urls": ["https://example.org"]},
         {"urls": ["https://example.org"] * 2},
         {"max_pages": 21},
+        {"url": "https://example.org", "queries": {"https://other.org": "some query"}},
     ],
 )
 def test_fetch_contract_rejects_ambiguous_or_unbounded_input(data):
@@ -58,7 +59,7 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
             self.calls = []
 
         async def extract(self, url, **kwargs):
-            self.calls.append(url)
+            self.calls.append((url, kwargs["query"]))
             if url.endswith("invalid"):
                 raise FetchError(422, "SSRF_BLOCKED", "无法抓取来源")
             return EvidenceRecord(
@@ -84,7 +85,7 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
         "https://example.org/invalid",
         "https://example.org/skip",
     ]
-    outcome = await worker.fetch(claim(urls=targets, max_pages=2))
+    outcome = await worker.fetch(claim(urls=targets, max_pages=2, queries={targets[0]: "相关正文"}))
     assert outcome.status == JobStatus.PARTIAL and outcome.pages_fetched == 1
     assert outcome.result["evidence_records"][0]["evidence_text"] == "fact"
     assert outcome.result["evidence_records"][0]["images"] == [
@@ -92,7 +93,8 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
     ]
     assert outcome.result["failures"][0]["index"] == 1
     assert outcome.result["warnings"] == ["MAX_PAGES_REACHED"]
-    assert evidence.calls == targets[:2] and store.completed == [1, 1, 2, 2]
+    assert evidence.calls == [(targets[0], "相关正文"), (targets[1], None)]
+    assert store.completed == [1, 1, 2, 2]
 
 
 async def test_fetch_keeps_ocr_pending_after_checkpoint_and_does_not_refetch():

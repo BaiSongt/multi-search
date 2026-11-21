@@ -247,6 +247,8 @@ def _content(
     query: str | None,
     excerpt_limit: int,
     hints: tuple[str, ...],
+    *,
+    page_title: str | None = None,
 ) -> tuple[str, EvidenceLocator, str, bool]:
     terms = list(dict.fromkeys(re.findall(r"\w{2,}", query or "")))[:16]
     choices: list[tuple[int, bool, int, _Block]] = []
@@ -260,7 +262,26 @@ def _content(
         offset += len(block.text) + 1
     if not choices:
         raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文")
-    _, selected, offset, block = max(choices, key=lambda choice: choice[:2])
+    if terms and kind in {"html_text", "rendered_html_text"}:
+        # 好的正文候选优先于包含关键词的短导航，也用于没有字面命中的页面。
+        def comparable(value: str) -> str:
+            return "".join(char for char in normalize("NFKC", value).casefold() if char.isalnum())
+
+        title = page_title or ""
+        headline = re.split(r"[_|｜]|\s+[-–—]\s+", title, maxsplit=1)[0]
+        titles = {comparable(title), comparable(headline)}
+
+        def rank(choice: tuple[int, bool, int, _Block]) -> tuple[bool, int, bool, int]:
+            score, selected, _, block = choice
+            size = len(block.text.replace(" ", ""))
+            body = comparable(block.text) not in titles and (
+                size >= 24 or bool(re.search(r"\d+(?:[.,]\d+)?\s*(?:[%％万亿]|percent\b)", block.text))
+            )
+            return body, score, selected, min(size, 200)
+
+        _, selected, offset, block = max(choices, key=rank)
+    else:
+        _, selected, offset, block = max(choices, key=lambda choice: choice[:2])
     relative_start = 0
     if terms:
         expression = "|".join(re.escape(term) for term in terms)
@@ -453,7 +474,9 @@ class EvidenceBuilder:
             for value in (_MAX_EXCERPT, page.max_snippet, meta_limit, resource_limit)
             if value is not None
         )
-        excerpt, locator, text_sha, selected = _content(blocks, kind, query, excerpt_limit, hints)
+        excerpt, locator, text_sha, selected = _content(
+            blocks, kind, query, excerpt_limit, hints, page_title=metadata.get("title")
+        )
         images: list[ArticleImage] = []
         if include_images and original is not None and document is not None:
             images = extract_article_images(original, document, page.url, excerpt_limit)
