@@ -40,6 +40,21 @@ if TYPE_CHECKING:
 
 _MAX_EXCERPT = 512
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+_AUXILIARY_SECTIONS = {
+    "acknowledgments",
+    "acknowledgements",
+    "downloads",
+    "links",
+    "references",
+    "related links",
+    "table of contents",
+    "下载",
+    "参考文献",
+    "目录",
+    "相关链接",
+    "致谢",
+}
+_ABSTRACT_SECTIONS = {"abstract", "executive summary", "内容摘要", "摘要"}
 _BLOCKS = {
     "address",
     "article",
@@ -249,18 +264,26 @@ def _content(
     hints: tuple[str, ...],
 ) -> tuple[str, EvidenceLocator, str, bool]:
     terms = list(dict.fromkeys(re.findall(r"\w{2,}", query or "")))[:16]
-    choices: list[tuple[int, bool, int, _Block]] = []
+    choices: list[tuple[tuple[bool, int, bool, bool], int, _Block]] = []
     offset = 0
     for block in blocks:
         if not block.heading and block.text:
             folded = block.text.casefold()
             score = sum(term.casefold() in folded for term in terms)
             selected = bool(hints) and block.text[:512] in hints
-            choices.append((score, selected, 0 if block.page_number is not None else offset, block))
+            section = (block.section or "").casefold().rstrip(":：").strip()
+            rank = (
+                section not in _AUXILIARY_SECTIONS,
+                score,
+                section in _ABSTRACT_SECTIONS,
+                selected,
+            )
+            choices.append((rank, 0 if block.page_number is not None else offset, block))
         offset += len(block.text) + 1
     if not choices:
         raise FetchError(422, "FETCH_NO_EXCERPT", "来源未包含可提取正文")
-    _, selected, offset, block = max(choices, key=lambda choice: choice[:2])
+    rank, offset, block = max(choices, key=lambda choice: choice[0])
+    selected = rank[-1]
     relative_start = 0
     if terms:
         expression = "|".join(re.escape(term) for term in terms)

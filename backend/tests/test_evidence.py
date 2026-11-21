@@ -588,6 +588,30 @@ async def test_isolated_crawl_parser_only_ranks_substrings_of_original_text():
     assert result.content_sha256 == sha256(normalized.encode()).hexdigest()
 
 
+async def test_report_extracts_abstract_before_download_links_even_with_parser_hint():
+    download = "Document: Report (15.1 MB pdf), HTML, XML"
+    abstract = "This report measured the distribution of chloride at selected monitoring sites."
+    methods = "The monitoring network used field observations and laboratory samples."
+    fetcher = FakeFetcher(
+        f"<main><h1>Groundwater report</h1><h2>Links</h2><p>{download}</p>"
+        f"<h2>Abstract</h2><p>{abstract}</p><h2>Methods</h2><p>{methods}</p></main>"
+    )
+
+    def service(_request):
+        return httpx.Response(200, json={"version": "0.9.5", "blocks": [download]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(service)) as client:
+        builder = EvidenceBuilder(fetcher, CrawlParser(client, "http://crawl4ai:11235", "fixture"))
+        result = await builder.extract(ORIGIN, timeout_s=1)
+        queried = await builder.extract(ORIGIN, timeout_s=1, query="laboratory samples")
+
+    normalized = f"Groundwater report\nLinks\n{download}\nAbstract\n{abstract}\nMethods\n{methods}"
+    assert result.evidence_text == abstract
+    assert result.locator.section == "Abstract"
+    assert normalized[result.locator.text_offset_start : result.locator.text_offset_end] == abstract
+    assert queried.evidence_text == methods
+
+
 async def test_crawl_parser_does_not_follow_redirect_and_falls_back():
     calls = []
 
