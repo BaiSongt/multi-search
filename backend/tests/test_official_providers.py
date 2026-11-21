@@ -82,6 +82,8 @@ async def test_official_provider_caps_requests_and_returns_catalog_links(
     def upstream(request):
         assert request.method == "GET"
         assert request.url.params[parameter] == "3"
+        if provider_class is UKOpenDataProvider:
+            assert request.url.host == "ckan.publishing.service.gov.uk"
         assert "site:" not in str(dict(request.url.params))
         return httpx.Response(200, json=payload)
 

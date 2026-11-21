@@ -79,7 +79,7 @@ class FederalRegisterProvider(_OfficialProvider):
 
 class UKOpenDataProvider(_OfficialProvider):
     provider_id = "uk-open-data"
-    endpoint = "https://www.data.gov.uk/api/3/action/package_search"
+    endpoint = "https://ckan.publishing.service.gov.uk/api/action/package_search"
     result_domain = "www.data.gov.uk"
     region = "gb"
     date_field = "created_at"
