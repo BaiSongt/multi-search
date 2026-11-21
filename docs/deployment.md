@@ -86,7 +86,7 @@ Compose 默认通过 `MULTISEARCH_OFFICIAL_SOURCES` 启用以下目录。可指�
 - **USGS Publications Warehouse** 提供地质灾害、地下水和地球科学的政府技术出版物。 [USGS Publications Warehouse](https://pubs.usgs.gov/documentation/about)
 - **Europe PMC** 补充职业健康、航空噪声和医学的开放获取论文，返回公开摘要和全文页面。 [Europe PMC REST API](https://dev.europepmc.org/RestfulWebService)
 
-公网文字检索按主题或限定站点，最多并行补查一个目录、请求三条候选。补查超时为 2.5 秒，一次请求直接返回结果或错误。部署示例将通用来源限制为每个进程、每个来源每分钟 30 次，Wikipedia 和各权威目录每分钟 10 次。默认快速搜索返回上限为 6 条，标准搜索为 10 条。管理台已发布的策略可以覆盖这些默认值。
+公网文字检索按主题或限定站点，最多并行补查一个目录、请求三条候选。补查通常限时 2.5 秒，Europe PMC 摘要查询限时 6 秒，两者均受整个搜索的时间预算约束。补查每次只向目录发出一次请求。部署示例将通用来源限制为每个进程、每个来源每分钟 30 次，Wikipedia 和各权威目录每分钟 10 次。默认快速搜索返回上限为 6 条，标准搜索为 10 条。管理台已发布的策略可以覆盖这些默认值。
 
 ## 部署策略基线
 

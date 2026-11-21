@@ -736,7 +736,8 @@ class SearchService:
         )
         if supplement is None:
             return await ordinary
-        supplement_deadline = min(deadline, monotonic() + 2.5)
+        supplement_timeout = getattr(supplement, "supplement_timeout_s", 2.5)
+        supplement_deadline = min(deadline, monotonic() + supplement_timeout)
         ordinary_runs, official_run = await asyncio.gather(
             ordinary,
             self._run_provider(supplement, request, pair, min(3, limit), supplement_deadline),

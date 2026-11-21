@@ -102,9 +102,11 @@ async def failed():
     raise ProviderFailure("failed")
 
 
-async def test_quick_text_search_supplements_at_most_one_official_source():
+@pytest.mark.parametrize(("source_budget", "expected"), [(2.5, 2.5), (6.0, 4.0)])
+async def test_quick_text_search_supplements_at_most_one_official_source(source_budget, expected):
     class Official(FakeProvider):
         official_search = True
+        supplement_timeout_s = source_budget
 
         def supports_request(self, request):
             return request.query.startswith("FAA")
@@ -118,8 +120,11 @@ async def test_quick_text_search_supplements_at_most_one_official_source():
     )
     assert {row.provider_ids[0] for row in results.results} == {"ddgs", "federal-register"}
     assert preferred.calls[0][3] == 3
+    assert expected - 0.25 < preferred.calls[0][4] <= expected
     assert not other.calls
-    await router.search(SearchRequest(query="generic search terms", mode="quick"), "research", "general")
+    await router.search(
+        SearchRequest(query="generic search terms", mode="quick"), "research", "general"
+    )
     assert len(preferred.calls) == 1
 
 

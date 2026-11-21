@@ -230,6 +230,7 @@ class USGSProvider(_OfficialProvider):
 
 class EuropePMCProvider(_OfficialProvider):
     provider_id = "europe-pmc"
+    supplement_timeout_s = 6.0
     endpoint = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
     result_domain = "europepmc.org"
     date_range = "metadata_postfilter"
