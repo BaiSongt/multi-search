@@ -165,6 +165,11 @@ async def test_usgs_keeps_exact_publication_and_skips_missing_or_unverified_date
                         "title": "Groundwater report",
                         "publicationDate": "2026-11-20",
                         "docAbstract": "Verified metadata",
+                            "links": [
+                                {"type": {"id": 39}, "url": "https://elsewhere.example.org/not-the-report"},
+                                {"type": {"id": 11}, "url": "https://pubs.usgs.gov/sir/report.pdf"},
+                                {"type": {"id": 39}, "url": "https://pubs.usgs.gov/publication/sir20265077/full"},
+                            ],
                     },
                     {
                         "indexId": "..",
@@ -184,4 +189,4 @@ async def test_usgs_keeps_exact_publication_and_skips_missing_or_unverified_date
         assert provider.capabilities.filters[Modality.TEXT].date_range == "metadata_postfilter"
         assert provider.supports_request(search)
         result = await provider.search(search, Source.WEB, Modality.TEXT, 10, 3)
-    assert [row.url for row in result.results] == ["https://pubs.usgs.gov/publication/sir20265077"]
+    assert [row.url for row in result.results] == ["https://pubs.usgs.gov/publication/sir20265077/full"]

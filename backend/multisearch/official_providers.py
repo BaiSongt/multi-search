@@ -6,7 +6,7 @@ import httpx
 from .contracts import SearchRequest, Source
 from .pipeline import _matches_domain, _publication_date, _text, public_link
 from .providers import Provider, ProviderFailure
-from .vertical_providers import _Batch, _dict, _json, _Record, _rows, _VerticalProvider
+from .vertical_providers import _Batch, _dict, _json, _list, _Record, _rows, _VerticalProvider
 
 
 class _OfficialProvider(_VerticalProvider):
@@ -187,6 +187,7 @@ class USGSProvider(_OfficialProvider):
     provider_id = "usgs-publications"
     endpoint = "https://pubs.usgs.gov/pubs-services/publication/"
     result_domain = "pubs.usgs.gov"
+    cache_version = "2"
     date_range = "metadata_postfilter"
     topic = re.compile(
         r"\b(?:usgs|geologic(?:al)? survey|groundwater|landslide|seismic hazards?)\b|美国地质调查局|地下水|滑坡",
@@ -195,6 +196,18 @@ class USGSProvider(_OfficialProvider):
 
     def _params(self, request, limit):
         return {"q": self.terms(request), "page_size": limit}
+
+    def _report_url(self, identity, row):
+        for item in _list(row.get("links"))[:30]:
+            link = _dict(item)
+            if _dict(link.get("type")).get("id") != 39:
+                continue
+            url = public_link(link.get("url"))
+            if url:
+                target = urlsplit(url)
+                if target.scheme == "https" and target.hostname == self.result_domain:
+                    return url
+        return f"https://{self.result_domain}/publication/{identity}"
 
     def _parse(self, body, *, exact=False):
         rows = []
@@ -206,7 +219,7 @@ class USGSProvider(_OfficialProvider):
             rows.append(
                 _Record(
                     title=_text(row.get("title"), 512),
-                    url=f"https://{self.result_domain}/publication/{identity}",
+                    url=self._report_url(identity, row),
                     published_at=_publication_date(row.get("publicationDate")),
                     snippet=_text(row.get("docAbstract"), 1200),
                 )
