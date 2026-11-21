@@ -66,6 +66,8 @@ async def test_extraction_has_reproducible_hash_offsets_and_original_excerpt():
     )
     normalized = "技术说明\n背景段落。\n结果\n原始 证据 内容。"
     assert evidence.content_sha256 == sha256(normalized.encode()).hexdigest()
+    assert evidence.raw_sha256 == sha256(fetcher.page.body).hexdigest()
+    assert evidence.raw_sha256 != evidence.content_sha256
     locator = evidence.locator
     assert normalized[locator.text_offset_start : locator.text_offset_end] == evidence.evidence_text
     assert evidence.evidence_text == "原始 证据 内容。"

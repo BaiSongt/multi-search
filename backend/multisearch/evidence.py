@@ -497,6 +497,7 @@ class EvidenceBuilder:
             evidence_text=excerpt,
             locator=locator,
             content_sha256=text_sha,
+            raw_sha256=sha256(page.body).hexdigest(),
             extraction_method=method,
             extraction_version=extraction_version,
             render_bundle_sha256=bundle_sha,
