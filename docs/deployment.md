@@ -84,6 +84,7 @@ Compose 默认通过 `MULTISEARCH_OFFICIAL_SOURCES` 启用以下目录。可指�
 - **NASA Earthdata** 提供遥感、气候、大气和卫星观测数据集元数据。 [NASA CMR Search API](https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html)
 - **加拿大政府开放数据** 提供航空运营、交通、环境和公共行政数据集。 [加拿大开放政府 API](https://open.canada.ca/en/access-our-application-programming-interface-api)
 - **USGS Publications Warehouse** 提供地质灾害、地下水和地球科学的政府技术出版物。 [USGS Publications Warehouse](https://pubs.usgs.gov/documentation/about)
+- **Europe PMC** 补充职业健康、航空噪声和医学的开放获取论文，返回公开摘要和全文页面。 [Europe PMC REST API](https://dev.europepmc.org/RestfulWebService)
 
 公网文字检索按主题或限定站点，最多并行补查一个目录、请求三条候选。补查超时为 2.5 秒，一次请求直接返回结果或错误。部署示例将通用来源限制为每个进程、每个来源每分钟 30 次，Wikipedia 和各权威目录每分钟 10 次。默认快速搜索返回上限为 6 条，标准搜索为 10 条。管理台已发布的策略可以覆盖这些默认值。
 

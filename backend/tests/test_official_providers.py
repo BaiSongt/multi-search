@@ -5,6 +5,7 @@ from multisearch.contracts import Modality, SearchRequest, Source
 from multisearch.official_providers import (
     CanadaOpenDataProvider,
     EarthdataProvider,
+    EuropePMCProvider,
     FederalRegisterProvider,
     UKOpenDataProvider,
     USGSProvider,
@@ -165,11 +166,17 @@ async def test_usgs_keeps_exact_publication_and_skips_missing_or_unverified_date
                         "title": "Groundwater report",
                         "publicationDate": "2026-11-20",
                         "docAbstract": "Verified metadata",
-                            "links": [
-                                {"type": {"id": 39}, "url": "https://elsewhere.example.org/not-the-report"},
-                                {"type": {"id": 11}, "url": "https://pubs.usgs.gov/sir/report.pdf"},
-                                {"type": {"id": 39}, "url": "https://pubs.usgs.gov/publication/sir20265077/full"},
-                            ],
+                        "links": [
+                            {
+                                "type": {"id": 39},
+                                "url": "https://elsewhere.example.org/not-the-report",
+                            },
+                            {"type": {"id": 11}, "url": "https://pubs.usgs.gov/sir/report.pdf"},
+                            {
+                                "type": {"id": 39},
+                                "url": "https://pubs.usgs.gov/publication/sir20265077/full",
+                            },
+                        ],
                     },
                     {
                         "indexId": "..",
@@ -189,4 +196,48 @@ async def test_usgs_keeps_exact_publication_and_skips_missing_or_unverified_date
         assert provider.capabilities.filters[Modality.TEXT].date_range == "metadata_postfilter"
         assert provider.supports_request(search)
         result = await provider.search(search, Source.WEB, Modality.TEXT, 10, 3)
-    assert [row.url for row in result.results] == ["https://pubs.usgs.gov/publication/sir20265077/full"]
+    assert [row.url for row in result.results] == [
+        "https://pubs.usgs.gov/publication/sir20265077/full"
+    ]
+
+
+async def test_europe_pmc_queries_public_articles_and_keeps_verified_identifiers():
+    def upstream(request):
+        assert request.url.host == "www.ebi.ac.uk"
+        assert dict(request.url.params) == {
+            "query": "OPEN_ACCESS:Y AND (aviation noise)",
+            "resultType": "core",
+            "format": "json",
+            "pageSize": "3",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {
+                            "pmcid": "PMC12390125",
+                            "isOpenAccess": "Y",
+                            "firstPublicationDate": "2025-06-15",
+                            "title": "Aviation noise measurements",
+                            "abstractText": "<p>Open findings</p>",
+                        },
+                        {"pmcid": "PMC123456", "isOpenAccess": "N", "title": "Limited access"},
+                        {"pmcid": "../invalid", "isOpenAccess": "Y", "title": "Invalid identifier"},
+                    ]
+                }
+            },
+        )
+
+    request = SearchRequest(
+        query="site:europepmc.org aviation noise", domain_allowlist=["europepmc.org"]
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        provider = EuropePMCProvider(client)
+        assert provider.supports_request(SearchRequest(query="aviation noise"))
+        assert not provider.supports_request(SearchRequest(query="air traffic capacity"))
+        result = await provider.search(request, Source.WEB, Modality.TEXT, 10, 3)
+    (row,) = result.results
+    assert row.url == "https://europepmc.org/article/PMC/PMC12390125"
+    assert row.published_at.date().isoformat() == "2025-06-15"
+    assert row.snippet == "Open findings"

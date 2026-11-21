@@ -22,9 +22,17 @@ ProviderName = Literal[
     "nasa-earthdata",
     "canada-open-data",
     "usgs-publications",
+    "europe-pmc",
 ]
 OFFICIAL_SOURCES = frozenset(
-    {"federal-register", "uk-open-data", "nasa-earthdata", "canada-open-data", "usgs-publications"}
+    {
+        "federal-register",
+        "uk-open-data",
+        "nasa-earthdata",
+        "canada-open-data",
+        "usgs-publications",
+        "europe-pmc",
+    }
 )
 
 

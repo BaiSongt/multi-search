@@ -2,6 +2,7 @@ import re
 from urllib.parse import urlsplit
 
 import httpx
+from lxml import etree, html
 
 from .contracts import SearchRequest, Source
 from .pipeline import _matches_domain, _publication_date, _text, public_link
@@ -227,6 +228,57 @@ class USGSProvider(_OfficialProvider):
         return _Batch(rows)
 
 
+class EuropePMCProvider(_OfficialProvider):
+    provider_id = "europe-pmc"
+    endpoint = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    result_domain = "europepmc.org"
+    date_range = "metadata_postfilter"
+    topic = re.compile(
+        r"\b(?:europe pmc|public health|occupational health|aviation noise|cabin air quality|"
+        r"epidemiolog\w*|biomedical|clinical (?:studies|trials?))\b|公共卫生|职业健康|航空噪声|流行病学|生物医学",
+        re.I,
+    )
+
+    def _params(self, request, limit):
+        terms = re.sub(r"[^\w .-]", " ", self.terms(request)).strip()
+        return {
+            "query": f"OPEN_ACCESS:Y AND ({terms})" if terms else "OPEN_ACCESS:Y",
+            "resultType": "core",
+            "format": "json",
+            "pageSize": limit,
+        }
+
+    def _parse(self, body, *, exact=False):
+        rows = []
+        for item in _rows(_dict(_json(body).get("resultList")).get("result")):
+            row = _dict(item)
+            identity = row.get("pmcid")
+            if (
+                row.get("isOpenAccess") != "Y"
+                or not isinstance(identity, str)
+                or not re.fullmatch(r"PMC\d{1,12}", identity)
+            ):
+                continue
+            abstract = _text(row.get("abstractText"), 32_000)
+            if abstract:
+                try:
+                    fragment = html.fragment_fromstring(abstract, create_parent=True)
+                except etree.ParserError:
+                    abstract = None
+                else:
+                    etree.strip_elements(fragment, "script", "style", with_tail=False)
+                    abstract = _text(fragment.text_content(), 1200)
+            rows.append(
+                _Record(
+                    title=_text(row.get("title"), 512),
+                    url=f"https://{self.result_domain}/article/PMC/{identity}",
+                    published_at=_publication_date(row.get("firstPublicationDate")),
+                    snippet=abstract,
+                )
+            )
+        return _Batch(rows)
+
+
 def create_official_providers(
     client: httpx.AsyncClient, enabled_sources: frozenset[str]
 ) -> list[Provider]:
@@ -238,6 +290,7 @@ def create_official_providers(
             CanadaOpenDataProvider,
             EarthdataProvider,
             USGSProvider,
+            EuropePMCProvider,
         )
         if provider.provider_id in enabled_sources
     ]
