@@ -20,8 +20,12 @@ ProviderName = Literal[
     "federal-register",
     "uk-open-data",
     "nasa-earthdata",
+    "canada-open-data",
+    "usgs-publications",
 ]
-OFFICIAL_SOURCES = frozenset({"federal-register", "uk-open-data", "nasa-earthdata"})
+OFFICIAL_SOURCES = frozenset(
+    {"federal-register", "uk-open-data", "nasa-earthdata", "canada-open-data", "usgs-publications"}
+)
 
 
 class _PolicyLoader(yaml.SafeLoader):

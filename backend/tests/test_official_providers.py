@@ -3,9 +3,11 @@ import pytest
 
 from multisearch.contracts import Modality, SearchRequest, Source
 from multisearch.official_providers import (
+    CanadaOpenDataProvider,
     EarthdataProvider,
     FederalRegisterProvider,
     UKOpenDataProvider,
+    USGSProvider,
 )
 from multisearch.providers import ProviderFailure
 
@@ -110,3 +112,76 @@ async def test_official_provider_reports_retry_after():
             )
     assert failure.value.status == "rate_limited"
     assert failure.value.retry_after == 40
+
+
+async def test_canada_returns_public_catalogue_rows_with_date_filter():
+    def upstream(request):
+        assert request.url.host == "open.canada.ca"
+        assert dict(request.url.params) == {
+            "rows": "2",
+            "q": "aviation",
+            "fq": "portal_type:dataset AND metadata_created:[2020-01-01T00:00:00Z TO 2021-01-01T23:59:59.999Z]",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {
+                    "results": [
+                        {
+                            "id": "08132980-c6b8-45e5-a9e0-9a88f9808c8a",
+                            "title": "Aviation statistics",
+                            "notes": "Published dataset",
+                            "state": "active",
+                            "private": False,
+                            "metadata_created": "2020-04-27T12:54:54",
+                        },
+                    ]
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        provider = CanadaOpenDataProvider(client)
+        search = SearchRequest(
+            query="site:open.canada.ca aviation",
+            time_range={"from": "2020-01-01", "to": "2021-01-01"},
+        )
+        assert provider.supports_request(search)
+        (row,) = (await provider.search(search, Source.WEB, Modality.TEXT, 2, 3)).results
+    assert row.url == "https://open.canada.ca/data/en/dataset/08132980-c6b8-45e5-a9e0-9a88f9808c8a"
+
+
+async def test_usgs_keeps_exact_publication_and_skips_missing_or_unverified_dates():
+    def upstream(request):
+        assert request.url.host == "pubs.usgs.gov"
+        assert dict(request.url.params) == {"q": "groundwater", "page_size": "3"}
+        return httpx.Response(
+            200,
+            json={
+                "records": [
+                    {
+                        "indexId": "sir20265077",
+                        "title": "Groundwater report",
+                        "publicationDate": "2026-11-20",
+                        "docAbstract": "Verified metadata",
+                    },
+                    {
+                        "indexId": "..",
+                        "title": "Invalid citation location",
+                        "publicationDate": "2026-11-20",
+                    },
+                    {"indexId": "fs20263027", "title": "Unknown date"},
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        provider = USGSProvider(client)
+        search = SearchRequest(
+            query="groundwater", time_range={"from": "2026-01-01", "to": "2026-12-31"}
+        )
+        assert provider.capabilities.filters[Modality.TEXT].date_range == "metadata_postfilter"
+        assert provider.supports_request(search)
+        result = await provider.search(search, Source.WEB, Modality.TEXT, 10, 3)
+    assert [row.url for row in result.results] == ["https://pubs.usgs.gov/publication/sir20265077"]

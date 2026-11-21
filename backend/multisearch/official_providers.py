@@ -18,7 +18,11 @@ class _OfficialProvider(_VerticalProvider):
     region: str | None = None
 
     def supports_request(self, request: SearchRequest) -> bool:
-        if request.network_scope != "public" or request.time_range and not self.supports_dates:
+        if (
+            request.network_scope != "public"
+            or request.time_range
+            and self.date_range == "unsupported"
+        ):
             return False
         if request.language and request.language.casefold().split("-")[0] != "en":
             return False
@@ -77,23 +81,22 @@ class FederalRegisterProvider(_OfficialProvider):
         )
 
 
-class UKOpenDataProvider(_OfficialProvider):
-    provider_id = "uk-open-data"
-    endpoint = "https://ckan.publishing.service.gov.uk/api/action/package_search"
-    result_domain = "www.data.gov.uk"
-    region = "gb"
+class _CkanProvider(_OfficialProvider):
     date_field = "created_at"
-    topic = re.compile(
-        r"\b(?:data\.gov\.uk|(?:uk|united kingdom|british) .{0,35}(?:data|statistics))\b|英国.{0,12}(?:数据|统计)",
-        re.I,
-    )
+    dataset_filter = ""
 
     def _params(self, request, limit):
         params = {"rows": limit, "q": self.terms(request)}
+        filters = [self.dataset_filter] if self.dataset_filter else []
         if request.time_range:
             start, end = request.time_range.start, request.time_range.end
-            params["fq"] = f"metadata_created:[{start}T00:00:00Z TO {end}T23:59:59.999Z]"
+            filters.append(f"metadata_created:[{start}T00:00:00Z TO {end}T23:59:59.999Z]")
+        if filters:
+            params["fq"] = " AND ".join(filters)
         return params
+
+    def _record_url(self, identity: str, row: dict) -> str | None:
+        raise NotImplementedError
 
     def _parse(self, body, *, exact=False):
         data = _json(body)
@@ -102,17 +105,15 @@ class UKOpenDataProvider(_OfficialProvider):
         rows = []
         for item in _rows(_dict(data.get("result")).get("results")):
             row = _dict(item)
-            identity, slug = str(row.get("id", "")), str(row.get("name", ""))
+            identity = str(row.get("id", ""))
             if row.get("private") is not False or row.get("state") != "active":
                 continue
-            if not re.fullmatch(r"[a-f0-9-]{36}", identity) or not re.fullmatch(
-                r"[a-z0-9_-]{1,160}", slug
-            ):
+            if not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", identity):
                 continue
             rows.append(
                 _Record(
                     title=_text(row.get("title"), 512),
-                    url=f"https://{self.result_domain}/dataset/{identity}/{slug}",
+                    url=self._record_url(identity, row),
                     published_at=_publication_date(row.get("metadata_created")),
                     snippet=_text(row.get("notes"), 1200),
                 )
@@ -120,11 +121,43 @@ class UKOpenDataProvider(_OfficialProvider):
         return _Batch(rows)
 
 
+class UKOpenDataProvider(_CkanProvider):
+    provider_id = "uk-open-data"
+    endpoint = "https://ckan.publishing.service.gov.uk/api/action/package_search"
+    result_domain = "www.data.gov.uk"
+    region = "gb"
+    topic = re.compile(
+        r"\b(?:data\.gov\.uk|(?:uk|united kingdom|british) .{0,35}(?:data|statistics))\b|英国.{0,12}(?:数据|统计)",
+        re.I,
+    )
+
+    def _record_url(self, identity: str, row: dict) -> str | None:
+        slug = str(row.get("name", ""))
+        if re.fullmatch(r"[a-z0-9_-]{1,160}", slug):
+            return f"https://{self.result_domain}/dataset/{identity}/{slug}"
+        return None
+
+
+class CanadaOpenDataProvider(_CkanProvider):
+    provider_id = "canada-open-data"
+    endpoint = "https://open.canada.ca/data/en/api/3/action/package_search"
+    result_domain = "open.canada.ca"
+    region = "ca"
+    dataset_filter = "portal_type:dataset"
+    topic = re.compile(
+        r"\b(?:open\.canada\.ca|(?:canada|canadian) .{0,35}(?:data|statistics))\b|加拿大.{0,12}(?:数据|统计)",
+        re.I,
+    )
+
+    def _record_url(self, identity: str, row: dict) -> str:
+        return f"https://{self.result_domain}/data/en/dataset/{identity}"
+
+
 class EarthdataProvider(_OfficialProvider):
     provider_id = "nasa-earthdata"
     endpoint = "https://cmr.earthdata.nasa.gov/search/collections.json"
     result_domain = "search.earthdata.nasa.gov"
-    supports_dates = False
+    date_range = "unsupported"
     topic = re.compile(
         r"\b(?:earthdata|earth observation|remote sensing|satellite data|atmospheric datasets?)\b|地球观测|遥感数据|卫星数据",
         re.I,
@@ -150,11 +183,48 @@ class EarthdataProvider(_OfficialProvider):
         return _Batch(rows)
 
 
+class USGSProvider(_OfficialProvider):
+    provider_id = "usgs-publications"
+    endpoint = "https://pubs.usgs.gov/pubs-services/publication/"
+    result_domain = "pubs.usgs.gov"
+    date_range = "metadata_postfilter"
+    topic = re.compile(
+        r"\b(?:usgs|geologic(?:al)? survey|groundwater|landslide|seismic hazards?)\b|美国地质调查局|地下水|滑坡",
+        re.I,
+    )
+
+    def _params(self, request, limit):
+        return {"q": self.terms(request), "page_size": limit}
+
+    def _parse(self, body, *, exact=False):
+        rows = []
+        for item in _rows(_json(body).get("records")):
+            row = _dict(item)
+            identity = str(row.get("indexId", ""))
+            if not re.fullmatch(r"[a-zA-Z0-9._-]{1,96}", identity) or identity in {".", ".."}:
+                continue
+            rows.append(
+                _Record(
+                    title=_text(row.get("title"), 512),
+                    url=f"https://{self.result_domain}/publication/{identity}",
+                    published_at=_publication_date(row.get("publicationDate")),
+                    snippet=_text(row.get("docAbstract"), 1200),
+                )
+            )
+        return _Batch(rows)
+
+
 def create_official_providers(
     client: httpx.AsyncClient, enabled_sources: frozenset[str]
 ) -> list[Provider]:
     return [
         provider(client)
-        for provider in (FederalRegisterProvider, UKOpenDataProvider, EarthdataProvider)
+        for provider in (
+            FederalRegisterProvider,
+            UKOpenDataProvider,
+            CanadaOpenDataProvider,
+            EarthdataProvider,
+            USGSProvider,
+        )
         if provider.provider_id in enabled_sources
     ]

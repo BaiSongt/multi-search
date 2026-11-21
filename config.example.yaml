@@ -21,6 +21,8 @@ providers:
   federal-register: {enabled: true, priority: 0, requests_per_minute: 10}
   uk-open-data: {enabled: true, priority: 0, requests_per_minute: 10}
   nasa-earthdata: {enabled: true, priority: 0, requests_per_minute: 10}
+  canada-open-data: {enabled: true, priority: 0, requests_per_minute: 10}
+  usgs-publications: {enabled: true, priority: 0, requests_per_minute: 10}
 
 # 取消注释以设置图片请求的默认过滤。调用方可逐项覆盖。
 # image_options:
