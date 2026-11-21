@@ -712,6 +712,9 @@ async def verify_cross_fetcher(fetcher: safe_fetch.SafeFetcher) -> None:
 async def verify_policy(builder: EvidenceBuilder) -> None:
     record = await builder.extract(f"{ORIGIN}/render", timeout_s=12, extraction_mode="dynamic")
     validate_record(record)
+    auto = await builder.extract(f"{ORIGIN}/render", timeout_s=12, extraction_mode="auto")
+    validate_record(auto)
+    assert auto.content_sha256 == record.content_sha256
     excerpt = await builder.extract(f"{ORIGIN}/snippet", timeout_s=12, extraction_mode="dynamic")
     assert excerpt.evidence_text == "Dynamic"
     cases = {

@@ -34,7 +34,7 @@ SETTLE_SECONDS = 0.2
 INLINE_CONTENT_GRACE_SECONDS = 0.4
 INLINE_CONTENT_POLL_SECONDS = 0.05
 CHROMIUM = "/usr/bin/chromium"
-MIN_CHROMIUM_VERSION = (157, 0, 8103, 38)
+MIN_CHROMIUM_VERSION = (157, 0, 8103, 78)
 CSP = (
     "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; "
     "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-src 'none'; "
