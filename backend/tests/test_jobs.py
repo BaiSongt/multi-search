@@ -31,6 +31,9 @@ from multisearch.worker import Worker
         {"url": "https://example.org", "urls": ["https://example.org"]},
         {"urls": ["https://example.org"] * 2},
         {"max_pages": 21},
+        {"url": "https://example.org", "queries": {"https://example.com": "elsewhere"}},
+        {"url": "https://example.org", "queries": {"https://example.org": " \t "}},
+        {"url": "https://example.org", "queries": {"https://example.org": "x" * 601}},
     ],
 )
 def test_fetch_contract_rejects_ambiguous_or_unbounded_input(data):
@@ -58,7 +61,7 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
             self.calls = []
 
         async def extract(self, url, **kwargs):
-            self.calls.append(url)
+            self.calls.append((url, kwargs["query"]))
             if url.endswith("invalid"):
                 raise FetchError(422, "SSRF_BLOCKED", "无法抓取来源")
             return EvidenceRecord(
@@ -84,7 +87,9 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
         "https://example.org/invalid",
         "https://example.org/skip",
     ]
-    outcome = await worker.fetch(claim(urls=targets, max_pages=2))
+    outcome = await worker.fetch(
+        claim(urls=targets, max_pages=2, queries={targets[0]: "cure limits", targets[2]: "ignored"})
+    )
     assert outcome.status == JobStatus.PARTIAL and outcome.pages_fetched == 1
     assert outcome.result["evidence_records"][0]["evidence_text"] == "fact"
     assert outcome.result["evidence_records"][0]["images"] == [
@@ -92,7 +97,68 @@ async def test_batch_fetch_preserves_verified_excerpt_with_bounded_partial_resul
     ]
     assert outcome.result["failures"][0]["index"] == 1
     assert outcome.result["warnings"] == ["MAX_PAGES_REACHED"]
-    assert evidence.calls == targets[:2] and store.completed == [1, 1, 2, 2]
+    assert evidence.calls == [(targets[0], "cure limits"), (targets[1], None)]
+    assert store.completed == [2, 2, 2]
+
+
+async def test_batch_checkpoints_fast_pages_before_a_slow_page_and_recovers_in_order():
+    targets = [f"https://source{index}.example.org/page" for index in range(4)]
+    first_ready = asyncio.Event()
+    fast_saved = asyncio.Event()
+    calls = []
+    checkpoints = []
+
+    async def progress(_claim, progress, *, checkpoint):
+        checkpoints.append((progress.model_copy(), deepcopy(checkpoint)))
+        if progress.completed == 3 and progress.pages_fetched == 2:
+            fast_saved.set()
+        return True
+
+    async def extract(url, **_kwargs):
+        calls.append(url)
+        index = targets.index(url)
+        if index == 0:
+            await first_ready.wait()
+        return EvidenceRecord(
+            evidence_id="ev_" + str(index) * 32,
+            origin_url=url,
+            canonical_url=url,
+            retrieved_at=datetime.now(UTC),
+            content_type="text/html",
+            evidence_text="fact",
+            locator=EvidenceLocator(kind="html_text", text_offset_start=0, text_offset_end=4),
+            content_sha256="0" * 64,
+            extraction_method="static_html",
+        )
+
+    def urls(result):
+        return [row["origin_url"] for row in result["evidence_records"]]
+
+    request = claim(urls=targets)
+    worker = Worker(SimpleNamespace(progress=progress), SimpleNamespace(extract=extract))
+    processing = asyncio.create_task(worker.fetch(request))
+    try:
+        async with asyncio.timeout(3):
+            await fast_saved.wait()
+            assert calls == targets[:3]
+            saved_progress, checkpoint = checkpoints[-1]
+            assert saved_progress.completed == 3
+            assert urls(checkpoint) == targets[1:3]
+            first_ready.set()
+            outcome = await processing
+    finally:
+        if not processing.done():
+            processing.cancel()
+            await asyncio.gather(processing, return_exceptions=True)
+
+    assert outcome.status == JobStatus.COMPLETED
+    assert urls(outcome.result) == targets
+    calls.clear()
+    recovered = await worker.fetch(replace(request, progress=saved_progress, checkpoint=checkpoint))
+    assert calls == targets[3:]
+    assert recovered.status == JobStatus.PARTIAL
+    assert urls(recovered.result) == targets[1:]
+    assert recovered.result["warnings"] == ["FETCH_ATTEMPT_INTERRUPTED"]
 
 
 async def test_fetch_keeps_ocr_pending_after_checkpoint_and_does_not_refetch():
@@ -180,27 +246,33 @@ async def test_fetch_keeps_optional_retry_after_for_a_rate_limited_page():
 
 async def test_worker_cancellation_stops_inflight_handler_and_finishes_cancelled(monkeypatch):
     started = asyncio.Event()
-    closed = asyncio.Event()
+    requested = set()
+    closed = set()
+    targets = {"https://first.example.org/", "https://second.example.org/"}
 
     class Store:
+        async def progress(self, job, progress, *, checkpoint):
+            return True
+
         async def finish(self, job, outcome):
-            assert closed.is_set()
+            assert closed == targets
             assert outcome.status == JobStatus.CANCELLED
 
-    async def fetch(job):
-        started.set()
+    async def extract(url, **_kwargs):
+        requested.add(url)
+        if requested == targets:
+            started.set()
         try:
             await asyncio.Event().wait()
         finally:
-            closed.set()
+            closed.add(url)
 
     async def cancelled(job):
         await started.wait()
 
-    worker = Worker(Store(), None)
-    worker.handlers[JobKind.FETCH] = fetch
+    worker = Worker(Store(), SimpleNamespace(extract=extract))
     monkeypatch.setattr(worker, "_watch", cancelled)
-    await worker.execute(claim(url="https://example.org"))
+    await worker.execute(claim(urls=sorted(targets)))
 
 
 async def test_fetch_enforces_scope_network_and_worker_gate():
@@ -270,6 +342,7 @@ async def test_fetch_modes_apply_their_own_readiness_and_preserve_payloads():
         settings.dynamic_fetch_domains = frozenset()
         assert (await client.post("/api/v1/fetch", json=auto)).status_code == 202
         assert store.create.call_args.args[2]["extraction_mode"] == "auto"
+        assert "queries" not in store.create.call_args.args[2]
         assert store.create.call_args.args[4] == "fetch-auto"
         assert store.create.call_args.kwargs["worker_available"] is True
         assert store.create.call_args.kwargs["idempotency_payload"] is None
@@ -277,6 +350,10 @@ async def test_fetch_modes_apply_their_own_readiness_and_preserve_payloads():
         ready.add(HEARTBEAT_KEY)
         assert (await client.post("/api/v1/fetch", json=dynamic)).status_code == 202
         assert store.create.call_args.args[2]["extraction_mode"] == "dynamic"
-        for payload in (static, {**static, "extraction_mode": "static"}):
+        for payload in (static, {**static, "extraction_mode": "static"}, {**static, "queries": {}}):
             assert (await client.post("/api/v1/fetch", json=payload)).status_code == 202
             assert "extraction_mode" not in store.create.call_args.args[2]
+            assert "queries" not in store.create.call_args.args[2]
+        with_query = {**auto, "queries": {static["url"]: "  steering tiller  "}}
+        assert (await client.post("/api/v1/fetch", json=with_query)).status_code == 202
+        assert store.create.call_args.args[2]["queries"] == {static["url"]: "steering tiller"}

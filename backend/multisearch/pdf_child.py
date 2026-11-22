@@ -7,7 +7,7 @@ import sys
 from unicodedata import category, normalize
 
 PDF_SIGNATURE = b"%PDF-"
-PDF_MAX_BYTES = 1024 * 1024
+PDF_MAX_BYTES = 8 * 1024 * 1024
 PDF_MAX_PAGES = 20
 PDF_MAX_PAGE_CHARS = 16_000
 PDF_MAX_CHARS = 64_000
@@ -98,6 +98,7 @@ def _extract() -> dict:
         "utf-16-be",
         "utf-16-le",
         "latin-1",
+        "charmap",
         "cp1252",
         "mac-roman",
         "gb2312",

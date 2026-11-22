@@ -50,7 +50,7 @@ curl --silent --show-error --fail-with-body http://127.0.0.1:8765/api/v1/search 
 
 `language` 和 `region` 按上游能力尽力处理。`time_range` 使用 `{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}`，按 UTC 日期比较，含起止两天。仅保留来源时间字段已知且位于范围内的候选，新闻使用发布日期。深度研究的各轮检索沿用提交时的日期范围。Playground 的新闻卡片分别显示发布日期和检索时间。`domain_allowlist` 和 `domain_denylist` 用于过滤结果来源域名。请求的域名字段不会授予访问内网的权限。
 
-启用 Wikipedia 后，适用的公网网页文字请求在常规来源无候选时可回退到英文或中文项目。结果的 `provider_ids` 包含 `wikipedia`，返回标题和条目链接，摘要为空。带显式地区或日期约束的请求仍按支持对应条件的常规来源执行。 [候补部署](deployment.md#可选-wikipedia-候补)
+启用 Wikipedia 后，公网网页文字请求可以指定单个 Wikipedia 域名，优先查询该项目。通用查询在常规来源无候选时可回退到英文或中文项目。结果的 `provider_ids` 包含 `wikipedia`，每次最多返回 3 条，包含标题、条目链接以及上游提供的纯文本匹配片段。带显式地区或日期约束的请求按支持对应条件的常规来源执行。 [部署配置](deployment.md#可选-wikipedia-候补)
 
 `cache_policy=use` 默认读取可用缓存。`refresh` 重新搜索并更新可缓存响应，`bypass` 直接检索且跳过缓存写入。`local` 只支持 `use`，未命中时以部分结果返回 `LOCAL_CACHE_MISS`。缓存按租户隔离，按查询、有效路由参数和 Provider 组合区分。命中时 `cache_hit=true`，返回当前调用的请求标识。完整结果缓存期限为文字一小时、图片半小时、新闻十分钟，新闻优先于图片和普通文字。正常空结果缓存 30 秒，上游部分失败的响应跳过缓存。
 
@@ -107,11 +107,17 @@ HTML 证据可附带最多 8 条 `images`。每条包含 `url`、`source` 和可
 
 `POST /api/v1/fetch` 接受一个 `url` 或至多 20 个 `urls`，可用 `max_pages`、`max_latency_ms`、`domain_allowlist` 和 `domain_denylist` 收紧处理范围。默认总时限 120 秒，包含排队时间。带 `idempotency_key` 的相同提交返回同一任务。按 `status_url` 查询进度、错误与证据列表。Worker 未就绪时返回 `WORKER_UNAVAILABLE`。
 
+批量抓取每组最多并行三页，整项任务仍受 `max_pages` 和 `max_latency_ms` 限制。同一主机请求遵守现有间隔和限流退避。页面完成后立即保存，成功证据按提交顺序返回，失败和待 OCR 记录以原始 URL 下标定位。执行中断后保留已保存的结果，跳过结果未知的已预留尝试，并返回 `FETCH_ATTEMPT_INTERRUPTED` 提示。
+
+REST 和 MCP `web_fetch` 均接受可选的 `queries` 对象，以本次提交的 URL 为键、长度不超过 600 字符的摘录定位词为值。定位词由 Worker 用于匹配正文片段和 PDF 原文页，来源站点仅收到抓取请求。同一个幂等标识须使用相同的定位词。
+
 `POST /api/v1/fetch` 与 MCP `web_fetch` 接受 `extraction_mode`，默认 `static`。可显式选择 `auto`，先静态提取，再对符合条件的脚本页面尝试隔离渲染。页面须成功取得 HTML、缺少可提取正文，有可执行的内嵌脚本或预先授权的资源，并且动态 Worker 就绪。输入地址、重定向每一跳和最终地址都须是部署允许的 HTTPS 地址。渲染复用本次取得的页面快照。其余场景沿用静态路径。
 
 设置 `dynamic` 时，仅对部署允许的 HTTPS 域名执行隔离渲染，重定向逐跳应用同一授权。`GET /api/v1/capabilities` 的 `fetch_dynamic` 表示配置和渲染 Worker 就绪状态。显式选择 `dynamic` 时，部署未授权动态抓取会返回 `MODE_UNAVAILABLE`，已授权但暂时无可用 Worker 时会返回 `WORKER_UNAVAILABLE`。用同一幂等标识提交不同的 `extraction_mode` 会产生冲突。
 
 动态证据使用 `extraction_method=browser_dom`、`locator.kind=rendered_html_text`。偏移和 `content_sha256` 基于规范化的渲染正文，`extraction_version` 记录 Chromium 和规范化器版本。标题、DOI 和发布日期使用原始响应的元数据。动态抓取支持 UTF-8 或 ASCII HTML 的内嵌脚本，以及部署方为该页面逐项授权的同源和跨源 JavaScript 与 JSON GET 资源。 [部署配置](deployment.md#可选动态-html-渲染)
+
+HTML 正文提取优先使用 `<main>` 或 `role=main`，过滤显式隐藏区域、导航、辅助区和进度控件。主要内容区仍标记为 `aria-busy` 时视为尚未取得正文。渲染观察结束后仍没有可用内容时返回 `FETCH_NO_EXCERPT`。HTML 规范化器版本包含在新证据的标识中，历史报告仍可按原标识读取。 [W3C WAI-ARIA](https://www.w3.org/TR/wai-aria/)
 
 使用资源清单时，`render_bundle_sha256` 对按 URL 排序的资源 URL、种类、MIME 和响应体 SHA-256 计算指纹。包含跨源资源时，指纹同时纳入页面的 COEP 策略和跨源资源的 CORS、CORP 响应头。同源资源包沿用原有指纹格式。
 

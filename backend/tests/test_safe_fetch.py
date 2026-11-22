@@ -626,7 +626,7 @@ async def test_unsupported_content_and_site_headers(network, headers, code):
         ("application/pdf", 8, b"%PDF-1.7\nfixture", "FETCH_BODY_TOO_LARGE"),
         (
             "application/pdf",
-            2 * 1024 * 1024,
+            1024 * 1024,
             b"%PDF-" + b"x" * (1024 * 1024),
             "FETCH_BODY_TOO_LARGE",
         ),
@@ -648,6 +648,51 @@ async def test_pdf_fetch_requires_declared_mime_and_matching_bounded_signature(
         result = await fetcher.fetch("https://one.example/reference.pdf", timeout_s=2)
         assert result.body == content and result.content_type == content_type
     assert [request.url.path for request in requests] == ["/robots.txt", "/reference.pdf"]
+
+
+@pytest.mark.parametrize("content_type", ["application/pdf", "text/html"])
+async def test_larger_default_budget_applies_only_to_pdf_responses(network, content_type):
+    _, _, _, responses = network
+    prefix = b"%PDF-1.7\n" if content_type == "application/pdf" else b"<p>"
+    content = prefix + b"x" * (2 * 1024 * 1024)
+    responses[("one.example", "/document")] = httpx.Response(
+        200, headers={"Content-Type": content_type}, content=content
+    )
+    if content_type == "application/pdf":
+        page = await SafeFetcher().fetch("https://one.example/document", timeout_s=2)
+        assert page.body == content
+    else:
+        with pytest.raises(FetchError) as error:
+            await SafeFetcher().fetch("https://one.example/document", timeout_s=2)
+        assert error.value.code == "FETCH_BODY_TOO_LARGE"
+
+
+async def test_pdf_responses_stay_under_the_parser_cap_with_larger_explicit_fetch_limit(network):
+    _, _, _, responses = network
+    too_large = safe_fetch.PDF_MAX_BYTES + 1
+    responses[("one.example", "/document")] = httpx.Response(
+        200, headers={"Content-Type": "application/pdf", "Content-Length": str(too_large)},
+        stream=Stream(0)
+    )
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher(max_body_bytes=too_large).fetch("https://one.example/document", timeout_s=2)
+    assert error.value.code == "FETCH_BODY_TOO_LARGE"
+
+
+async def test_fetch_rejects_a_non_pdf_prefix_before_reading_the_rest_of_the_body(network):
+    class WrongSignature(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"<ht"
+            yield b"ml>"
+            pytest.fail("A response claiming to be PDF must be rejected before more bytes are read")
+
+    _, _, _, responses = network
+    responses[("one.example", "/document")] = httpx.Response(
+        200, headers={"Content-Type": "application/pdf"}, stream=WrongSignature()
+    )
+    with pytest.raises(FetchError) as error:
+        await SafeFetcher().fetch("https://one.example/document", timeout_s=2)
+    assert error.value.code == "FETCH_CONTENT_UNSUPPORTED"
 
 
 class Stream(httpx.AsyncByteStream):

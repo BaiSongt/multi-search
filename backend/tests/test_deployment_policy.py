@@ -20,7 +20,11 @@ def test_default_policy_file_bounds_search_without_changing_image_filters():
     assert policy.provider("ddgs").requests_per_minute == 30
     assert policy.provider("searxng").requests_per_minute == 30
     assert policy.provider("wikipedia").requests_per_minute == 10
+    assert policy.provider("datacite").requests_per_minute == 10
+    assert DeploymentPolicy().provider("datacite").requests_per_minute == 10
     assert policy.provider("nasa-earthdata").requests_per_minute == 10
+    assert policy.provider("uk-aaib").requests_per_minute == 10
+    assert policy.provider("france-open-data").requests_per_minute == 10
     assert (
         DeploymentPolicy.model_validate({"providers": {"wikipedia": {"priority": 2}}})
         .provider("wikipedia")

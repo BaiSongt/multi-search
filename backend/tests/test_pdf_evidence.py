@@ -10,14 +10,20 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject, Num
 
 from multisearch import pdf_parser
 from multisearch.evidence import EvidenceBuilder
-from multisearch.pdf_child import PDF_MAX_OUTPUT, PDF_MAX_PAGES
+from multisearch.pdf_child import PDF_MAX_BYTES, PDF_MAX_OUTPUT, PDF_MAX_PAGES
 from multisearch.pdf_parser import OCRPending, PdfParser
 from multisearch.safe_fetch import FetchedPage, FetchError
 
 ORIGIN = "https://example.org/reference.pdf"
 
 
-def make_pdf(*pages: str, encrypted: bool = False, active_content: bool = False) -> bytes:
+def make_pdf(
+    *pages: str,
+    encrypted: bool = False,
+    active_content: bool = False,
+    unicode_map: bytes | None = None,
+    attachment_bytes: int = 0,
+) -> bytes:
     writer = PdfWriter()
     font = DictionaryObject(
         {
@@ -27,6 +33,10 @@ def make_pdf(*pages: str, encrypted: bool = False, active_content: bool = False)
             NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
         }
     )
+    if unicode_map is not None:
+        mapping = DecodedStreamObject()
+        mapping.set_data(unicode_map)
+        font[NameObject("/ToUnicode")] = writer._add_object(mapping)
     for value in pages:
         page = writer.add_blank_page(width=612, height=792)
         page[NameObject("/Resources")] = DictionaryObject(
@@ -42,6 +52,8 @@ def make_pdf(*pages: str, encrypted: bool = False, active_content: bool = False)
         page.replace_contents(stream)
     if active_content:
         writer.add_open_action(JavaScript('app.launchURL("https://example.org/external", true);'))
+    if attachment_bytes:
+        writer.add_attachment("padding.dat", b"\0" * attachment_bytes)
     if encrypted:
         writer.encrypt("sample-password")
     output = BytesIO()
@@ -122,6 +134,18 @@ async def test_pdf_locator_keeps_original_page_number_and_page_relative_offsets(
     assert first_page.content_sha256 == record.content_sha256
 
 
+async def test_pdf_locator_prefers_the_passage_that_matches_more_query_terms():
+    page = "Tiller mentioned in isolation. " + "Background detail. " * 30 + "Tiller and cables."
+    builder = EvidenceBuilder(PDFFetcher(make_pdf("Introduction", page), max_snippet=80))
+
+    record = await builder.extract(ORIGIN, timeout_s=3, query="tiller cables")
+
+    assert record.locator.page_number == 2
+    assert "Tiller and cables." in record.evidence_text
+    start, end = record.locator.text_offset_start, record.locator.text_offset_end
+    assert page[start:end] == record.evidence_text
+
+
 async def test_pdf_active_content_is_ignored_and_page_count_is_bounded():
     body = make_pdf(
         "Public fixture.", *([""] * (PDF_MAX_PAGES - 1)), "Excluded page", active_content=True
@@ -132,6 +156,31 @@ async def test_pdf_active_content_is_ignored_and_page_count_is_bounded():
     assert all("launchURL" not in text and "Excluded" not in text for text in parsed.pages)
     record = await EvidenceBuilder(PDFFetcher(body)).extract(ORIGIN, timeout_s=3)
     assert record.warnings == ["pdf_page_or_text_limit_reached"]
+
+
+async def test_isolated_pdf_parser_handles_single_byte_to_unicode_maps():
+    body = make_pdf(
+        "AAA",
+        unicode_map=b"begincmap\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"
+        b"1 beginbfchar\n<41> <00E9>\nendbfchar\nendcmap\n",
+    )
+    parsed = await PdfParser().parse(body, timeout_s=3)
+    assert parsed.pages == ("ééé",)
+
+
+async def test_pdf_above_one_mib_preserves_page_location_and_keeps_the_download_cap():
+    body = make_pdf(
+        "Cover page", "Aviation finding from the report.", attachment_bytes=2 * 1024 * 1024
+    )
+    assert 1024 * 1024 < len(body) <= PDF_MAX_BYTES
+    record = await EvidenceBuilder(PDFFetcher(body)).extract(
+        ORIGIN, timeout_s=4, query="aviation finding"
+    )
+    assert record.locator.page_number == 2
+    assert record.evidence_text == "Aviation finding from the report."
+    with pytest.raises(FetchError) as error:
+        await PdfParser().parse(b"%PDF-" + b"x" * PDF_MAX_BYTES, timeout_s=3)
+    assert error.value.code == "FETCH_BODY_TOO_LARGE"
 
 
 @pytest.mark.parametrize(
@@ -189,3 +238,26 @@ async def test_pdf_child_time_and_output_limits_terminate_cleanly(
         with pytest.raises(FetchError) as error:
             await PdfParser().parse(b"%PDF-1.7", timeout_s=budget)
     assert error.value.code == code
+
+
+async def test_pdf_queue_wait_uses_request_budget_before_child_wall_clock_starts(
+    monkeypatch, tmp_path
+):
+    fixture = tmp_path / "controlled_pdf_child.py"
+    fixture.write_text(
+        'import json; print(json.dumps({"status":"ok","pages":["first page"],'
+        '"truncated":False,"has_visual_content":False}))',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(pdf_parser, "_CHILD", fixture)
+    monkeypatch.setattr(pdf_parser, "PDF_WALL_SECONDS", 0.5)
+    parser = PdfParser()
+    await parser._slots.acquire()
+    await parser._slots.acquire()
+    request = asyncio.create_task(parser.parse(b"%PDF-1.7", timeout_s=2))
+    try:
+        await asyncio.sleep(0.6)
+    finally:
+        parser._slots.release()
+        parser._slots.release()
+    assert (await request).pages == ("first page",)

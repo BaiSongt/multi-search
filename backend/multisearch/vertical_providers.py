@@ -13,7 +13,15 @@ import httpx
 
 from .contracts import Modality, SearchRequest, Source, TextSearchResult
 from .errors import retry_after_seconds
-from .pipeline import _id, _matches_domain, _publication_date, _text, canonical_url, public_link
+from .pipeline import (
+    _id,
+    _matches_domain,
+    _plain_excerpt,
+    _publication_date,
+    _text,
+    canonical_url,
+    public_link,
+)
 from .providers import (
     Provider,
     ProviderCapabilities,
@@ -485,6 +493,97 @@ class CrossrefProvider(_VerticalProvider):
         return _Batch(documents)
 
 
+class DataCiteProvider(_VerticalProvider):
+    provider_id = "datacite"
+    endpoint = "https://api.datacite.org/dois"
+    accept = "application/vnd.api+json"
+    spacing_seconds = 1
+    identifier_kind = "doi"
+    fallback_only = True
+    _authority = re.compile(r"\bdatacite\b", re.I)
+    _dataset = re.compile(r"\bdatasets?\b|(?:开放|公开)?数据集", re.I)
+
+    def explicitly_requested(self, request: SearchRequest) -> bool:
+        return bool(self._authority.search(request.query) or self._dataset.search(request.query))
+
+    def _target(self, request, limit, identifier):
+        if identifier:
+            return f"{self.endpoint}/{quote(identifier.value, safe='/')}", {}
+        return super()._target(request, min(3, limit), identifier)
+
+    def _params(self, request, limit):
+        dataset = False
+        clauses = []
+        for phrase, word in re.findall(r'"([^"]+)"|([^\s"]+)', request.query):
+            if not phrase:
+                dataset |= self._dataset.search(word) is not None
+                word = self._dataset.sub(" ", self._authority.sub(" ", word))
+            term = " ".join((phrase or word).replace("\\", " ").split())
+            if term:
+                clauses.append(json.dumps(term, ensure_ascii=False))
+        if window := request.time_range:
+            clauses.append(f"publicationYear:[{window.start.year} TO {window.end.year}]")
+        params = {"page[size]": limit, "disable-facets": "true"}
+        if clauses:
+            params["query"] = " AND ".join(clauses)
+        if dataset:
+            params["resource-type-id"] = "dataset"
+        return params
+
+    def _parse(self, body, *, exact=False):
+        data = _json(body).get("data")
+        if exact and not isinstance(data, dict):
+            raise ProviderFailure("failed")
+        rows = [data] if exact else _rows(data)[:3]
+        documents = []
+        for item in rows:
+            row = _dict(_dict(item).get("attributes"))
+            if row.get("state") != "findable":
+                continue
+            doi = _doi(row.get("doi"))
+            dates = _list(row.get("dates"))[:24]
+            published_at = next(
+                (
+                    date
+                    for raw in dates
+                    if (entry := _dict(raw)).get("dateType") == "Issued"
+                    and (date := _publication_date(entry.get("date")))
+                ),
+                _publication_date(row.get("published")),
+            )
+            titles = _list(row.get("titles"))[:12]
+            abstract = next(
+                (
+                    text
+                    for raw in _list(row.get("descriptions"))[:24]
+                    if (entry := _dict(raw)).get("descriptionType") == "Abstract"
+                    and (text := _plain_excerpt(entry.get("description")))
+                ),
+                None,
+            )
+            rights = _list(row.get("rightsList"))
+            license_info = _dict(rights[0]) if len(rights) == 1 else {}
+            documents.append(
+                _Record(
+                    title=_first_text([_dict(title).get("title") for title in titles], 512),
+                    url=(public_link(row.get("url")) or _doi_url(doi)) if doi else None,
+                    doi=doi,
+                    published_at=published_at,
+                    authors=[
+                        name
+                        for entry in _list(row.get("creators"))[:20]
+                        if (name := _text(_dict(entry).get("name"), 180))
+                    ],
+                    snippet=abstract,
+                    version=_text(row.get("version"), 80),
+                    language=_text(row.get("language"), 24),
+                    license_name=_text(license_info.get("rights"), 180),
+                    license_url=public_link(license_info.get("rightsUri")),
+                )
+            )
+        return _Batch(documents)
+
+
 class ArxivProvider(_VerticalProvider):
     provider_id = "arxiv"
     endpoint = "https://export.arxiv.org/api/query"
@@ -626,6 +725,8 @@ def create_vertical_providers(
         providers.append(OpenAlexProvider(client, openalex_key))
     if "crossref" in enabled_sources:
         providers.append(CrossrefProvider(client, crossref_email))
+    if "datacite" in enabled_sources:
+        providers.append(DataCiteProvider(client))
     if "arxiv" in enabled_sources:
         providers.append(ArxivProvider(client))
     if "github" in enabled_sources and github_token:

@@ -1,13 +1,15 @@
 import asyncio
 import json
+import re
 from time import monotonic
 from typing import NoReturn
+from urllib.parse import urlsplit
 
 import httpx
 
 from .contracts import Modality, ProviderReason, Scope, SearchRequest, Source
 from .errors import retry_after_seconds
-from .pipeline import _matches_domain, normalize
+from .pipeline import _matches_domain, _plain_excerpt, normalize
 from .providers import (
     _MAX_UPSTREAM_BYTES,
     FailureStatus,
@@ -20,12 +22,13 @@ from .providers import (
 from .vertical_providers import academic_identifier
 
 _EDITIONS = {"en": "https://en.wikipedia.org", "zh": "https://zh.wikipedia.org"}
+_SITE_FILTER = re.compile(r"(?<!\S)site:([a-z0-9.-]+)(?=\s|$)", re.I | re.ASCII)
 _HEADERS = {
     "Accept": "application/json",
     "Accept-Encoding": "identity",
     "User-Agent": "MultiSearch-Wikipedia/1.0 (https://github.com/BaiSongt/multi-search/issues)",
 }
-_MAX_RESULTS = 5
+_MAX_RESULTS = 3
 _DEFAULT_COOLDOWN = 5.0
 _UNAVAILABLE = ProviderReason.UPSTREAM_UNAVAILABLE
 _RATE_LIMITED = ProviderReason.UPSTREAM_RATE_LIMITED
@@ -33,7 +36,7 @@ _RATE_LIMITED = ProviderReason.UPSTREAM_RATE_LIMITED
 
 class WikipediaProvider:
     provider_id = "wikipedia"
-    cache_version = "action-api-v1"
+    cache_version = "action-api-v3"
     fallback_only = True
     pairs = frozenset({(Source.WEB, Modality.TEXT)})
     capabilities = ProviderCapabilities(
@@ -55,16 +58,35 @@ class WikipediaProvider:
             or academic_identifier(request.query) is not None
         ):
             return None
+        if not request.query.strip():
+            return None
         language, _ = _locale(request)
+        sites = _SITE_FILTER.findall(request.query.lower())
+        domains = request.domain_allowlist or sites
+        if not language and len(domains) == 1 and domains[0] == "zh.wikipedia.org":
+            language = "zh"
         base_url = _EDITIONS.get(language or "en")
         if not base_url or _matches_domain(base_url, request.domain_denylist):
             return None
-        if request.domain_allowlist and not _matches_domain(base_url, request.domain_allowlist):
+        if domains and not _matches_domain(base_url, domains):
+            return None
+        if sites and (
+            not _matches_domain(base_url, sites) or not _SITE_FILTER.sub(" ", request.query).strip()
+        ):
             return None
         return base_url
 
     def supports_request(self, request: SearchRequest) -> bool:
         return self._edition(request) is not None
+
+    def explicitly_requested(self, request: SearchRequest) -> bool:
+        domains = request.domain_allowlist or _SITE_FILTER.findall(request.query.lower())
+        base_url = self._edition(request)
+        return bool(
+            base_url
+            and len(domains) == 1
+            and domains[0] in {"wikipedia.org", urlsplit(base_url).hostname}
+        )
 
     def _defer(
         self, retry_after: float | None, status: FailureStatus, reason: ProviderReason
@@ -86,7 +108,7 @@ class WikipediaProvider:
             "srwhat": "text",
             "srnamespace": 0,
             "srlimit": limit,
-            "srprop": "",
+            "srprop": "snippet",
             "srinfo": "",
         }
         async with self._client.stream(
@@ -132,7 +154,7 @@ class WikipediaProvider:
             or not isinstance(rows := query_result.get("search"), list)
         ):
             raise ProviderFailure("failed", reason_codes=(_UNAVAILABLE,))
-        return rows
+        return rows[:limit]
 
     async def search(
         self,
@@ -155,7 +177,8 @@ class WikipediaProvider:
                 if timeout_s <= 0:
                     raise TimeoutError
                 attempted = True
-                rows = await self._download(base_url, request.query, limit, timeout_s)
+                query = _SITE_FILTER.sub(" ", request.query).strip()
+                rows = await self._download(base_url, query, limit, timeout_s)
         except (TimeoutError, httpx.TimeoutException):
             reason = (
                 ProviderReason.UPSTREAM_TIMEOUT
@@ -166,7 +189,6 @@ class WikipediaProvider:
         except (httpx.HTTPError, RecursionError, ValueError):
             raise ProviderFailure("failed", reason_codes=(_UNAVAILABLE,)) from None
 
-        # 只返回条目名称和稳定链接。正文匹配在 Wikipedia 上游完成。
         candidates = []
         for row in rows:
             if (
@@ -178,7 +200,13 @@ class WikipediaProvider:
                 and title.strip()
                 and "\0" not in title
             ):
-                candidates.append({"title": title, "url": f"{base_url}/?curid={page_id}"})
+                candidates.append(
+                    {
+                        "title": title,
+                        "url": f"{base_url}/?curid={page_id}",
+                        "content": _plain_excerpt(row.get("snippet"), 360),
+                    }
+                )
         results, warnings = normalize(
             candidates, request, self.provider_id, source, modality, limit
         )

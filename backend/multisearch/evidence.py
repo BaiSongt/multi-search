@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Literal
 from unicodedata import category, normalize
@@ -18,7 +19,13 @@ from lxml import etree, html
 from .article_images import extract_article_images
 from .contracts import Scope
 from .crawl_parser import CRAWL4AI_VERSION, CrawlParser
-from .evidence_contracts import STATIC_EXTRACTION_VERSION, ArticleImage, ExtractionMode, FetchStatus
+from .evidence_contracts import (
+    HTML_NORMALIZER_VERSION,
+    STATIC_EXTRACTION_VERSION,
+    ArticleImage,
+    ExtractionMode,
+    FetchStatus,
+)
 from .evidence_contracts import DocumentIdentifier as DocumentIdentifier
 from .evidence_contracts import EvidenceLocator as EvidenceLocator
 from .evidence_contracts import EvidenceRecord as EvidenceRecord
@@ -39,6 +46,8 @@ if TYPE_CHECKING:
     from .render_resources import FetchedResource
 
 _MAX_EXCERPT = 512
+_MAX_CONCURRENT_EXTRACTIONS = 4
+_SUBSTANTIVE_HTML_BLOCK_LENGTH = 160
 _HEADINGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 _AUXILIARY_SECTIONS = {
     "acknowledgments",
@@ -93,6 +102,7 @@ _HIDDEN = {
     "nav",
     "noscript",
     "object",
+    "progress",
     "script",
     "select",
     "style",
@@ -101,6 +111,7 @@ _HIDDEN = {
     "textarea",
     "video",
 }
+_AUXILIARY_ROLES = {"banner", "complementary", "contentinfo", "navigation", "progressbar"}
 _BOT_NAMES = {"robots", "multisearchbot"}
 _SCRIPT_TYPES = {
     "",
@@ -153,6 +164,24 @@ def _charset(name: str | None) -> str | None:
     return codec if codec.startswith(prefixes) or codec in {"ascii", "cp949"} else None
 
 
+def _role(node: html.HtmlElement) -> str:
+    return (node.get("role") or "").strip().casefold()
+
+
+def _hidden(node: html.HtmlElement) -> bool:
+    return (
+        not isinstance(node.tag, str)
+        or node.tag in _HIDDEN
+        or "hidden" in node.attrib
+        or node.get("aria-hidden", "").strip().casefold() == "true"
+        or _role(node) in _AUXILIARY_ROLES
+    )
+
+
+def _busy(node: html.HtmlElement) -> bool:
+    return node.get("aria-busy", "").strip().casefold() == "true"
+
+
 def _html_blocks(root: html.HtmlElement) -> list[_Block]:
     blocks: list[_Block] = []
     current: list[str] = []
@@ -167,12 +196,7 @@ def _html_blocks(root: html.HtmlElement) -> list[_Block]:
     def walk(node: html.HtmlElement) -> None:
         nonlocal section
         tag = node.tag
-        if (
-            not isinstance(tag, str)
-            or tag in _HIDDEN
-            or "hidden" in node.attrib
-            or node.get("aria-hidden", "").casefold() == "true"
-        ):
+        if _hidden(node) or _busy(node):
             return
         if tag in _HEADINGS:
             flush()
@@ -226,11 +250,25 @@ def _html_metadata(document: html.HtmlElement) -> tuple[dict[str, str], int | No
 
 
 def _html_body(document: html.HtmlElement) -> list[_Block]:
-    # 选择主区域，忽略导航和脚本；空主区域回退到正文。
     body = document.find("body")
     if body is None:
         return []
-    main = next((element for element in body.iter() if element.tag in {"main", "article"}), None)
+    article = main = None
+    for element in body.iter():
+        landmark = element.tag == "main" or _role(element) == "main"
+        if not landmark and (article is not None or element.tag != "article"):
+            continue
+        if _hidden(element) or any(_hidden(parent) for parent in element.iterancestors()):
+            continue
+        if landmark:
+            main = element
+            break
+        article = element
+    if main is None:
+        main = article
+    # 正在更新的主区域不能回退到页面其他位置的提示或导航。
+    if main is not None and (_busy(main) or any(_busy(parent) for parent in main.iterancestors())):
+        return []
     blocks = _html_blocks(main) if main is not None else []
     if not any(not block.heading for block in blocks):
         blocks = _html_blocks(body)
@@ -256,6 +294,19 @@ def _publication(value: str) -> datetime | None:
         return None
 
 
+def _pdf_excerpt_start(text: str, pattern: re.Pattern[str], limit: int, page_score: int) -> int:
+    context = min(80, limit // 3)
+    best_start = best_score = 0
+    for hit in pattern.finditer(text):
+        start = max(0, hit.start() - context)
+        score = len({match[0].casefold() for match in pattern.finditer(text, start, start + limit)})
+        if score > best_score:
+            best_start, best_score = start, score
+        if best_score >= page_score:
+            break
+    return best_start
+
+
 def _content(
     blocks: list[_Block],
     kind: Literal["html_text", "rendered_html_text", "plain_text", "pdf_text"],
@@ -264,7 +315,8 @@ def _content(
     hints: tuple[str, ...],
 ) -> tuple[str, EvidenceLocator, str, bool]:
     terms = list(dict.fromkeys(re.findall(r"\w{2,}", query or "")))[:16]
-    choices: list[tuple[tuple[bool, int, bool, bool], int, _Block]] = []
+    choices: list[tuple[tuple[bool, int, bool, bool, bool], int, _Block]] = []
+    is_html = kind in {"html_text", "rendered_html_text"}
     offset = 0
     for block in blocks:
         if not block.heading and block.text:
@@ -276,6 +328,7 @@ def _content(
                 section not in _AUXILIARY_SECTIONS,
                 score,
                 section in _ABSTRACT_SECTIONS,
+                is_html and len(block.text) >= _SUBSTANTIVE_HTML_BLOCK_LENGTH,
                 selected,
             )
             choices.append((rank, 0 if block.page_number is not None else offset, block))
@@ -286,9 +339,10 @@ def _content(
     selected = rank[-1]
     relative_start = 0
     if terms:
-        expression = "|".join(re.escape(term) for term in terms)
-        match = re.search(expression, block.text, flags=re.IGNORECASE)
-        if match is not None:
+        pattern = re.compile("|".join(re.escape(term) for term in terms), flags=re.IGNORECASE)
+        if block.page_number is not None and rank[1] > 1:
+            relative_start = _pdf_excerpt_start(block.text, pattern, excerpt_limit, rank[1])
+        elif match := pattern.search(block.text):
             relative_start = max(0, match.start() - min(80, excerpt_limit // 3))
     window = block.text[relative_start : relative_start + excerpt_limit]
     excerpt = window.strip()
@@ -321,6 +375,8 @@ class EvidenceBuilder:
         self.fetcher = fetcher
         self.parser = parser
         self.pdf = PdfParser()
+        # 正文抓取和提取共用席位，限制排队中的响应体总量。
+        self._slots = asyncio.Semaphore(_MAX_CONCURRENT_EXTRACTIONS)
         self.record_attempt = record_attempt
         self.renderer = renderer
         self.dynamic_hosts = dynamic_hosts
@@ -345,28 +401,32 @@ class EvidenceBuilder:
         status: FetchStatus = "failed"
         error_code = None
         dynamic = extraction_mode == "dynamic"
+        budget = asyncio.timeout(timeout_s)
         try:
             if dynamic and (self.renderer is None or not self.dynamic_hosts):
                 raise FetchError(
                     503, "FETCH_RENDER_UNAVAILABLE", "动态渲染暂不可用", retryable=True
                 )
-            page = await self.fetcher.fetch(
-                url,
-                timeout_s=timeout_s,
-                network_scope=network_scope,
-                domain_allowlist=domain_allowlist,
-                domain_denylist=domain_denylist,
-                authorized_hosts=self.dynamic_hosts if dynamic else None,
-            )
-            evidence = await self._extract_page(
-                page,
-                deadline,
-                result_id,
-                query,
-                extraction_mode=extraction_mode,
-                domain_allowlist=domain_allowlist,
-                domain_denylist=domain_denylist,
-            )
+            if not isfinite(timeout_s) or timeout_s <= 0:
+                raise FetchError(504, "TIME_BUDGET_EXCEEDED", "正文提取时限已耗尽", retryable=True)
+            async with budget, self._slots:
+                page = await self.fetcher.fetch(
+                    url,
+                    timeout_s=deadline - monotonic(),
+                    network_scope=network_scope,
+                    domain_allowlist=domain_allowlist,
+                    domain_denylist=domain_denylist,
+                    authorized_hosts=self.dynamic_hosts if dynamic else None,
+                )
+                evidence = await self._extract_page(
+                    page,
+                    deadline,
+                    result_id,
+                    query,
+                    extraction_mode=extraction_mode,
+                    domain_allowlist=domain_allowlist,
+                    domain_denylist=domain_denylist,
+                )
         except OCRPending as error:
             error_code = error.code
             status = "ocr_pending"
@@ -380,7 +440,10 @@ class EvidenceBuilder:
             raise
         except TimeoutError:
             status = "timeout"
-            raise
+            if not budget.expired():
+                raise
+            error_code = "TIME_BUDGET_EXCEEDED"
+            raise FetchError(504, error_code, "正文提取时限已耗尽", retryable=True) from None
         except asyncio.CancelledError:
             status = "timeout" if monotonic() >= deadline else "cancelled"
             raise
@@ -488,18 +551,22 @@ class EvidenceBuilder:
             identity += f"\npage:{locator.page_number}"
         if render_version is not None:
             method = "browser_dom"
-            extraction_version = f"{render_version}+normalizer.{STATIC_EXTRACTION_VERSION}"
+            extraction_version = f"{render_version}+normalizer.{HTML_NORMALIZER_VERSION}"
             identity += f"\nrender:{extraction_version}"
             if bundle_sha is not None:
                 identity += f"\nbundle:{bundle_sha}"
         elif locator.kind == "pdf_text":
             method, extraction_version = "pypdf", PDF_EXTRACTION_VERSION
-        elif selected:
-            method = "crawl4ai_static"
-            extraction_version = f"{CRAWL4AI_VERSION}+normalizer.{STATIC_EXTRACTION_VERSION}"
+        elif locator.kind == "html_text":
+            method = "crawl4ai_static" if selected else "static_html"
+            extraction_version = (
+                f"{CRAWL4AI_VERSION}+normalizer.{HTML_NORMALIZER_VERSION}"
+                if selected
+                else HTML_NORMALIZER_VERSION
+            )
+            identity += f"\nhtml:{extraction_version}"
         else:
-            method = "static_html" if locator.kind == "html_text" else "plain_text"
-            extraction_version = STATIC_EXTRACTION_VERSION
+            method, extraction_version = "plain_text", STATIC_EXTRACTION_VERSION
         if images:
             image_snapshot = json.dumps(
                 [image.model_dump() for image in images], ensure_ascii=False, separators=(",", ":")

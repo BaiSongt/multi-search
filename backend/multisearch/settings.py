@@ -110,9 +110,11 @@ class Settings:
             for source in os.getenv("MULTISEARCH_VERTICAL_SOURCES", "").split(",")
             if source.strip()
         }
-        academic = {"openalex", "crossref", "arxiv"}
+        academic = {"openalex", "crossref", "arxiv", "datacite"}
         if os.getenv("MULTISEARCH_ENABLE_ACADEMIC", "false").lower() == "true":
             vertical_sources.update(academic)
+        if os.getenv("MULTISEARCH_ENABLE_DATACITE", "false").lower() == "true":
+            vertical_sources.add("datacite")
         if not vertical_sources <= academic | {"github"}:
             raise ValueError("MULTISEARCH_VERTICAL_SOURCES 包含不支持的来源")
         official_sources = frozenset(

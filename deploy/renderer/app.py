@@ -382,18 +382,21 @@ async def enable_cross_replay(
     )
 
 
-async def wait_for_inline_content(session: CDPSession, world_id: int) -> None:
-    # 只为已经存在但没有可见正文的语义容器保留少量等待时间。
+async def wait_for_content(session: CDPSession, world_id: int) -> None:
+    # 只为已存在且仍为空或正在更新的主要内容区保留少量等待时间。
     try:
         async with asyncio.timeout(INLINE_CONTENT_GRACE_SECONDS):
             while True:
                 result = await session.send(
                     "Runtime.evaluate",
                     {
-                        "expression": (
-                            "document.querySelector('article, main, [role=main]')"
-                            "?.innerText?.trim() === ''"
-                        ),
+                        "expression": """(() => {
+                            const visible = selector => Array.from(document.querySelectorAll(selector))
+                                .find(node => !node.closest('[hidden], [aria-hidden="true" i]'));
+                            const main = visible('main, [role="main" i]') ?? visible('article');
+                            return Boolean(main && (main.closest('[aria-busy="true" i]')
+                                || main.innerText.trim() === ''));
+                        })()""",
                         "contextId": world_id,
                         "returnByValue": True,
                     },
@@ -486,8 +489,7 @@ async def render(browser: Browser, snapshot: Snapshot) -> str:
             },
         )
         world_id = world["executionContextId"]
-        if not snapshot.assets:
-            await wait_for_inline_content(session, world_id)
+        await wait_for_content(session, world_id)
         result = await session.send(
             "Runtime.evaluate",
             {

@@ -16,17 +16,13 @@ from fastapi import FastAPI, Request
 from lxml import html
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
-from sqlalchemy import text
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
-
 from multisearch import safe_fetch
 from multisearch.auth import authenticate_machine, machine_peer
 from multisearch.dynamic_renderer import DynamicRenderer
 from multisearch.errors import install_errors
 from multisearch.evidence import EvidenceBuilder
 from multisearch.evidence_api import router as evidence_router
-from multisearch.evidence_contracts import EvidenceRecord
+from multisearch.evidence_contracts import HTML_NORMALIZER_VERSION, EvidenceRecord
 from multisearch.identity import IdentityStore
 from multisearch.job_api import router as job_router
 from multisearch.job_application import JobApplication
@@ -38,6 +34,9 @@ from multisearch.observability import install_observability
 from multisearch.render_resources import parse_resource_manifest
 from multisearch.settings import Settings
 from multisearch.worker import Worker
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 SOCKET = "/run/multisearch-renderer/render.sock"
 BASE = "http://127.0.0.1:8765"
@@ -340,6 +339,21 @@ def upstream(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, headers={"content-type": "text/html"}, text="<p>Static control</p>"
         )
+    if path == "/delayed-main":
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=utf-8"},
+            text="""<!doctype html><div>Advisory portal.</div>
+            <div role="main" aria-busy="true"><p role="status">Loading advisory.</p></div>
+            <script>
+            setTimeout(() => {
+              const main = document.querySelector('[role=main]');
+              main.querySelector('p').removeAttribute('role');
+              main.querySelector('p').textContent = 'Delayed aviation weather advisory.';
+              main.setAttribute('aria-busy', 'false');
+            }, 360);
+            </script>""",
+        )
     if path in {"/cross-bundle", "/cross-coep"}:
         classic_only = path == "/cross-coep"
         headers = {"content-type": "text/html", "content-security-policy": CROSS_CSP}
@@ -409,7 +423,7 @@ def validate_record(record: EvidenceRecord, *, bundle: bool = False, cross: bool
     paragraph = CROSS_PARAGRAPH if cross else BUNDLE_PARAGRAPH if bundle else PARAGRAPH
     assert record.origin_url == record.canonical_url == url
     version = 3 if cross else 2 if bundle else 1
-    suffix = f".renderer.{version}+normalizer.1"
+    suffix = f".renderer.{version}+normalizer.{HTML_NORMALIZER_VERSION}"
     assert record.extraction_method == "browser_dom" and record.extraction_version.endswith(suffix)
     assert record.evidence_text == paragraph and record.verification_status == "content_extracted"
     assert record.locator.kind == "rendered_html_text" and record.locator.section == SECTION
@@ -715,6 +729,14 @@ async def verify_policy(builder: EvidenceBuilder) -> None:
     auto = await builder.extract(f"{ORIGIN}/render", timeout_s=12, extraction_mode="auto")
     validate_record(auto)
     assert auto.content_sha256 == record.content_sha256
+    delayed = await builder.extract(
+        f"{ORIGIN}/delayed-main", timeout_s=12, extraction_mode="auto"
+    )
+    assert (
+        delayed.extraction_method == "browser_dom"
+        and delayed.locator.kind == "rendered_html_text"
+    )
+    assert delayed.evidence_text == "Delayed aviation weather advisory."
     excerpt = await builder.extract(f"{ORIGIN}/snippet", timeout_s=12, extraction_mode="dynamic")
     assert excerpt.evidence_text == "Dynamic"
     cases = {
@@ -842,7 +864,7 @@ async def verify_cross_policy(builder: EvidenceBuilder) -> EvidenceRecord:
     with patch.object(safe_fetch, "_transport", lambda: httpx.MockTransport(corp_allowed)):
         allowed = await builder.extract(CROSS_COEP_PAGE, timeout_s=12, extraction_mode="dynamic")
     assert allowed.evidence_text == CROSS_PARAGRAPH
-    assert allowed.extraction_version.endswith(".renderer.3+normalizer.1")
+    assert allowed.extraction_version.endswith(f".renderer.3+normalizer.{HTML_NORMALIZER_VERSION}")
     print("跨源证据保留原站 COEP 和资源 CORP，CORS 改变后更新资源包指纹及证据 ID")
     return record
 
@@ -854,7 +876,9 @@ async def legacy_static_job(jobs, identity, raw_key):
     previous = await jobs.create(
         principal,
         JobKind.FETCH,
-        body.model_dump(mode="json", exclude={"request_id", "idempotency_key", "extraction_mode"}),
+        body.model_dump(
+            mode="json", exclude={"request_id", "idempotency_key", "extraction_mode", "queries"}
+        ),
         "legacy-static-request",
         body.idempotency_key,
         body.max_latency_ms,
@@ -974,6 +998,26 @@ async def verify_queue(db, pepper: str, builder: EvidenceBuilder, baseline: Evid
         )
         denied = await api.get(evidence_path, headers={"Authorization": f"Bearer {other}"})
         assert denied.status_code == 404
+        batch_urls = [baseline.origin_url, f"{ORIGIN}/static"]
+        batch = await api.post(
+            "/api/v1/fetch",
+            json={"urls": batch_urls, "extraction_mode": "auto", "max_latency_ms": 15_000},
+        )
+        assert batch.status_code == 202, batch.json()
+        batch_claim = await jobs.claim((JobKind.FETCH,), allow_dynamic=True)
+        assert batch_claim is not None and str(batch_claim.job_id) == batch.json()["job_id"]
+        worker = Worker(jobs, builder)
+        worker.dynamic_ready = True
+        await worker.execute(batch_claim)
+        batch_response = await api.get(batch.json()["status_url"])
+        batch_state = batch_response.json()
+        assert batch_response.status_code == 200 and batch_state["status"] == "completed", (
+            batch_state
+        )
+        batch_records = batch_state["result"]["evidence_records"]
+        assert batch_state["progress"]["pages_fetched"] == 2
+        assert [row["origin_url"] for row in batch_records] == batch_urls
+        assert [row["extraction_method"] for row in batch_records] == ["browser_dom", "static_html"]
     async with db.connect() as connection:
         usage = (
             await connection.execute(
@@ -987,6 +1031,7 @@ async def verify_queue(db, pepper: str, builder: EvidenceBuilder, baseline: Evid
         ).one()
         assert usage.pages_fetched == 1 and usage.payload == {}
     print("独立 PostgreSQL 的 REST／MCP 幂等、Worker 能力隔离、证据归档、跨租户拒绝和单次计量通过")
+    print("混合批次按提交顺序返回隔离 Chromium 和静态正文")
 
 
 async def main() -> None:

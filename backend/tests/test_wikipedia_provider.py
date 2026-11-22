@@ -15,7 +15,7 @@ _PAIR = Source.WEB, Modality.TEXT
     ("language", "host"),
     [(None, "en.wikipedia.org"), ("en-US", "en.wikipedia.org"), ("zh-HK", "zh.wikipedia.org")],
 )
-async def test_wikipedia_uses_full_text_search_and_returns_title_and_page_link(language, host):
+async def test_wikipedia_requests_bounded_results_with_plain_text_snippets(language, host):
     def upstream(request):
         assert request.method == "GET"
         assert request.url.host == host
@@ -30,20 +30,20 @@ async def test_wikipedia_uses_full_text_search_and_returns_title_and_page_link(l
             "srsearch": "光合作用 & chlorophyll",
             "srwhat": "text",
             "srnamespace": "0",
-            "srlimit": "5",
-            "srprop": "",
+            "srlimit": "3",
+            "srprop": "snippet",
             "srinfo": "",
         }
         return httpx.Response(
             200,
             json={
-                "continue": {"sroffset": 5},
+                "continue": {"sroffset": 3},
                 "query": {
                     "search": [
                         {
                             "pageid": 404,
                             "title": "Photosynthesis",
-                            "snippet": "Article content",
+                            "snippet": 'Article <span class="searchmatch">content</span> &amp; context<script>ignore</script>',
                             "url": "https://elsewhere.example.org/untrusted",
                             "timestamp": "2026-05-01T00:00:00Z",
                         },
@@ -65,7 +65,7 @@ async def test_wikipedia_uses_full_text_search_and_returns_title_and_page_link(l
     assert item.title == "Photosynthesis"
     assert item.url == item.canonical_url == f"https://{host}/?curid=404"
     assert item.provider_ids == ["wikipedia"]
-    assert item.snippet is None
+    assert item.snippet == "Article content & context"
     assert item.published_at is None
     assert result.reason_codes == ()
 
@@ -79,7 +79,9 @@ async def test_wikipedia_uses_full_text_search_and_returns_title_and_page_link(l
         {"region": "HK", "language": "zh"},
         {"time_range": {"from": "2025-01-01", "to": "2025-12-31"}},
         {"domain_allowlist": ["wikipedia.org.example.net"]},
-        {"domain_allowlist": ["zh.wikipedia.org"]},
+        {"language": "en", "domain_allowlist": ["zh.wikipedia.org"]},
+        {"query": "Moon site:nasa.gov"},
+        {"query": "site:zh.wikipedia.org"},
         {"domain_denylist": ["wikipedia.org"]},
         {"network_scope": "private"},
         {"network_scope": "offline"},

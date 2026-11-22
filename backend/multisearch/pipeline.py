@@ -7,6 +7,8 @@ from hashlib import sha256
 from ipaddress import ip_address
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
+from lxml import etree, html
+
 from .contracts import (
     ImageAttribution,
     ImageOptions,
@@ -94,6 +96,18 @@ def _text(value: object, limit: int) -> str | None:
         value = value[:limit].encode("utf-8", errors="replace").decode("utf-8")
         return " ".join(value.split()) or None
     return None
+
+
+def _plain_excerpt(value: object, limit: int = 1200) -> str | None:
+    excerpt = _text(value, 32_000)
+    if not excerpt:
+        return None
+    try:
+        fragment = html.fragment_fromstring(excerpt, create_parent=True)
+    except etree.ParserError:
+        return None
+    etree.strip_elements(fragment, "script", "style", with_tail=False)
+    return _text(fragment.text_content(), limit)
 
 
 def _dimension(value: object) -> int | None:

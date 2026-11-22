@@ -28,11 +28,13 @@ from multisearch.evidence_contracts import EvidenceLocator, EvidenceRecord
 from multisearch.identity import MachineIdentity
 from multisearch.metering import Admission, SearchPrincipal
 from multisearch.observability import Telemetry
+from multisearch.official_providers import AAIBReportsProvider
 from multisearch.policy import ProviderPolicy
 from multisearch.providers import ProviderFailure, ProviderResult
 from multisearch.routing_policy import DEFAULT_ROUTING, RoutingRules
 from multisearch.search import SearchService
 from multisearch.settings import Settings
+from multisearch.vertical_providers import DataCiteProvider
 from multisearch.wikipedia_provider import WikipediaProvider
 
 
@@ -102,6 +104,75 @@ async def failed():
     raise ProviderFailure("failed")
 
 
+async def test_datacite_targeted_dataset_search_paces_a_single_request_and_filters_metadata():
+    doi = "10.5281/zenodo.123"
+    row = {
+        "state": "findable",
+        "doi": doi,
+        "url": "https://zenodo.org/records/123",
+        "titles": [{"title": "Aircraft noise observations"}],
+        "dates": [{"dateType": "Issued", "date": "2025-05-06"}],
+        "creators": [{"name": "Aviation Research Centre"}],
+        "descriptions": [
+            {"descriptionType": "Abstract", "description": "<p>Field measurements.</p>"}
+        ],
+        "rightsList": [
+            {"rights": "CC BY 4.0", "rightsUri": "https://creativecommons.org/licenses/by/4.0/"}
+        ],
+    }
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        assert request.url.host == "api.datacite.org" and request.url.path == "/dois"
+        assert 2 < request.extensions["timeout"]["read"] <= 3
+        assert dict(request.url.params) == {
+            "page[size]": "3",
+            "disable-facets": "true",
+            "query": '"aircraft noise" AND publicationYear:[2025 TO 2025]',
+            "resource-type-id": "dataset",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"attributes": row},
+                    {"attributes": {**row, "doi": "10.5281/zenodo.124", "state": "draft"}},
+                    {
+                        "attributes": {
+                            **row,
+                            "doi": "10.5281/zenodo.125",
+                            "dates": [{"dateType": "Issued", "date": "2024-08-16"}],
+                        }
+                    },
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        academic = FakeProvider("crossref")
+        academic.pairs = frozenset({(Source.ACADEMIC, Modality.TEXT)})
+        search = service(academic, DataCiteProvider(client))
+        result = await search.search(
+            SearchRequest(
+                query='DataCite "aircraft noise" dataset',
+                mode="quick",
+                source_types=["academic"],
+                time_range={"from": "2025-01-01", "to": "2025-12-31"},
+                max_results=6,
+            ),
+            "research",
+            "dataset-search",
+        )
+    assert len(requests) == 1 and not academic.calls
+    assert [(run.provider_id, run.attempts) for run in result.provider_runs] == [("datacite", 1)]
+    [item] = result.results
+    assert item.doi == doi and item.published_at.date().isoformat() == "2025-05-06"
+    assert item.url == row["url"] and item.authors == ["Aviation Research Centre"]
+    assert item.snippet == "Field measurements."
+    assert item.license_name == "CC BY 4.0"
+
+
 @pytest.mark.parametrize(("source_budget", "expected"), [(2.5, 2.5), (6.0, 4.0)])
 async def test_quick_text_search_supplements_at_most_one_official_source(source_budget, expected):
     class Official(FakeProvider):
@@ -126,6 +197,57 @@ async def test_quick_text_search_supplements_at_most_one_official_source(source_
         SearchRequest(query="generic search terms", mode="quick"), "research", "general"
     )
     assert len(preferred.calls) == 1
+
+
+@pytest.mark.parametrize("limit", [1, 3, 4])
+@pytest.mark.parametrize("domain", ["www.ncei.noaa.gov", "ncei.noaa.gov"])
+async def test_exact_official_domain_only_uses_general_search_when_needed(limit, domain):
+    class Official(FakeProvider):
+        official_search = True
+        result_domain = "www.ncei.noaa.gov"
+
+    general = FakeProvider("ddgs", url="https://www.ncei.noaa.gov/weather")
+    official = Official(
+        "noaa-climate-data", url="https://www.ncei.noaa.gov/access/dataset"
+    )
+    router = service(general, official)
+    response = await router.search(
+        SearchRequest(query="aviation", domain_allowlist=[domain], max_results=limit),
+        "research",
+        "targeted",
+    )
+    assert len(official.calls) == 1
+    assert official.calls[0][3] == min(limit, 3)
+    assert len(general.calls) == (0 if limit == 1 else 1)
+    assert response.result_status == "has_results"
+    assert response.result_count == (1 if limit == 1 else 2)
+
+
+@pytest.mark.parametrize("available", [True, False])
+async def test_explicit_aaib_uses_one_catalogue_and_only_falls_back_if_needed(available):
+    class OtherOfficial(FakeProvider):
+        official_search = True
+
+    hits = [{
+        "title": "Runway excursion investigation",
+        "link": "/aaib-reports/runway-excursion",
+        "content_store_document_type": "aaib_report",
+    }] if available else []
+    general = FakeProvider("ddgs", url="https://www.gov.uk/aaib-reports")
+    other = OtherOfficial("uk-open-data", url="https://data.gov.uk/dataset/other")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"results": hits}))
+    ) as client:
+        router = service(general, other, AAIBReportsProvider(client))
+        response = await router.search(
+            SearchRequest(query="AAIB runway excursion", domain_allowlist=["gov.uk"], max_results=3),
+            "research",
+            "targeted",
+        )
+    assert not other.calls
+    assert len(general.calls) == (0 if available else 1)
+    assert response.result_count == 1
+    assert response.results[0].provider_ids == ["uk-aaib" if available else "ddgs"]
 
 
 @pytest.mark.parametrize(
@@ -328,6 +450,33 @@ async def test_ineligible_wikipedia_is_not_advertised_for_filtered_request():
         with pytest.raises(ApiError) as failure:
             await search.search(request, "tenant", "test")
         assert failure.value.code == "SOURCE_MODALITY_UNAVAILABLE"
+
+
+async def test_explicit_wikipedia_uses_one_chinese_edition_request_even_without_fallback():
+    requests = []
+
+    def upstream(request):
+        requests.append(request.url)
+        return httpx.Response(200, json={"query": {"search": [{"pageid": 42, "title": "飛行"}]}})
+
+    general = FakeProvider("ddgs")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        search = service(WikipediaProvider(client), general)
+        search.routing = DEFAULT_ROUTING.model_copy(
+            update={"policy": RoutingRules(quick_fallback=False)}
+        )
+        result = await search.search(
+            SearchRequest(query="site:zh.wikipedia.org 飛行", mode="quick", max_results=6),
+            "tenant",
+            "wiki",
+        )
+
+    assert not general.calls
+    assert [row.url for row in result.results] == ["https://zh.wikipedia.org/?curid=42"]
+    (request_url,) = requests
+    assert request_url.host == "zh.wikipedia.org"
+    assert request_url.params["srsearch"] == "飛行"
+    assert request_url.params["srlimit"] == "3"
 
 
 async def test_terminal_upstream_unavailable_hint_prevents_new_attempt():
@@ -945,10 +1094,11 @@ async def test_timeout_cancels_adapter_and_keeps_already_completed_standard_resu
     assert "PROVIDER_TIMEOUT:ddgs:web:text" in result.warnings
 
 
-async def test_upstream_retry_after_prevents_calls_during_cooldown():
+@pytest.mark.parametrize("hint", [None, 30])
+async def test_upstream_retry_after_prevents_calls_during_cooldown(hint):
     async def rate_limited():
         raise ProviderFailure(
-            "rate_limited", retry_after=30, reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,)
+            "rate_limited", retry_after=hint, reason_codes=(ProviderReason.UPSTREAM_RATE_LIMITED,)
         )
 
     provider = FakeProvider("ddgs", handler=rate_limited)
@@ -957,7 +1107,8 @@ async def test_upstream_retry_after_prevents_calls_during_cooldown():
         with pytest.raises(ApiError) as failure:
             await search.search(SearchRequest(query=query), "tenant", query)
         assert failure.value.code == "PROVIDER_UNAVAILABLE"
-        assert 25_000 < failure.value.retry_after_ms <= 30_000
+        expected_delay = (hint or 10) * 1000
+        assert expected_delay - 1000 < failure.value.retry_after_ms <= expected_delay
         (run,) = failure.value.provider_runs
         assert run.attempts == expected_attempts and run.reason_codes == ["upstream_rate_limited"]
     assert len(provider.calls) == 1
@@ -1048,11 +1199,11 @@ async def test_local_slot_wait_is_distinct_from_upstream_timeout():
 async def test_provider_retry_sleep_leaves_slot_available():
     first_attempt = asyncio.Event()
 
-    async def throttle():
+    async def transient_timeout():
         first_attempt.set()
-        raise ProviderFailure("rate_limited")
+        raise ProviderFailure("timeout")
 
-    provider = FakeProvider("ddgs", handler=throttle)
+    provider = FakeProvider("ddgs", handler=transient_timeout)
     search = service(provider)
     search.states["ddgs"].slots = asyncio.Semaphore(1)
     pair = (Source.WEB, Modality.TEXT)
