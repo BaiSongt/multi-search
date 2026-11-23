@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 
 [[package]]
@@ -444,7 +444,7 @@ wheels = [
 
 [[package]]
 name = "multisearch"
-version = "0.3.0a21"
+version = "0.3.0a22"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
