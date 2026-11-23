@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from .dynamic_renderer import HEARTBEAT_KEY, DynamicRenderer
 from .evidence import EvidenceBuilder
+from .evidence_contracts import EvidenceRecord, ExtractionMode
 from .identity import IdentityStore
 from .job_contracts import FetchRequest, JobError, JobKind, JobProgress, JobStatus
 from .job_store import Claim, JobOutcome, JobStore
@@ -29,6 +30,7 @@ from .tracing import bind_trace, redact_http_client_logging, trace_event
 
 logger = logging.getLogger(__name__)
 HEALTH_FILE = Path("/tmp/multisearch-worker-ready")
+FETCH_BATCH_SIZE = 3
 
 
 def _remaining(claim: Claim) -> float:
@@ -58,57 +60,62 @@ class Worker:
         result = {"evidence_records": records, "warnings": warnings, "failures": errors}
         if pending:
             result["ocr_pending"] = pending
-        for index in range(completed, len(targets)):
-            url = targets[index]
-            remaining = _remaining(claim)
-            if remaining <= 0:
+        mode = body.extraction_mode
+        if mode == "auto" and not self.dynamic_ready:
+            mode = "static"
+        for start in range(completed, len(targets), FETCH_BATCH_SIZE):
+            if _remaining(claim) <= 0:
                 warnings.append("TIME_BUDGET_EXCEEDED")
                 break
+            end = min(start + FETCH_BATCH_SIZE, len(targets))
             progress = JobProgress(
                 stage="extracting",
-                completed=index + 1,
+                completed=end,
                 total=len(targets),
                 pages_fetched=len(records),
             )
-            # 先预留本页。进程中断后跳过结果未知的尝试，避免重复消耗页数。
+            # Reserve the batch before dispatch. A recovered worker will skip unknown attempts.
             if not await self.store.progress(claim, progress, checkpoint=result):
                 return JobOutcome(JobStatus.CANCELLED, pages_fetched=len(records))
-            remaining = _remaining(claim)
-            if remaining <= 0:
-                warnings.append("TIME_BUDGET_EXCEEDED")
-                break
-            extraction_mode = body.extraction_mode
-            if extraction_mode == "auto" and not self.dynamic_ready:
-                extraction_mode = "static"
-            try:
-                async with asyncio.timeout(min(remaining, 20)):
-                    record = await self.evidence.extract(
-                        url,
-                        timeout_s=min(remaining, 20),
-                        query=(body.queries or {}).get(url),
-                        network_scope=body.network_scope,
-                        domain_allowlist=body.domain_allowlist,
-                        domain_denylist=body.domain_denylist,
-                        extraction_mode=extraction_mode,
-                    )
-            except TimeoutError:
-                errors.append(
-                    {"index": index, "code": "TIME_BUDGET_EXCEEDED", "message": "抓取时限已耗尽"}
-                )
-            except OCRPending as error:
-                pending.append(index)
-                result["ocr_pending"] = pending
-                warnings.append(error.code)
-            except FetchError as error:
-                failure = {"index": index, "code": error.code, "message": str(error)}
-                if error.retry_after_ms is not None:
-                    failure["retry_after_ms"] = error.retry_after_ms
-                errors.append(failure)
-            else:
-                records.append(record.model_dump(mode="json"))
-            progress.pages_fetched = len(records)
-            if not await self.store.progress(claim, progress, checkpoint=result):
-                return JobOutcome(JobStatus.CANCELLED, pages_fetched=len(records))
+            prefix = len(records)
+            extracted = {}
+            async with asyncio.TaskGroup() as group:
+                tasks = [
+                    group.create_task(self._fetch_page(claim, body, index, targets[index], mode))
+                    for index in range(start, end)
+                ]
+                try:
+                    for done in asyncio.as_completed(tasks):
+                        index, page = await done
+                        if isinstance(page, TimeoutError):
+                            errors.append(
+                                {
+                                    "index": index,
+                                    "code": "TIME_BUDGET_EXCEEDED",
+                                    "message": "抓取时限已耗尽",
+                                }
+                            )
+                        elif isinstance(page, OCRPending):
+                            pending.append(index)
+                            pending.sort()
+                            result["ocr_pending"] = pending
+                            warnings.append(page.code)
+                        elif isinstance(page, FetchError):
+                            failure = {"index": index, "code": page.code, "message": str(page)}
+                            if page.retry_after_ms is not None:
+                                failure["retry_after_ms"] = page.retry_after_ms
+                            errors.append(failure)
+                        else:
+                            extracted[index] = page.model_dump(mode="json")
+                            records[prefix:] = [extracted[i] for i in sorted(extracted)]
+                        errors.sort(key=lambda failure: failure["index"])
+                        progress.pages_fetched = len(records)
+                        if not await self.store.progress(claim, progress, checkpoint=result):
+                            return JobOutcome(JobStatus.CANCELLED, pages_fetched=len(records))
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
         result["warnings"] = list(dict.fromkeys(warnings))
         if not records and not pending:
             code = errors[0]["code"] if errors else "TIME_BUDGET_EXCEEDED"
@@ -117,6 +124,27 @@ class Worker:
             )
         status = JobStatus.PARTIAL if warnings or errors or pending else JobStatus.COMPLETED
         return JobOutcome(status, result, pages_fetched=len(records))
+
+    async def _fetch_page(
+        self, claim: Claim, body: FetchRequest, index: int, url: str, mode: ExtractionMode
+    ) -> tuple[int, EvidenceRecord | TimeoutError | OCRPending | FetchError]:
+        limit = min(_remaining(claim), 20)
+        if limit <= 0:
+            return index, TimeoutError()
+        try:
+            async with asyncio.timeout(limit):
+                record = await self.evidence.extract(
+                    url,
+                    timeout_s=limit,
+                    query=body.queries.get(url),
+                    network_scope=body.network_scope,
+                    domain_allowlist=body.domain_allowlist,
+                    domain_denylist=body.domain_denylist,
+                    extraction_mode=mode,
+                )
+        except (TimeoutError, OCRPending, FetchError) as error:
+            return index, error
+        return index, record
 
     async def _watch(self, claim: Claim) -> None:
         while True:

@@ -4,6 +4,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 STATIC_EXTRACTION_VERSION = "1"
+HTML_NORMALIZER_VERSION = "3"
 MAX_ARTICLE_IMAGES = 8
 type ExtractionMode = Literal["static", "dynamic", "auto"]
 type FetchStatus = Literal["blocked", "cancelled", "completed", "failed", "ocr_pending", "timeout"]
@@ -50,6 +51,9 @@ class EvidenceRecord(BaseModel):
     evidence_text: str
     locator: EvidenceLocator
     content_sha256: str
+    raw_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None
+    )
     extraction_method: Literal[
         "static_html", "crawl4ai_static", "plain_text", "pypdf", "browser_dom"
     ]

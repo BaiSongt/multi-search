@@ -71,9 +71,34 @@ docker compose exec -T multisearch-api python -m multisearch.keys revoke --id KE
 
 ## 可选 Wikipedia 候补
 
-设置 `MULTISEARCH_ENABLE_WIKIPEDIA=true` 并重新创建 API 和 Worker。仅在公网网页文字检索的常规来源都未返回合适候选时，平台才会将查询发送到 Wikimedia Action API。快速模式同时受 `quick_fallback` 控制。查询语言的 `en` 和 `zh` 前缀分别选择英文和中文项目，未指定语言时选择英文。显式地区、日期和精确学术标识符请求会跳过该来源，域名白名单和黑名单继续生效。
+Compose 默认启用 Wikipedia，可设置 `MULTISEARCH_ENABLE_WIKIPEDIA=false` 后重新创建 API 和 Worker。公网网页文字检索显式指定单个 Wikipedia 站点时，优先调用 Wikimedia Action API，获得匹配条目后即返回。其他公网文字检索使用 Wikipedia 作为常规来源无结果时的候补，快速模式下受 `quick_fallback` 控制。查询语言的 `en` 和 `zh` 前缀分别选择英文和中文项目。未指定语言时，`site:zh.wikipedia.org` 选择中文项目，其他查询默认英文。地区筛选、日期筛选和精确学术标识符请求会跳过该来源，域名白名单和黑名单继续生效。
 
-每个进程默认每分钟最多发起 10 次 Wikipedia 请求，并串行访问上游。管理台可暂停此来源或调整部署额度，仍需遵守 Wikimedia 的共享出口限制。响应最多含 5 个条目的标题、Wikipedia 页面链接及来源标识。需要正文证据时，现有抓取与权限检查照常执行。 [Wikimedia API 访问政策](https://www.mediawiki.org/wiki/Wikimedia_APIs/Access_policy) · [Action API 搜索](https://www.mediawiki.org/wiki/API:Search)
+每个进程默认每分钟最多发起 10 次 Wikipedia 请求，并串行访问上游。每次请求最多返回 3 条，包含标题、纯文本匹配片段、Wikipedia 条目链接及来源标识。需要正文证据时，现有抓取与权限检查照常执行。 [Wikimedia API 访问政策](https://www.mediawiki.org/wiki/Wikimedia_APIs/Access_policy) · [Action API 搜索](https://www.mediawiki.org/wiki/API:Search)
+
+## 权威公开数据来源
+
+Compose 默认通过 `MULTISEARCH_OFFICIAL_SOURCES` 启用以下目录。可指定来源子集，或赋空值关闭整组。新增来源时，在服务端注册固定 API 地址、主题和返回字段，再将来源 ID 加入部署配置。
+
+- **Federal Register** 提供联邦监管、适航指令和产业政策公告索引。 [Federal Register API](https://www.federalregister.gov/reader-aids/developer-resources/rest-api)
+- **英国国家数据目录** 提供交通、能源、环境、公共卫生和经济数据。 [Data.gov.uk API](https://guidance.data.gov.uk/get_data/api_documentation/)
+- **NASA Earthdata** 提供遥感、气候、大气和卫星观测数据集元数据。 [NASA CMR Search API](https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html)
+- **加拿大政府开放数据** 提供航空运营、交通、环境和公共行政数据集。 [加拿大开放政府 API](https://open.canada.ca/en/access-our-application-programming-interface-api)
+- **澳大利亚政府开放数据** 补充机场通行、交通、环境和地理空间数据集。`site:data.gov.au airport` 返回目录链接、摘要及目录声明的授权。目录建档或更新时间留在源站，带发布日期范围的查询跳过该来源。每次最多三条，默认每分钟最多十次。 [澳大利亚政府数据目录 API](https://data.gov.au/data/api/3/action/help_show?name=package_search)
+- **英国航空事故调查局（AAIB）** 提供调查报告、调查公报和安全研究。`site:gov.uk AAIB runway excursion` 优先查 AAIB 的官方报告目录。目录成功返回可用结果后结束该站点查询，每次最多 3 条。摘要可显示事故发生日期。报告缺少首次发布时间时，该日期字段留空。带发布日期范围的查询跳过此目录。 [AAIB 报告目录](https://www.gov.uk/aaib-reports) · [GOV.UK Search API](https://docs.publishing.service.gov.uk/repos/search-api/using-the-search-api.html)
+- **法国政府开放数据** 覆盖运输、地理、环境等行业。`site:data.gouv.fr aéroport` 搜索政府部门和地方公共机构发布的开放目录，回传发布机构、目录链接和摘要。每次最多取三条候选，带发布日期范围的查询跳过该目录。 [法国开放数据目录 API](https://guides.data.gouv.fr/api-de-data.gouv.fr/reference/datasets)
+- **USGS Publications Warehouse** 提供地质灾害、地下水和地球科学的政府技术出版物。 [USGS Publications Warehouse](https://pubs.usgs.gov/documentation/about)
+- **Europe PMC** 补充职业健康、航空噪声和医学的开放获取论文，返回公开摘要和全文页面。 [Europe PMC REST API](https://dev.europepmc.org/RestfulWebService)
+- **美国运输统计局（BTS）** 补充商业航班起飞量、航空客货运等官方数据集，返回目录描述和原始数据集链接。目录检索不使用更新时间替代数据发布日期。 [BTS Data Inventory](https://data.bts.gov/)
+- **欧盟开放数据门户** 通过 `eu-open-data` 补充 Eurostat、欧洲环境署和 CINEA 的公开数据目录，覆盖航空运输、能源、环境监测和基础设施项目。结果保留官方目录链接、发布机构和声明的发布日期。各分发版本声明同一许可证时，结果会带上该许可证字段。数据的适用范围和使用条款可从目录进一步核对。 [欧盟门户检索 API](https://data.europa.eu/api/hub/search/)
+
+- **World Bank Documents & Reports** 提供交通、能源、经济和公共政策领域的公开报告。项目可指定 `site:documents.worldbank.org` 检索。[世界银行检索 API](https://documents.worldbank.org/en/publication/documents-reports/api)
+- **ClinicalTrials.gov** 提供试验登记号、登记状态、首次公开日期和登记摘要。登记状态和摘要描述的是登记记录，采用研究结论时需要查阅试验结果或配套论文。[美国国家医学图书馆 API 指南](https://www.nlm.nih.gov/pubs/techbull/ja25/ja25_clinical_trials_screen-scraping.html)
+- **NOAA NCEI** 补充机场气象、历史风速和气候观测数据集。`site:ncei.noaa.gov wind gust` 可直接检索目录，返回原始元数据页和目录摘要。带发布日期筛选的查询跳过该来源，观测起止日期保留在元数据页。 [NOAA NCEI Search Service](https://www.ncei.noaa.gov/access/search/documentation/search-service/)
+- **美国能源部 OSTI.GOV** 补充航空燃料和电网储能等领域的技术报告与论文。`site:osti.gov "sustainable aviation fuel"` 返回官方条目、目录摘要、作者、发布日期及可用的 DOI。每次只请求一页，最多三条，默认每分钟最多十次。 [OSTI.GOV API 文档](https://www.osti.gov/api/v1/docs)
+
+- **欧盟 CORDIS 科研项目** 可用 `site:cordis.europa.eu "sustainable aviation"` 按项目标题查找，或用 `CORDIS 101096436` 按资助协议编号查找。结果包含官方项目页、项目编号和目录摘要。目录所载的起止日期可能滞后于项目页，最新周期可在项目原页核对。发布日期保持为空，带发布日期区间的查询跳过该来源。每次最多三条，默认每分钟最多十次。 [CORDIS 公共 SPARQL 接口](https://cordis.europa.eu/datalab/sparql-endpoint) · [EURIO 查询指南](https://cordis.europa.eu/about/sparql)
+
+公网文字检索按主题或限定站点，最多补查一个目录并保留三条候选。域名白名单精确限定一个官方目录时，优先查该目录，未达到目录候选上限时才调用通用网页来源。补查通常限时 2.5 秒，欧盟开放数据门户、CORDIS、世界银行、ClinicalTrials.gov 和 NOAA NCEI 限时 4 秒，Europe PMC 限时 6 秒，并受整个搜索的时间预算约束。补查对目录只发一次请求。部署示例将通用来源限制为每个进程、每个来源每分钟 30 次，Wikipedia 和各权威目录每分钟 10 次。收到上游 HTTP 429 时暂停向该来源发请求，按 `Retry-After` 退避，缺省时暂停 10 秒（Wikipedia 适配器单独处理）。默认快速搜索返回上限为 6 条，标准搜索为 10 条。管理台已发布的策略可以覆盖这些默认值。
 
 ## 部署策略基线
 
@@ -83,7 +108,9 @@ Compose 将 `config.example.yaml` 以只读方式挂载到 API 和 Worker。自�
 
 ## 可选专业来源
 
-可在 `.env` 中设置 `MULTISEARCH_VERTICAL_SOURCES=crossref,arxiv` 选择来源，或设置 `MULTISEARCH_ENABLE_ACADEMIC=true` 启用 OpenAlex、Crossref 和 arXiv。学术请求使用 `source_types=["academic"]`。OpenAlex 匿名查询使用上游较低的额度，可配置 `MULTISEARCH_OPENALEX_KEY`。如需使用 Crossref 的礼貌访问池，可提供 `MULTISEARCH_CROSSREF_EMAIL`。
+可在 `.env` 中设置 `MULTISEARCH_VERTICAL_SOURCES=crossref,arxiv` 选择来源，或设置 `MULTISEARCH_ENABLE_ACADEMIC=true` 启用 OpenAlex、Crossref、DataCite 和 arXiv。学术请求使用 `source_types=["academic"]`。OpenAlex 匿名查询使用上游较低的额度，可配置 `MULTISEARCH_OPENALEX_KEY`。如需使用 Crossref 的礼貌访问池，可提供 `MULTISEARCH_CROSSREF_EMAIL`。
+
+Compose 默认启用 DataCite。可用 `MULTISEARCH_ENABLE_DATACITE=false` 关闭这项默认设置。学术请求明确提到 DataCite 或数据集时优先查询该目录，其他学术搜索可在常用通道无结果后使用。定向查询最多占用 3 秒，受整次检索预算约束。每次向 DataCite 请求最多 3 条，默认每分钟最多 10 次。数据集检索使用资源类型过滤器。日期范围先按出版年份缩小候选，再依据明确的发行日期筛选。 [DataCite 公共 API](https://support.datacite.org/docs/rest-api) · [查询与过滤](https://support.datacite.org/docs/api-queries)
 
 学术查询可以使用完整 DOI、DOI 链接或 `doi:` 前缀，也可以使用 arXiv ID、arXiv 摘要／PDF 链接或 `arXiv:` 前缀。带 `vN` 的 arXiv ID 要求上游返回同一版本。日期与域名筛选仍适用。 [Crossref 接口](https://api.crossref.org/swagger-ui/index.html) · [OpenAlex 接口](https://help.openalex.org/api/get-single-entities/) · [arXiv API 手册](https://info.arxiv.org/help/api/user-manual.html)
 
@@ -129,12 +156,14 @@ docker compose -f compose.yml -f compose.workers.yml --profile research ps
 
 动态模式用于公开 HTML 由脚本生成正文的场景。Fetch 默认静态提取。调用方可传 `extraction_mode=auto`，只在页面已成功抓取、静态正文为空且存在内嵌脚本或已授权资源时，交给就绪的动态 Worker 渲染同一快照。部署方先确认站点允许抓取和保留摘录，再在 `.env` 将 `MULTISEARCH_DYNAMIC_FETCH_DOMAINS` 设为逗号分隔的精确域名。输入地址、重定向各跳与最终文档都须通过 HTTPS 域名授权。更新所有 Worker 后运行密钥初始化命令生成专用渲染凭据，再启用覆盖文件。
 
+HTML 提取版本 3 在来源段落与查询匹配程度相同时优先选择较完整的正文段落。被选段仍使用同一规范化文本的字符偏移和摘要限制。首次发表日期与引用内容继续由源站实际字段和正文提供。
+
 ```sh
 python scripts/init-secrets.py
 docker compose -f compose.yml -f compose.dynamic.yml --profile dynamic up -d --build --wait
 ```
 
-动态渲染向断网 Chromium 传递获准 HTML，执行内嵌脚本。仅回放内嵌脚本的页面在 DOM 加载后等待 0.2 秒。如果已有可定位的正文容器且可见文本为空，再观察至多 0.4 秒。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权资源 URL，查询字符串按原样匹配。同源资源沿用页面域名授权。跨源资源的精确主机名须额外加入 `MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS`，该配置只授予清单内的资源访问权限。
+动态渲染向断网 Chromium 传递获准 HTML，执行内嵌脚本。仅回放内嵌脚本的页面在 DOM 加载后等待 0.2 秒。资源回放则等到网络空闲。若主要内容容器仍为空或以 `aria-busy` 标记为正在更新，再观察至多 0.4 秒。页面需要外部 JavaScript 或 JSON 时，在 `.env` 设置可选的资源清单。以重定向后的规范 HTTPS 页面 URL 为键，逐项授权资源 URL，查询字符串按原样匹配。同源资源沿用页面域名授权。跨源资源的精确主机名须额外加入 `MULTISEARCH_DYNAMIC_FETCH_RESOURCE_DOMAINS`，该配置只授予清单内的资源访问权限。
 
 ```dotenv
 MULTISEARCH_DYNAMIC_FETCH_DOMAINS=docs.example.org
@@ -148,7 +177,7 @@ Worker 预取跨源资源时以页面源作为 `Origin`。跨源 JSON 的源站�
 
 动态镜像面向 Linux x86-64，构建使用 Docker BuildKit。宿主 Linux 需允许非特权用户命名空间，渲染器在启动时确认 Chromium 的命名空间和 Seccomp-BPF 沙箱。渲染器健康检查失败时，动态能力保持不可用。静态 L3 与动态 `fetch` 分别通过各自入口使用。 [抓取接口](api-contracts.md#证据与任务) · [CSP 规范](https://www.w3.org/TR/CSP3/)
 
-PDF 需要匹配 MIME 和文件签名，输入上限为 1 MiB。每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。当前镜像提取 PDF 文本层，将需要 OCR 的图像型 PDF 标记为待处理。部署方可通过 OCR 契约接入获准的引擎。
+PDF 需要匹配 MIME 和文件签名，下载上限为 8 MiB。HTML 和纯文本的下载上限为 1 MiB。每个 MultiSearch 进程同时处理至多 4 条从下载到提取的证据请求，排队计入请求时限。PDF 同时运行至多 2 个解析子进程，每份检查前 20 页，单页规范化文本至多 16,000 字符，总计至多 64,000 字符。解析进程的墙钟时限为 3 秒，Linux 容器还限制 CPU 时间和地址空间。解析器预加载单字节字符映射，支持使用该字体映射的 PDF 文本层。图像型 PDF 会标记为待 OCR，部署方可通过 OCR 契约接入获准的引擎。
 
 ## 深度研究与指标
 

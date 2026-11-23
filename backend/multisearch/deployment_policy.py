@@ -9,7 +9,52 @@ from .policy import ProviderPolicy
 from .routing_policy import DEFAULT_ROUTING, RoutingRules, RoutingVersion
 
 _MAX_POLICY_BYTES = 32 * 1024
-ProviderName = Literal["ddgs", "searxng", "openalex", "crossref", "arxiv", "github", "wikipedia"]
+ProviderName = Literal[
+    "ddgs",
+    "searxng",
+    "openalex",
+    "crossref",
+    "datacite",
+    "arxiv",
+    "github",
+    "wikipedia",
+    "federal-register",
+    "uk-aaib",
+    "uk-open-data",
+    "nasa-earthdata",
+    "canada-open-data",
+    "australia-open-data",
+    "france-open-data",
+    "usgs-publications",
+    "europe-pmc",
+    "us-bts-open-data",
+    "eu-open-data",
+    "world-bank-reports",
+    "clinicaltrials-registry",
+    "noaa-climate-data",
+    "eu-cordis-projects",
+    "doe-osti-research",
+]
+OFFICIAL_SOURCES = frozenset(
+    {
+        "federal-register",
+        "uk-aaib",
+        "uk-open-data",
+        "nasa-earthdata",
+        "canada-open-data",
+        "australia-open-data",
+        "france-open-data",
+        "usgs-publications",
+        "europe-pmc",
+        "us-bts-open-data",
+        "eu-open-data",
+        "world-bank-reports",
+        "clinicaltrials-registry",
+        "noaa-climate-data",
+        "eu-cordis-projects",
+        "doe-osti-research",
+    }
+)
 
 
 class _PolicyLoader(yaml.SafeLoader):
@@ -43,7 +88,7 @@ class DeploymentPolicy(BaseModel):
     def provider(self, name: str) -> ProviderPolicy:
         values = self.providers.get(name)
         overrides = values.model_dump(exclude_unset=True) if values else {}
-        if name == "wikipedia":
+        if name in {"wikipedia", "datacite"} or name in OFFICIAL_SOURCES:
             overrides.setdefault("requests_per_minute", 10)
         return ProviderPolicy(**overrides)
 

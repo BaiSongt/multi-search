@@ -85,6 +85,8 @@ async def test_extraction_has_reproducible_hash_offsets_and_original_excerpt():
     )
     normalized = "技术说明\n背景段落。\n结果\n原始 证据 内容。"
     assert evidence.content_sha256 == sha256(normalized.encode()).hexdigest()
+    assert evidence.raw_sha256 == sha256(fetcher.page.body).hexdigest()
+    assert evidence.raw_sha256 != evidence.content_sha256
     locator = evidence.locator
     assert normalized[locator.text_offset_start : locator.text_offset_end] == evidence.evidence_text
     assert evidence.evidence_text == "原始 证据 内容。"
@@ -99,6 +101,54 @@ async def test_extraction_has_reproducible_hash_offsets_and_original_excerpt():
     assert fetcher.options["domain_allowlist"] == ["origin.example"]
     repeated = await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1, query="证据")
     assert repeated.evidence_id == evidence.evidence_id
+
+
+@pytest.mark.parametrize("query", [None, "runway excursion"])
+async def test_html_report_prefers_substantive_body_over_short_teaser_with_equal_relevance(query):
+    teaser = "Runway excursion after landing."
+    paragraph = (
+        "The investigation examined the runway excursion using the recorded flight data and "
+        "the inspection of the landing gear. The report documents the observed conditions "
+        "and the sequence of events before reaching its findings."
+    )
+    fetcher = FakeFetcher(
+        f"<main><h1>Investigation report</h1><p>{teaser}</p><dl><dt>Aircraft type</dt>"
+        f"<dd>Example aircraft</dd></dl><p>{paragraph}</p></main>"
+    )
+    evidence = await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1, query=query)
+    normalized = f"Investigation report\n{teaser}\nAircraft type\nExample aircraft\n{paragraph}"
+    assert evidence.evidence_text == paragraph
+    assert normalized[evidence.locator.text_offset_start:evidence.locator.text_offset_end] == paragraph
+
+
+async def test_evidence_slots_cover_fetch_and_extraction_with_one_deadline(monkeypatch):
+    fetcher = FakeFetcher("<main><p>Report finding.</p></main>")
+    fetcher.fetch = AsyncMock(wraps=fetcher.fetch)
+    builder = EvidenceBuilder(fetcher)
+    extract = builder._extract_page
+    remaining = 4
+    filled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def wait_during_extraction(*args, **kwargs):
+        nonlocal remaining
+        remaining -= 1
+        if remaining == 0:
+            filled.set()
+        await release.wait()
+        return await extract(*args, **kwargs)
+
+    monkeypatch.setattr(builder, "_extract_page", wait_during_extraction)
+    active = [asyncio.create_task(builder.extract(ORIGIN, timeout_s=2)) for _ in range(4)]
+    try:
+        await asyncio.wait_for(filled.wait(), timeout=1)
+        with pytest.raises(FetchError) as error:
+            await builder.extract(ORIGIN, timeout_s=0.05)
+        assert error.value.code == "TIME_BUDGET_EXCEEDED"
+        assert fetcher.fetch.await_count == 4
+    finally:
+        release.set()
+        await asyncio.gather(*active)
 
 
 @pytest.mark.parametrize("directive", ["noindex", "nosnippet", "max-snippet: 0"])
@@ -213,6 +263,50 @@ async def test_auto_prefers_available_static_excerpt():
     assert result.evidence_text == "Static excerpt"
     assert result.extraction_method == "static_html"
     renderer.render.assert_not_awaited()
+
+
+async def test_html_prefers_visible_main_landmark_and_ignores_auxiliary_roles():
+    fetcher = FakeFetcher(
+        "<div><!-- CMS template note --></div><article>Station portal card.</article>"
+        "<div hidden><main>Template.</main></div>"
+        '<div role="main"><div role="banner">Station dashboard</div>'
+        "<p>Measured wind at the station.</p><progress>Loading wind readings</progress>"
+        '<div role="complementary" aria-busy="true">Wind readings pending.</div></div>'
+    )
+    result = await EvidenceBuilder(fetcher).extract(ORIGIN, timeout_s=1, query="wind readings")
+    assert result.evidence_text == "Measured wind at the station."
+    assert result.locator.text_offset_start == 0
+    assert result.extraction_version == "3"
+
+
+@pytest.mark.parametrize("ready", [True, False])
+async def test_auto_does_not_accept_loading_main_or_unrelated_page_text(ready):
+    shell = (
+        '<div>Station portal.</div><main aria-busy="true">'
+        '<p role="status">Loading advisory.</p></main><script>renderAdvisory()</script>'
+    )
+    rendered = (
+        '<main aria-busy="false"><p>Runway crosswind advisory.</p></main>' if ready else shell
+    )
+    renderer = Mock(render=AsyncMock(return_value=RenderedHTML(rendered, "renderer.1")))
+    builder = EvidenceBuilder(
+        FakeFetcher(shell),
+        renderer=renderer,
+        dynamic_hosts=frozenset({"origin.example", "source.example"}),
+    )
+    with pytest.raises(FetchError) as static:
+        await builder.extract(ORIGIN, timeout_s=1)
+    assert static.value.code == "FETCH_NO_EXCERPT"
+    renderer.render.assert_not_awaited()
+    if ready:
+        result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="auto")
+        assert result.extraction_method == "browser_dom"
+        assert result.evidence_text == "Runway crosswind advisory."
+    else:
+        with pytest.raises(FetchError) as pending:
+            await builder.extract(ORIGIN, timeout_s=1, extraction_mode="auto")
+        assert pending.value.code == "FETCH_NO_EXCERPT"
+    renderer.render.assert_awaited_once()
 
 
 async def test_auto_renders_shell_with_an_approved_external_script():
@@ -367,7 +461,7 @@ async def test_dynamic_evidence_uses_rendered_offsets_and_preserves_original_pol
     assert result.locator.kind == "rendered_html_text" and result.locator.section == "Generated"
     assert (
         result.extraction_method == "browser_dom"
-        and result.extraction_version == "renderer.1+normalizer.1"
+        and result.extraction_version == "renderer.1+normalizer.3"
     )
     assert result.evidence_text == "Visible" and result.title == "Original title"
     assert [image.url for image in result.images] == [
@@ -446,7 +540,7 @@ async def test_dynamic_bundle_uses_final_page_and_tracks_fetched_resource_finger
     )
     result = await builder.extract(ORIGIN, timeout_s=1, extraction_mode=mode)
     assert result.evidence_text == "Genera"
-    assert result.extraction_version == "renderer.2+normalizer.1"
+    assert result.extraction_version == "renderer.2+normalizer.3"
     legacy_inputs = [
         (asset.url, asset.kind, asset.content_type, sha256(asset.body.encode()).hexdigest())
         for asset in [json_asset, script_asset]
@@ -500,7 +594,7 @@ async def test_dynamic_cross_bundle_preserves_embedder_policy_and_fingerprints_c
     first = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
     assert renderer.render_bundle.await_args.kwargs["source_coep"] == "require-corp"
     assert fetcher.fetch_resource.await_args.kwargs["authorized_resource_hosts"] == resource_hosts
-    assert first.extraction_version == "renderer.3+normalizer.1"
+    assert first.extraction_version == "renderer.3+normalizer.3"
     fetcher.fetch_resource.return_value = replace(asset, allow_origin="https://source.example")
     second = await builder.extract(ORIGIN, timeout_s=1, extraction_mode="dynamic")
     assert first.content_sha256 == second.content_sha256
@@ -603,6 +697,30 @@ async def test_isolated_crawl_parser_only_ranks_substrings_of_original_text():
         == result.evidence_text
     )
     assert result.content_sha256 == sha256(normalized.encode()).hexdigest()
+
+
+async def test_report_extracts_abstract_before_download_links_even_with_parser_hint():
+    download = "Document: Report (15.1 MB pdf), HTML, XML"
+    abstract = "This report measured the distribution of chloride at selected monitoring sites."
+    methods = "The monitoring network used field observations and laboratory samples."
+    fetcher = FakeFetcher(
+        f"<main><h1>Groundwater report</h1><h2>Links</h2><p>{download}</p>"
+        f"<h2>Abstract</h2><p>{abstract}</p><h2>Methods</h2><p>{methods}</p></main>"
+    )
+
+    def service(_request):
+        return httpx.Response(200, json={"version": "0.9.5", "blocks": [download]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(service)) as client:
+        builder = EvidenceBuilder(fetcher, CrawlParser(client, "http://crawl4ai:11235", "fixture"))
+        result = await builder.extract(ORIGIN, timeout_s=1)
+        queried = await builder.extract(ORIGIN, timeout_s=1, query="laboratory samples")
+
+    normalized = f"Groundwater report\nLinks\n{download}\nAbstract\n{abstract}\nMethods\n{methods}"
+    assert result.evidence_text == abstract
+    assert result.locator.section == "Abstract"
+    assert normalized[result.locator.text_offset_start : result.locator.text_offset_end] == abstract
+    assert queried.evidence_text == methods
 
 
 async def test_crawl_parser_does_not_follow_redirect_and_falls_back():

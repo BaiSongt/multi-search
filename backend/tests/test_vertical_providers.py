@@ -9,6 +9,7 @@ from multisearch.providers import ProviderFailure
 from multisearch.vertical_providers import (
     ArxivProvider,
     CrossrefProvider,
+    DataCiteProvider,
     GitHubProvider,
     OpenAlexProvider,
     academic_identifier,
@@ -52,7 +53,7 @@ def test_academic_identifier_requires_the_entire_query(query, expected):
     assert actual == expected
 
 
-@pytest.mark.parametrize("adapter", [CrossrefProvider, OpenAlexProvider])
+@pytest.mark.parametrize("adapter", [CrossrefProvider, OpenAlexProvider, DataCiteProvider])
 async def test_exact_doi_uses_singleton_escapes_reserved_characters_and_filters_dates(adapter):
     expected_doi = "10.1234/lunar?x#y"
 
@@ -71,6 +72,22 @@ async def test_exact_doi_uses_singleton_escapes_reserved_characters_and_filters_
                         "title": ["Lunar orbits"],
                         "published": {"date-parts": [[2025, 12, 10]]},
                     },
+                },
+            )
+        if adapter is DataCiteProvider:
+            assert request.url.host == "api.datacite.org" and path.startswith(b"/dois/10.")
+            assert not request.url.params
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "attributes": {
+                            "state": "findable",
+                            "doi": expected_doi,
+                            "titles": [{"title": "Lunar orbits"}],
+                            "dates": [{"dateType": "Issued", "date": "2025-12-10"}],
+                        }
+                    }
                 },
             )
         assert request.url.host == "api.openalex.org" and path.startswith(b"/works/doi:10.")
@@ -99,7 +116,7 @@ async def test_exact_doi_uses_singleton_escapes_reserved_characters_and_filters_
             Source.ACADEMIC,
             Modality.TEXT,
             10,
-            1,
+            2,
         )
     assert response.results[0].doi == expected_doi and not outside.results
 

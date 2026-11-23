@@ -77,7 +77,7 @@ class JobApplication:
             raise ApiError(503, "WORKER_UNAVAILABLE", "后台 Worker 暂不可用", retryable=True)
         excludes = {"request_id", "idempotency_key"}
         if isinstance(body, FetchRequest):
-            # 省略默认值，保持已有任务的幂等指纹。
+            # 省略默认值，保持已有抓取任务的幂等指纹。
             if body.extraction_mode == "static":
                 excludes.add("extraction_mode")
             if not body.queries:

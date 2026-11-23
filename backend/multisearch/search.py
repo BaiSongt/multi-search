@@ -237,7 +237,9 @@ class SearchService:
             if not self.provider_policies[provider.provider_id].enabled:
                 continue
             if not allow_terminal and getattr(provider, "fallback_only", False):
-                continue
+                targeted = getattr(provider, "explicitly_requested", None)
+                if request is None or not targeted or not targeted(request):
+                    continue
             supports_request = getattr(provider, "supports_request", None)
             if request is None or supports_request is None or supports_request(request):
                 yield provider
@@ -538,7 +540,10 @@ class SearchService:
         result = ProviderResult([])
         status: RunStatus = "timeout"
         circuit = state.circuits[pair]
-        max_attempts = 1 if getattr(provider, "fallback_only", False) else 2
+        single_attempt = getattr(provider, "fallback_only", False) or getattr(
+            provider, "official_search", False
+        )
+        max_attempts = 1 if single_attempt else 2
         try:
             async with asyncio.timeout(deadline - monotonic()):
                 for index in range(max_attempts):
@@ -574,6 +579,8 @@ class SearchService:
                             candidate = await provider.search(request, *pair, limit, remaining)
                         except ProviderFailure as error:
                             status, retry_after = error.status, error.retry_after
+                            if status == "rate_limited" and not retry_after:
+                                retry_after = 10.0
                             result.reason_codes = tuple(
                                 sorted(set(result.reason_codes + error.reason_codes))
                             )
@@ -600,7 +607,7 @@ class SearchService:
                             upstream_seconds += monotonic() - now
                         if status in _SUCCESS:
                             return result, status, attempts, upstream_seconds
-                    if index + 1 >= max_attempts or status not in {"timeout", "rate_limited"}:
+                    if index + 1 >= max_attempts or status != "timeout":
                         break
                     delay = max(uniform(0.1, 0.25), retry_after or 0)
                     if delay + 0.15 >= deadline - monotonic():
@@ -720,8 +727,95 @@ class SearchService:
                 preferred.index(p.provider_id) if p.provider_id in preferred else len(preferred),
             )
         )
+        official = [
+            provider for provider in eligible if getattr(provider, "official_search", False)
+        ]
+        general = [provider for provider in eligible if provider not in official]
+        for provider in general:
+            targeted = getattr(provider, "explicitly_requested", None)
+            if not targeted or not targeted(request):
+                continue
+            now = monotonic()
+            fallback_reserve = min(1.0, max(0.0, (deadline - now) / 2))
+            targeted_run = await self._run_provider(
+                provider, request, pair, limit, min(now + 3, deadline - fallback_reserve)
+            )
+            if targeted_run[0].results:
+                return [targeted_run]
+            remaining = await self._run_general_routes(
+                request,
+                pair,
+                mode,
+                limit,
+                deadline,
+                rules,
+                permitted_rights,
+                [candidate for candidate in general if candidate is not provider],
+            )
+            return [targeted_run, *remaining]
+        available_catalogues = [
+            provider for provider in official if self._dispatchable(provider, pair, monotonic())
+        ]
+        targeted_catalogue = next(
+            (
+                provider
+                for provider in available_catalogues
+                if getattr(provider, "explicitly_requested", None)
+                and provider.explicitly_requested(request)
+            ),
+            None,
+        )
+        supplement = targeted_catalogue or next(iter(available_catalogues), None)
+        if supplement is None:
+            return await self._run_general_routes(
+                request, pair, mode, limit, deadline, rules, permitted_rights, general
+            )
+        supplement_timeout = getattr(supplement, "supplement_timeout_s", 2.5)
+        now = monotonic()
+        supplement_deadline = min(deadline, now + supplement_timeout)
+        catalogue_limit = min(3, limit)
+        catalogue_domain = getattr(supplement, "result_domain", "")
+        if (
+            general
+            and pair == (Source.WEB, Modality.TEXT)
+            and (
+                targeted_catalogue
+                or request.domain_allowlist in ([catalogue_domain], [catalogue_domain.removeprefix("www.")])
+            )
+        ):
+            # 指定官方目录时先查目录，并给通用回退保留至多一秒。
+            fallback_reserve = min(1.0, max(0.0, (deadline - now) / 2))
+            official_deadline = min(supplement_deadline, deadline - fallback_reserve)
+            official_run = await self._run_provider(
+                supplement, request, pair, catalogue_limit, official_deadline
+            )
+            result, run = official_run
+            if (
+                run.status == "success"
+                and result.results
+                and (
+                    targeted_catalogue
+                    or len({row.canonical_url for row in result.results}) >= catalogue_limit
+                )
+            ):
+                return [official_run]
+            ordinary_runs = await self._run_general_routes(
+                request, pair, mode, limit, deadline, rules, permitted_rights, general
+            )
+            return [official_run, *ordinary_runs]
+        ordinary_runs, official_run = await asyncio.gather(
+            self._run_general_routes(
+                request, pair, mode, limit, deadline, rules, permitted_rights, general
+            ),
+            self._run_provider(supplement, request, pair, catalogue_limit, supplement_deadline),
+        )
+        return [official_run, *ordinary_runs]
+
+    async def _run_general_routes(
+        self, request, pair, mode, limit, deadline, rules, permitted_rights, providers
+    ) -> list[tuple[ProviderResult, ProviderRun]]:
         primary, terminal = [], []
-        for provider in eligible:
+        for provider in providers:
             group = terminal if getattr(provider, "fallback_only", False) else primary
             group.append(provider)
         now = monotonic()

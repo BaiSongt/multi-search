@@ -23,6 +23,7 @@ from .safe_fetch import FetchError
 
 PDF_EXTRACTION_VERSION = f"{version('pypdf')}+normalizer.{STATIC_EXTRACTION_VERSION}"
 _CHILD = Path(__file__).with_name("pdf_child.py")
+_PIPE_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,8 +54,10 @@ def _timeout() -> FetchError:
 
 async def _write_input(writer: asyncio.StreamWriter, body: bytes) -> None:
     try:
-        writer.write(body)
-        await writer.drain()
+        data = memoryview(body)
+        for offset in range(0, len(data), _PIPE_CHUNK_BYTES):
+            writer.write(data[offset : offset + _PIPE_CHUNK_BYTES])
+            await writer.drain()
     except (BrokenPipeError, ConnectionResetError):
         pass
     finally:
@@ -131,23 +134,24 @@ class PdfParser:
         # 仅保留 Windows 创建 Python 进程所需的系统目录变量。
         env = {key: os.environ[key] for key in ("SYSTEMROOT",) if key in os.environ}
         try:
-            async with asyncio.timeout(min(timeout_s, PDF_WALL_SECONDS)), self._slots:
-                process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-I",
-                    "-B",
-                    str(_CHILD),
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                    env=env,
-                )
-                try:
-                    output = await _collect(process, body)
-                finally:
-                    await _stop(process)
-                if process.returncode != 0:
-                    raise _resource_limit()
+            async with asyncio.timeout(timeout_s), self._slots:
+                async with asyncio.timeout(PDF_WALL_SECONDS):
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        str(_CHILD),
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        env=env,
+                    )
+                    try:
+                        output = await _collect(process, body)
+                    finally:
+                        await _stop(process)
+                    if process.returncode != 0:
+                        raise _resource_limit()
         except TimeoutError:
             raise _timeout() from None
         except OSError:

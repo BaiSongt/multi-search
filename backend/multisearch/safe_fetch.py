@@ -366,12 +366,13 @@ def _redirect(target: _Target, location: str | None) -> _Target:
 
 
 class SafeFetcher:
-    def __init__(self, *, max_parallel: int = 8, max_body_bytes: int = _MAX_BODY_BYTES):
-        if max_parallel < 1 or max_body_bytes < 1:
+    def __init__(self, *, max_parallel: int = 8, max_body_bytes: int | None = None):
+        if max_parallel < 1 or (max_body_bytes is not None and max_body_bytes < 1):
             raise ValueError("抓取并发与响应上限需要为正数")
         self._slots = asyncio.Semaphore(max_parallel)
         self._host_locks = tuple(asyncio.Lock() for _ in range(64))
-        self._max_body_bytes = max_body_bytes
+        self._max_body_bytes = _MAX_BODY_BYTES if max_body_bytes is None else max_body_bytes
+        self._max_pdf_bytes = PDF_MAX_BYTES if max_body_bytes is None else min(max_body_bytes, PDF_MAX_BYTES)
         self._robots_cache: OrderedDict[str, _RobotsPolicy] = OrderedDict()
         self._rate_limits: OrderedDict[str, float] = OrderedDict()
 
@@ -394,6 +395,7 @@ class SafeFetcher:
             authorized_hosts=authorized_hosts,
             content_types=_RENDER_TYPES if authorized_hosts is not None else _PAGE_TYPES,
             max_body_bytes=self._max_body_bytes,
+            max_pdf_bytes=self._max_pdf_bytes if authorized_hosts is None else None,
         )
 
     async def fetch_resource(
@@ -461,6 +463,7 @@ class SafeFetcher:
         authorized_hosts: frozenset[str] | None,
         content_types: frozenset[str],
         max_body_bytes: int,
+        max_pdf_bytes: int | None = None,
         resource_request: bool = False,
         request_origin: str | None = None,
     ) -> FetchedPage:
@@ -504,6 +507,7 @@ class SafeFetcher:
                             content_types,
                             max_body_bytes,
                             deadline=deadline,
+                            max_pdf_bytes=max_pdf_bytes,
                             resource_request=resource_request,
                             request_origin=request_origin,
                         )
@@ -577,6 +581,7 @@ class SafeFetcher:
         max_bytes: int,
         *,
         deadline: float,
+        max_pdf_bytes: int | None = None,
         resource_request: bool = False,
         request_origin: str | None = None,
     ) -> _Response:
@@ -660,8 +665,8 @@ class SafeFetcher:
             if kind not in content_types:
                 raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "来源响应类型不受支持")
             is_pdf = kind == "application/pdf"
-            if is_pdf:
-                max_bytes = min(max_bytes, PDF_MAX_BYTES)
+            if is_pdf and max_pdf_bytes is not None:
+                max_bytes = max_pdf_bytes
             mime = Message()
             mime["Content-Type"] = mime_header
             directives = response.headers.get_list("x-robots-tag")
@@ -680,10 +685,15 @@ class SafeFetcher:
             ):
                 raise FetchError(413, "FETCH_BODY_TOO_LARGE", "来源响应超过抓取上限")
             body = bytearray()
+            check_pdf_prefix = is_pdf
             async for chunk in response.aiter_bytes():
                 if len(body) + len(chunk) > max_bytes:
                     raise FetchError(413, "FETCH_BODY_TOO_LARGE", "来源响应超过抓取上限")
                 body.extend(chunk)
+                if check_pdf_prefix and len(body) >= len(PDF_SIGNATURE):
+                    if not body.startswith(PDF_SIGNATURE):
+                        raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "PDF 响应类型与文件签名不符")
+                    check_pdf_prefix = False
             if body.startswith(PDF_SIGNATURE) != is_pdf:
                 raise FetchError(415, "FETCH_CONTENT_UNSUPPORTED", "PDF 响应类型与文件签名不符")
             return _Response(

@@ -11,12 +11,20 @@ from multisearch.settings import Settings
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_default_policy_file_preserves_current_routing_and_image_requests():
+def test_default_policy_file_bounds_search_without_changing_image_filters():
     policy = load_deployment_policy(str(ROOT / "config.example.yaml"))
     request = SearchRequest(query="example", modalities=["image"])
-    assert policy.baseline() == DEFAULT_ROUTING
-    assert policy.provider("ddgs") == DeploymentPolicy().provider("ddgs")
+    assert policy.baseline().version == DEFAULT_ROUTING.version
+    assert policy.routing.budgets.quick.max_results == 6
+    assert policy.routing.budgets.standard.max_results == 10
+    assert policy.provider("ddgs").requests_per_minute == 30
+    assert policy.provider("searxng").requests_per_minute == 30
     assert policy.provider("wikipedia").requests_per_minute == 10
+    assert policy.provider("datacite").requests_per_minute == 10
+    assert DeploymentPolicy().provider("datacite").requests_per_minute == 10
+    assert policy.provider("nasa-earthdata").requests_per_minute == 10
+    assert policy.provider("uk-aaib").requests_per_minute == 10
+    assert policy.provider("france-open-data").requests_per_minute == 10
     assert (
         DeploymentPolicy.model_validate({"providers": {"wikipedia": {"priority": 2}}})
         .provider("wikipedia")
